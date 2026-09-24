@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
