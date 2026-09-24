@@ -1,4 +1,4 @@
-//! Small platform integrations: the Dock icon, dark mode, launching at login.
+//! Small platform integrations: the Dock icon, launching at login, revealing files.
 
 use anyhow::{Context, Result};
 
@@ -32,32 +32,6 @@ pub fn show_in_dock(visible: bool) {
     let _ = visible;
 }
 
-/// Whether the system is in dark mode.
-pub fn dark_mode() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("defaults")
-            .args(["read", "-g", "AppleInterfaceStyle"])
-            .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "Dark")
-    }
-    #[cfg(windows)]
-    {
-        // AppsUseLightTheme = 0 means dark.
-        std::process::Command::new("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-                "/v",
-                "AppsUseLightTheme",
-            ])
-            .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("0x0"))
-    }
-    #[cfg(not(any(target_os = "macos", windows)))]
-    false
-}
-
 fn launcher() -> Result<auto_launch::AutoLaunch> {
     let exe = std::env::current_exe().context("finding this program")?;
     let exe = exe.to_str().context("program path isn't valid UTF-8")?;
@@ -85,6 +59,10 @@ pub fn set_autostart(on: bool) -> Result<()> {
 }
 
 /// Shows files in Finder or Explorer.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "once per drop, and Explorer is a GUI program so no console flashes"
+)]
 pub fn reveal(paths: &[std::path::PathBuf]) {
     let Some(first) = paths.first() else { return };
     #[cfg(target_os = "macos")]
