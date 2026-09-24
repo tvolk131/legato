@@ -143,6 +143,20 @@ pub(crate) fn start(
     rx
 }
 
+/// Starts dialing a newly paired peer if sessions are running and it's our turn to dial.
+pub(crate) fn add_peer(shared: &Arc<Shared>, endpoint: &Endpoint, peer: EndpointId) {
+    let mut hub = shared.sessions.lock().unwrap();
+    if let Some(hub) = hub.as_mut()
+        && should_dial(endpoint.id(), peer)
+    {
+        hub.dialers.push(tokio::spawn(dial_loop(
+            shared.clone(),
+            endpoint.clone(),
+            peer,
+        )));
+    }
+}
+
 /// The machine with the smaller id dials.
 fn should_dial(own: EndpointId, peer: EndpointId) -> bool {
     own.as_bytes() < peer.as_bytes()

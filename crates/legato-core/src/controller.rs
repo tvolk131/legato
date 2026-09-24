@@ -191,6 +191,11 @@ impl Controller {
         }
     }
 
+    pub fn set_config(&mut self, config: ControllerConfig) {
+        self.config = config;
+        self.push = None;
+    }
+
     pub fn set_remap(&mut self, peer: MachineId, remap: KeyRemap) {
         self.remaps.insert(peer, remap);
     }

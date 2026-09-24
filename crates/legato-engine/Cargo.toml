@@ -1,6 +1,6 @@
 [package]
-name = "legato-cli"
-description = "The legato command: pair machines and share one keyboard and mouse"
+name = "legato-engine"
+description = "Legato's engine: sharing and receiving input with paired machines, shared by the CLI and the app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,21 +8,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "legato"
-path = "src/main.rs"
-
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
 legato-core.workspace = true
-legato-engine.workspace = true
 legato-net.workspace = true
 legato-proto.workspace = true
-n0-future.workspace = true
-tokio = { workspace = true, features = ["signal", "io-std"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 legato-macos.workspace = true
@@ -32,9 +27,3 @@ legato-windows.workspace = true
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["process"] }
-
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-legato-macos.workspace = true

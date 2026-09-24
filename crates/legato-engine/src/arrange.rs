@@ -1,7 +1,7 @@
 //! Building the shared layout from connected peers and `legato.toml`.
 
 use legato_core::{Layout, MachineId};
-use legato_proto::Screens;
+use legato_proto::{Point, Screens};
 
 use crate::config::Config;
 
@@ -36,15 +36,20 @@ pub fn build(
             ));
             continue;
         };
-        let placed = neighbor.display >= 1
-            && layout.place_next_to_local(
-                peer.machine,
-                peer.screens.clone(),
-                neighbor.display - 1,
-                neighbor.side,
-                neighbor.align,
-                neighbor.nudge,
-            );
+        let placed = match neighbor.offset {
+            Some([x, y]) => layout.place_at(peer.machine, peer.screens.clone(), Point::new(x, y)),
+            None => {
+                neighbor.display >= 1
+                    && layout.place_next_to_local(
+                        peer.machine,
+                        peer.screens.clone(),
+                        neighbor.display - 1,
+                        neighbor.side,
+                        neighbor.align,
+                        neighbor.nudge,
+                    )
+            }
+        };
         if !placed {
             problems.push(format!(
                 "\"{}\" is set to sit next to display {}, but this machine has {} display(s). \
@@ -61,7 +66,7 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use legato_core::{Align, Side};
-    use legato_proto::{Display, Point, Rect};
+    use legato_proto::{Display, Rect};
 
     use super::*;
     use crate::config::Neighbor;
@@ -98,6 +103,7 @@ mod tests {
                 display: 2,
                 align: Align::Center,
                 nudge: 0.0,
+                offset: None,
             }],
             ..Default::default()
         };
@@ -140,6 +146,7 @@ mod tests {
                 display: 3,
                 align: Align::Center,
                 nudge: 0.0,
+                offset: None,
             }],
             ..Default::default()
         };

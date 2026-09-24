@@ -203,6 +203,22 @@ impl Layout {
         true
     }
 
+    /// Places `id` so that the bounding box of its displays has its top-left corner at
+    /// `top_left` (desk units). Returns `false` if the machine has no displays.
+    pub fn place_at(&mut self, id: MachineId, screens: Screens, top_left: Point) -> bool {
+        let unplaced = Machine {
+            id,
+            screens,
+            offset: Point::default(),
+        };
+        let Some(bounds) = unplaced.desk_bounds() else {
+            return false;
+        };
+        let offset = Point::new(top_left.x - bounds.x, top_left.y - bounds.y);
+        self.set_machine(id, unplaced.screens, offset);
+        true
+    }
+
     /// The machine and desk rectangle of the display containing `desk`, if any.
     pub fn display_at(&self, desk: Point) -> Option<(MachineId, Rect)> {
         self.machines
@@ -303,6 +319,16 @@ mod tests {
         );
         // Beneath the outer monitors there is nothing.
         assert!(layout.display_at(Point::new(-100.0, 1500.0)).is_none());
+    }
+
+    #[test]
+    fn place_at_puts_the_bounding_box_there() {
+        let mut layout = Layout::new(windows_triple_4k());
+        assert!(layout.place_at(MAC, macbook_16(), Point::new(100.0, 1440.0)));
+        assert_eq!(
+            layout.machine(MAC).unwrap().desk_bounds().unwrap(),
+            Rect::new(100.0, 1440.0, 1728.0, 1117.0)
+        );
     }
 
     #[test]

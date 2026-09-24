@@ -1698,14 +1698,13 @@ dependencies = [
  "anyhow",
  "clap",
  "legato-core",
+ "legato-engine",
  "legato-macos",
  "legato-net",
  "legato-proto",
  "legato-windows",
  "n0-future",
- "serde",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1719,6 +1718,23 @@ dependencies = [
  "legato-proto",
  "proptest",
  "serde",
+]
+
+[[package]]
+name = "legato-engine"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "legato-core",
+ "legato-macos",
+ "legato-net",
+ "legato-proto",
+ "legato-windows",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

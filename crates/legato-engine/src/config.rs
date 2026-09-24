@@ -35,6 +35,11 @@ pub struct Neighbor {
     /// Shift along the shared edge, in desk units (roughly the OS's scaled pixels).
     #[serde(default)]
     pub nudge: f64,
+    /// Exact position of the peer's top-left corner in desk units, relative to this
+    /// machine's desktop origin. Set by the arrangement editor; overrides `side`,
+    /// `display`, `align` and `nudge`, which then only describe it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -126,6 +131,7 @@ mod tests {
                 display: 2,
                 align: Align::Center,
                 nudge: 0.0,
+                offset: None,
             }]
         );
         assert_eq!(config.switching.push_distance, 20.0);
@@ -144,6 +150,7 @@ mod tests {
             display: 1,
             align: Align::Start,
             nudge: -12.5,
+            offset: Some([416.0, 1440.0]),
         });
         let text = toml::to_string_pretty(&config).unwrap();
         assert_eq!(toml::from_str::<Config>(&text).unwrap(), config);

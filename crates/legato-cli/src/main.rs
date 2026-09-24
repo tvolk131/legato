@@ -3,20 +3,14 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use legato_core::{Align, Side};
+use legato_engine::{Engine, Status};
 use legato_net::{Net, NetConfig, PairedPeer};
-use legato_proto::{Os, Screens};
+use tokio::sync::broadcast::error::RecvError;
 
-#[cfg_attr(not(windows), allow(dead_code))]
-mod arrange;
 mod commands;
-mod config;
-#[cfg(target_os = "macos")]
-mod receive;
-#[cfg(windows)]
-mod share;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -176,27 +170,6 @@ pub(crate) async fn start_net(home: &Option<PathBuf>) -> Result<Net> {
     Net::start(config).await
 }
 
-/// This machine's displays.
-pub(crate) fn local_screens() -> Screens {
-    #[cfg(target_os = "macos")]
-    return legato_macos::screens();
-    #[cfg(windows)]
-    return legato_windows::screens();
-    #[cfg(not(any(target_os = "macos", windows)))]
-    Screens {
-        displays: vec![],
-        native_per_desk: 1.0,
-    }
-}
-
-pub(crate) fn this_os() -> Os {
-    if cfg!(target_os = "macos") {
-        Os::MacOs
-    } else {
-        Os::Windows
-    }
-}
-
 /// Finds a paired device by id prefix or (case-insensitive) name.
 pub(crate) fn find_paired(net: &Net, query: &str) -> Result<PairedPeer> {
     let q = query.to_lowercase();
@@ -227,49 +200,52 @@ pub(crate) fn find_paired(net: &Net, query: &str) -> Result<PairedPeer> {
 }
 
 async fn run(home: &Option<PathBuf>) -> Result<()> {
-    let net = start_net(home).await?;
-    if net.paired_peers().is_empty() {
+    let engine = Engine::start(home.clone(), VERSION).await?;
+    if engine.net().paired_peers().is_empty() {
         bail!("no paired devices yet: run `legato pair` on both devices first");
     }
-    let config = config::load(net.store().dir())?;
-    let screens = local_screens();
-    let hello = legato_proto::Hello {
-        protocol: legato_proto::PROTOCOL_VERSION,
-        app_version: VERSION.into(),
-        name: net.config().name.clone(),
-        os: this_os(),
-        screens: screens.clone(),
-    };
-    let events = net.start_sessions(hello);
+    let mut status = engine.subscribe();
+    engine.start_sharing()?;
     tracing::info!(
-        "Legato {VERSION} running as \"{}\"; waiting for paired devices. Ctrl+C to stop.",
-        net.config().name
+        "Legato {VERSION} running as \"{}\". Ctrl+C to stop.",
+        engine.net().config().name
     );
-
-    #[cfg(windows)]
-    let result = share::run(&net, &config, screens, events).await;
-    #[cfg(target_os = "macos")]
-    let result = receive::run(&net, &config, events).await;
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let result: Result<()> = {
-        let _ = (config, events);
-        Err(anyhow::anyhow!("this platform isn't supported"))
+    let name_of = |id: &legato_net::EndpointId| {
+        engine
+            .net()
+            .store()
+            .peer(id)
+            .map_or_else(|| id.fmt_short().to_string(), |p| p.name)
     };
-
-    net.shutdown().await;
-    result.context("sharing stopped")
-}
-
-/// " (direct, 1.2 ms)" or " (via relay, 60 ms: …)", for log lines.
-pub(crate) fn describe_path(session: &legato_net::Session) -> String {
-    match session.path() {
-        Some((legato_net::PathKind::Direct, rtt)) => {
-            format!(" (direct, {:.1} ms)", rtt.as_secs_f64() * 1000.0)
+    let mut failed = None;
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            event = status.recv() => match event {
+                Ok(event) => {
+                    if let Some(text) = legato_engine::describe(&event, name_of) {
+                        match &event {
+                            Status::Problem(_) => tracing::warn!("{text}"),
+                            Status::Error(e) => {
+                                tracing::error!("{text}");
+                                failed = Some(e.clone());
+                            }
+                            _ => tracing::info!("{text}"),
+                        }
+                    }
+                    if event == Status::Sharing(false) {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
+            }
         }
-        Some((legato_net::PathKind::Relay, rtt)) => format!(
-            " (via relay, {:.0} ms: expect lag until a direct path is found)",
-            rtt.as_secs_f64() * 1000.0
-        ),
-        None => String::new(),
+    }
+    engine.stop_sharing().await;
+    engine.net().clone().shutdown().await;
+    match failed {
+        Some(e) => bail!("sharing stopped: {e}"),
+        None => Ok(()),
     }
 }
