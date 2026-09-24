@@ -1,4 +1,4 @@
-//! Decodes a stream the Mac encoder made (see `mac_hardware.rs`), so the two ends are
+//! Decodes a stream the Mac encoder made (see `mac_encoder.rs`), so the two ends are
 //! known to agree.
 #![cfg(windows)]
 

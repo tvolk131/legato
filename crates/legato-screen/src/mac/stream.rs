@@ -40,7 +40,7 @@ impl Shared {
     fn encode(&self, image: &CVPixelBuffer) {
         let encoder = self.encoder.lock().unwrap();
         let keyframe = self.keyframe.swap(false, Ordering::Relaxed);
-        if let Err(e) = encoder.encode(image, self.start.elapsed(), keyframe) {
+        if let Err(e) = encoder.encode_now(image, self.start.elapsed(), keyframe) {
             tracing::debug!("{e:#}");
         }
     }
@@ -63,7 +63,15 @@ impl DisplayStream {
         config: StreamConfig,
         on_frame: impl FnMut(EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
-        let display = VirtualDisplay::create(name, config.width, config.height, config.hidpi)?;
+        let display = VirtualDisplay::create(
+            name,
+            super::Mode {
+                width: config.width,
+                height: config.height,
+                hidpi: config.hidpi,
+                refresh: config.fps as f64,
+            },
+        )?;
         let mut on_frame = on_frame;
         let encoder = Encoder::new(
             EncoderConfig {
