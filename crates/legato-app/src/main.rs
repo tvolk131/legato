@@ -580,6 +580,10 @@ impl App {
     }
 
     fn status(&mut self, status: Status) -> Task<Message> {
+        // The Windows app has no console: the log file is where connection trouble shows.
+        if let Some(text) = legato_engine::describe(&status, |id| self.model.name_of(id)) {
+            tracing::info!("{text}");
+        }
         match status {
             Status::Sharing(on) => {
                 self.model.sharing = on;

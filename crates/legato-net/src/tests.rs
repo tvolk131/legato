@@ -324,3 +324,129 @@ async fn video_frames_arrive_in_order() {
     assert_eq!(video.next().await.unwrap(), None, "the stream ends cleanly");
     sender.await.unwrap();
 }
+
+async fn internet_node(dir: &std::path::Path, name: &str, os: Os) -> Net {
+    let net = Net::start(NetConfig {
+        store_dir: Some(dir.to_path_buf()),
+        name: name.into(),
+        os,
+        app_version: "test".into(),
+        relays: true,
+        mdns: false,
+    })
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(20), net.endpoint().online())
+        .await
+        .expect("reached a relay");
+    net
+}
+
+/// Paired machines on different networks: after a restart neither knows where the other
+/// is, so they must find each other through n0's DNS and connect through a relay.
+#[tokio::test]
+#[ignore = "uses n0's public relays and DNS"]
+async fn paired_peers_find_each_other_without_the_local_network() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    let (dir_a, dir_b) = (temp_dir("anywhere-a"), temp_dir("anywhere-b"));
+    {
+        let a = internet_node(&dir_a, "a", Os::Windows).await;
+        let b = internet_node(&dir_b, "b", Os::MacOs).await;
+        pair(&a, &b, true, true).await;
+        a.clone().shutdown().await;
+        b.clone().shutdown().await;
+    }
+    let a = internet_node(&dir_a, "a", Os::Windows).await;
+    let b = internet_node(&dir_b, "b", Os::MacOs).await;
+    let started = std::time::Instant::now();
+    let mut a_events = a.start_sessions(hello(&a));
+    let mut b_events = b.start_sessions(hello(&b));
+    let wait = |events: &'static str| {
+        move |r: Result<Option<SessionEvent>, _>| match r {
+            Ok(Some(SessionEvent::Connected(s))) => s,
+            other => panic!("{events}: {other:?}"),
+        }
+    };
+    let a_session = wait("a")(timeout(Duration::from_secs(40), a_events.recv()).await);
+    let _b_session = wait("b")(timeout(Duration::from_secs(40), b_events.recv()).await);
+    eprintln!(
+        "connected after {:?} via {:?}",
+        started.elapsed(),
+        a_session.path()
+    );
+}
+
+/// One machine drops off and comes back at a new address (like switching Wi-Fi to a
+/// hotspot) while the other keeps running. They must find each other again, whichever of
+/// them is the one that dials.
+#[tokio::test]
+#[ignore = "uses n0's public relays and DNS"]
+async fn a_peer_that_moves_networks_is_found_again() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    for move_the_dialer in [true, false] {
+        let (dir_a, dir_b) = (temp_dir("move-a"), temp_dir("move-b"));
+        let (a_id, b_id) = {
+            let a = internet_node(&dir_a, "a", Os::Windows).await;
+            let b = internet_node(&dir_b, "b", Os::MacOs).await;
+            pair(&a, &b, true, true).await;
+            let ids = (a.id(), b.id());
+            a.clone().shutdown().await;
+            b.clone().shutdown().await;
+            ids
+        };
+        let a_dials = a_id.as_bytes() < b_id.as_bytes();
+        let (stay_dir, moving_dir) = if a_dials == move_the_dialer {
+            (&dir_b, &dir_a)
+        } else {
+            (&dir_a, &dir_b)
+        };
+        let role = if move_the_dialer {
+            "dialer"
+        } else {
+            "listener"
+        };
+        let connected = |r: Result<Option<SessionEvent>, _>, what: &str| match r {
+            Ok(Some(SessionEvent::Connected(s))) => s,
+            other => panic!("moving the {role}: {what}: {other:?}"),
+        };
+
+        let stay = internet_node(stay_dir, "stay", Os::Windows).await;
+        let mut stay_events = stay.start_sessions(hello(&stay));
+        let before = internet_node(moving_dir, "moving", Os::MacOs).await;
+        let mut before_events = before.start_sessions(hello(&before));
+        connected(
+            timeout(Duration::from_secs(40), before_events.recv()).await,
+            "first connect",
+        );
+        connected(
+            timeout(Duration::from_secs(40), stay_events.recv()).await,
+            "first connect",
+        );
+
+        before.clone().shutdown().await;
+        match timeout(Duration::from_secs(20), stay_events.recv()).await {
+            Ok(Some(SessionEvent::Disconnected { .. })) => {}
+            other => panic!("moving the {role}: expected a disconnect, got {other:?}"),
+        }
+        let started = std::time::Instant::now();
+        let after = internet_node(moving_dir, "moving", Os::MacOs).await;
+        let _after_events = after.start_sessions(hello(&after));
+        let s = connected(
+            timeout(Duration::from_secs(90), stay_events.recv()).await,
+            "reconnect",
+        );
+        eprintln!(
+            "moving the {role}: reconnected after {:?} via {:?}",
+            started.elapsed(),
+            s.path()
+        );
+        stay.shutdown().await;
+        after.shutdown().await;
+    }
+}

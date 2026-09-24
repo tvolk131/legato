@@ -121,6 +121,14 @@ Setup notes:
 
 Limits: runners are single-display VMs with no real input devices, and their permission state (TCC) differs from users' machines. This is a regression net, not proof the app feels right.
 
+### Connecting from anywhere (needs the internet, ignored by default)
+
+`cargo test -p legato-net -- --ignored` runs two tests with mDNS off, using n0's public relays and DNS:
+- **Without the local network:** two paired devices restart knowing nothing about each other's addresses. They must find each other through n0's DNS and connect, first through a relay. Takes about 0.3 s.
+- **Moving networks:** one device drops off and comes back at a new address while the other keeps running, once as the side that dials and once as the side that waits. Each reconnects in about 3.5 s.
+
+Neither can reproduce a real Wi-Fi switch, which leaves the old connection silently dead rather than closed. For that, look in `legato-app.log`: it records every connect and disconnect with its path and reason, and whether the machine is reachable through a relay.
+
 ### UI snapshots
 
 The app's UI tests drive the real views headlessly with `iced_test` and compare each screen, pixel for pixel, with a golden image in `crates/legato-app/src/snapshots/`. These screens are covered: devices, pairing dialog, arrangement, settings, and the display viewer while it waits.
