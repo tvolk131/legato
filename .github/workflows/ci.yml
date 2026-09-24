@@ -41,6 +41,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --workspace --all-targets
       - run: cargo test --locked --workspace
+      # A UI snapshot mismatch leaves the new rendering and a diff here.
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: ui-snapshots-${{ matrix.os }}
+          path: target/snapshots
+          if-no-files-found: ignore
       # Hosted runners have an interactive desktop, so the real input stack can be tested.
       # These move the runner's cursor, which is why they're opt-in locally.
       - name: hardware tests (Windows)

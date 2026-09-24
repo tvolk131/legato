@@ -1,0 +1,3 @@
+# Golden images and video fixtures are compared byte for byte: never touch line endings.
+*.png binary
+*.frames binary

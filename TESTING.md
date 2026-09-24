@@ -121,6 +121,15 @@ Setup notes:
 
 Limits: runners are single-display VMs with no real input devices, and their permission state (TCC) differs from users' machines. This is a regression net, not proof the app feels right.
 
+### UI snapshots
+
+The app's UI tests drive the real views headlessly with `iced_test` and compare each screen, pixel for pixel, with a golden image in `crates/legato-app/src/snapshots/`. These screens are covered: devices, pairing dialog, arrangement, settings, and the display viewer while it waits.
+- They're rendered with tiny-skia on the CPU. `.cargo/config.toml` sets `ICED_TEST_BACKEND=tiny-skia` so local runs match CI.
+- Device ids in the sample data are fixed, so nothing on screen changes between runs.
+- On a mismatch, the test writes the new rendering and a diff (changed pixels in red) to `target/snapshots/`. CI uploads them as an artifact.
+- After a deliberate UI change, run `LEGATO_UPDATE_SNAPSHOTS=1 cargo test -p legato-app` and review the new images in the pull request.
+- The viewer's video picture is drawn by a GPU shader, which tiny-skia can't draw, so it isn't in a golden.
+
 ### Virtual monitor mode
 
 The Mac encodes and Windows decodes, so the two ends are tested against each other through a committed fixture:
