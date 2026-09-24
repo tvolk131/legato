@@ -450,3 +450,105 @@ async fn a_peer_that_moves_networks_is_found_again() {
         after.shutdown().await;
     }
 }
+
+/// Not a test: a paired device in its own process, for tests that need to freeze one.
+/// Runs only when `LEGATO_HELPER_DIR` is set.
+#[tokio::test]
+#[ignore = "helper process for a_peer_that_vanishes_silently_is_found_again"]
+async fn helper_node() {
+    let Some(dir) = std::env::var_os("LEGATO_HELPER_DIR") else {
+        return;
+    };
+    let net = internet_node(std::path::Path::new(&dir), "moving", Os::MacOs).await;
+    let mut events = net.start_sessions(hello(&net));
+    while let Some(event) = events.recv().await {
+        if let SessionEvent::Connected(_) = event {
+            println!("helper connected");
+        }
+    }
+}
+
+/// Like switching the Mac from Wi-Fi to a hotspot: the old connection isn't closed, it
+/// just stops answering (a frozen process), and the device reappears elsewhere (a new
+/// process with the same identity). The machine that stayed must find it again.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "uses n0's public relays and DNS, and runs helper processes"]
+async fn a_peer_that_vanishes_silently_is_found_again() {
+    use std::process::{Child, Command, Stdio};
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    let spawn = |dir: &std::path::Path| -> Child {
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "tests::helper_node", "--nocapture"])
+            .env("LEGATO_HELPER_DIR", dir)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let signal = |child: &Child, sig: &str| {
+        Command::new("kill")
+            .args([sig, &child.id().to_string()])
+            .status()
+            .unwrap();
+    };
+    for move_the_dialer in [false, true] {
+        let (dir_a, dir_b) = (temp_dir("vanish-a"), temp_dir("vanish-b"));
+        let (a_id, b_id) = {
+            let a = internet_node(&dir_a, "a", Os::Windows).await;
+            let b = internet_node(&dir_b, "b", Os::MacOs).await;
+            pair(&a, &b, true, true).await;
+            let ids = (a.id(), b.id());
+            a.clone().shutdown().await;
+            b.clone().shutdown().await;
+            ids
+        };
+        let a_dials = a_id.as_bytes() < b_id.as_bytes();
+        let (stay_dir, moving_dir) = if a_dials == move_the_dialer {
+            (&dir_b, &dir_a)
+        } else {
+            (&dir_a, &dir_b)
+        };
+        let role = if move_the_dialer {
+            "dialer"
+        } else {
+            "listener"
+        };
+
+        let stay = internet_node(stay_dir, "stay", Os::Windows).await;
+        let mut stay_events = stay.start_sessions(hello(&stay));
+        let mut before = spawn(moving_dir);
+        match timeout(Duration::from_secs(60), stay_events.recv()).await {
+            Ok(Some(SessionEvent::Connected(_))) => {}
+            other => panic!("moving the {role}: first connect: {other:?}"),
+        }
+        // It drops off the network without a word.
+        signal(&before, "-STOP");
+        match timeout(Duration::from_secs(30), stay_events.recv()).await {
+            Ok(Some(SessionEvent::Disconnected { .. })) => {}
+            other => panic!("moving the {role}: expected a disconnect, got {other:?}"),
+        }
+        // And turns up somewhere else.
+        let started = std::time::Instant::now();
+        let mut after = spawn(moving_dir);
+        let result = timeout(Duration::from_secs(90), stay_events.recv()).await;
+        for child in [&mut before, &mut after] {
+            signal(child, "-KILL");
+            let _ = child.wait();
+        }
+        match result {
+            Ok(Some(SessionEvent::Connected(s))) => eprintln!(
+                "moving the {role}: reconnected after {:?} via {:?}",
+                started.elapsed(),
+                s.path()
+            ),
+            other => panic!(
+                "moving the {role}: no reconnect after {:?}: {other:?}",
+                started.elapsed()
+            ),
+        }
+        stay.shutdown().await;
+    }
+}
