@@ -44,7 +44,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --release -p legato-cli --target ${{ matrix.target }}
+      - name: build
+        shell: bash
+        run: |
+          cargo build --locked --release -p legato-cli --target ${{ matrix.target }}
+          # The app arrived after the first alpha; build it when the tag has it.
+          if [ -d crates/legato-app ]; then
+            cargo build --locked --release -p legato-app --target ${{ matrix.target }}
+          fi
       - name: package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -52,19 +59,33 @@ jobs:
           $dir = "legato-$env:TAG-${{ matrix.name }}"
           New-Item -ItemType Directory $dir | Out-Null
           Copy-Item target/${{ matrix.target }}/release/legato.exe $dir/
+          if (Test-Path target/${{ matrix.target }}/release/legato-app.exe) {
+            Copy-Item target/${{ matrix.target }}/release/legato-app.exe $dir/Legato.exe
+          }
           Copy-Item README.md, LICENSE $dir/
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
       - name: package (macOS)
         if: runner.os == 'macOS'
         run: |
           dir="legato-$TAG-${{ matrix.name }}"
+          out="target/${{ matrix.target }}/release"
           mkdir "$dir"
-          cp target/${{ matrix.target }}/release/legato README.md LICENSE "$dir/"
+          cp "$out/legato" README.md LICENSE "$dir/"
+          if [ -f "$out/legato-app" ]; then
+            app="$dir/Legato.app/Contents"
+            mkdir -p "$app/MacOS"
+            cp "$out/legato-app" "$app/MacOS/Legato"
+            sed "s/__VERSION__/${TAG#v}/" packaging/macos/Info.plist > "$app/Info.plist"
+            # Ad-hoc signature until there's a Developer ID.
+            codesign --force --deep --sign - "$dir/Legato.app"
+          fi
           tar czf "$dir.tar.gz" "$dir"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
-          path: legato-*.*
+          path: |
+            legato-*.zip
+            legato-*.tar.gz
           if-no-files-found: error
 
   publish:
@@ -84,8 +105,9 @@ jobs:
         run: |
           notes="docs/releases/$TAG.md"
           [ -f "$notes" ] || { echo "Build of $TAG." > /tmp/notes.md; notes=/tmp/notes.md; }
+          assets=(dist/*.zip dist/*.tar.gz)
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
+            gh release upload "$TAG" "${assets[@]}" --clobber
           else
-            gh release create "$TAG" dist/* --prerelease --title "Legato $TAG" --notes-file "$notes"
+            gh release create "$TAG" "${assets[@]}" --prerelease --title "Legato $TAG" --notes-file "$notes"
           fi
