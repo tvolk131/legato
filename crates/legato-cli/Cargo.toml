@@ -33,3 +33,9 @@ legato-windows.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["process"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+legato-macos.workspace = true
