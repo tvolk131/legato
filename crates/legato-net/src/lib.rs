@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -102,12 +102,17 @@ pub(crate) struct Shared {
     /// Only one pairing at a time.
     pub(crate) pairing_busy: AtomicBool,
     pub(crate) sessions: Mutex<Option<session::Hub>>,
+    pub(crate) endpoint: OnceLock<Endpoint>,
 }
 
 impl Shared {
-    pub(crate) fn add_paired(&self, peer: &PeerInfo) -> Result<PairedPeer> {
+    pub(crate) fn add_paired(self: &Arc<Self>, peer: &PeerInfo) -> Result<PairedPeer> {
         let paired = self.store.add_peer(peer.id, peer.name.clone(), peer.os)?;
         self.allowed.write().unwrap().insert(peer.id);
+        // If sessions are running, include the new peer right away.
+        if let Some(endpoint) = self.endpoint.get() {
+            session::add_peer(self, endpoint, peer.id);
+        }
         Ok(paired)
     }
 }
@@ -159,6 +164,7 @@ impl Net {
             pair_listener: Mutex::new(None),
             pairing_busy: AtomicBool::new(false),
             sessions: Mutex::new(None),
+            endpoint: OnceLock::new(),
         });
 
         let transport = QuicTransportConfig::builder()
@@ -192,6 +198,7 @@ impl Net {
         builder = builder.address_lookup(memory.clone());
 
         let endpoint = builder.bind().await.context("binding network endpoint")?;
+        let _ = shared.endpoint.set(endpoint.clone());
         endpoint.set_user_data_for_address_lookup(advert(&config).parse().ok());
 
         let router = Router::builder(endpoint.clone())
@@ -294,6 +301,13 @@ impl Net {
         hello: legato_proto::Hello,
     ) -> mpsc::UnboundedReceiver<SessionEvent> {
         session::start(self.shared.clone(), self.endpoint.clone(), hello)
+    }
+
+    /// Stops all sessions (reconnecting stops too). Pairing keeps working.
+    pub fn stop_sessions(&self) {
+        if let Some(hub) = self.shared.sessions.lock().unwrap().take() {
+            hub.close_all();
+        }
     }
 
     /// Updates the screens announced to peers, and tells connected peers.

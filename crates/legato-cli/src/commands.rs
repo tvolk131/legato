@@ -11,8 +11,10 @@ use legato_proto::{Os, format_pairing_code};
 use n0_future::StreamExt;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};
 
-use crate::config::{self, Neighbor};
-use crate::{find_paired, local_screens, start_net};
+use legato_engine::config::{self, Neighbor};
+use legato_engine::local_screens;
+
+use crate::{find_paired, start_net};
 
 fn os_name(os: Option<Os>) -> &'static str {
     match os {
@@ -216,6 +218,7 @@ pub async fn layout(
         display,
         align,
         nudge,
+        offset: None,
     });
     config::save(&dir, &config)?;
     let side = match side {
@@ -239,7 +242,7 @@ pub async fn doctor(home: &Option<PathBuf>) -> Result<()> {
     println!(
         "Legato {} on {}",
         crate::VERSION,
-        os_name(Some(crate::this_os()))
+        os_name(Some(legato_engine::this_os()))
     );
     println!("Device name: \"{}\"", net.config().name);
     println!("Device id:   {}", net.id());

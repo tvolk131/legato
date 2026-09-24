@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::sync::mpsc;
 use std::time::Instant;
 
-use legato_core::controller::{Action, Controller, Event, Verdict};
+use legato_core::controller::{Action, Controller, ControllerConfig, Event, Verdict};
 use legato_core::keymap;
 use legato_core::{KeyRemap, Layout, MachineId};
 use legato_proto::{Button, Point, Rect, Scroll};
@@ -45,6 +45,7 @@ pub enum Command {
     Event(Event),
     SetLayout(Layout),
     SetRemap(MachineId, KeyRemap),
+    SetConfig(ControllerConfig),
     Stop,
 }
 
@@ -62,8 +63,8 @@ pub struct Capture {
 }
 
 impl Capture {
-    /// Starts capturing. `sink` receives the controller's network actions (`Send` and
-    /// `Datagram`) on the capture thread; it must not block.
+    /// Starts capturing. `sink` receives every controller action on the capture thread
+    /// (`Capture` and `Release` are also carried out here); it must not block.
     pub fn start(
         controller: Controller,
         options: CaptureOptions,
@@ -145,12 +146,14 @@ impl State {
                     let pin = pin_point(&self.controller);
                     self.pin = Some(pin);
                     effects.push(Effect::Pin(pin));
+                    (self.sink)(Action::Capture);
                 }
                 Action::Release { warp } => {
                     self.pin = None;
                     let to = clamp_to_displays(&self.controller, warp);
                     self.last_pos = Some(to);
                     effects.push(Effect::Unpin(to));
+                    (self.sink)(Action::Release { warp });
                 }
                 other => (self.sink)(other),
             }
@@ -231,6 +234,10 @@ impl State {
             }
             Command::SetRemap(peer, remap) => {
                 self.controller.set_remap(peer, remap);
+                Some(vec![])
+            }
+            Command::SetConfig(config) => {
+                self.controller.set_config(config);
                 Some(vec![])
             }
             Command::Stop => None,
