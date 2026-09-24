@@ -27,9 +27,48 @@ const MAX_BACKOFF: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
     Connected(Arc<Session>),
-    Control { peer: EndpointId, msg: Control },
-    Datagram { peer: EndpointId, msg: Datagram },
-    Disconnected { peer: EndpointId, reason: String },
+    Control {
+        peer: EndpointId,
+        msg: Control,
+    },
+    Datagram {
+        peer: EndpointId,
+        msg: Datagram,
+    },
+    /// A small bulk transfer (clipboard contents), read into memory.
+    Blob {
+        peer: EndpointId,
+        tag: u8,
+        data: Vec<u8>,
+    },
+    /// A file transfer. Read it with [`IncomingFile::recv`].
+    File {
+        peer: EndpointId,
+        file: Arc<IncomingFile>,
+    },
+    Disconnected {
+        peer: EndpointId,
+        reason: String,
+    },
+}
+
+/// A file arriving on its own stream.
+#[derive(Debug)]
+pub struct IncomingFile {
+    pub header: legato_proto::FileHeader,
+    recv: tokio::sync::Mutex<Option<RecvStream>>,
+}
+
+impl IncomingFile {
+    /// Streams the file's bytes into `out`. Can only be called once.
+    pub async fn recv(&self, out: &mut (impl tokio::io::AsyncWrite + Unpin)) -> Result<u64> {
+        let mut recv = self.recv.lock().await.take().context("already received")?;
+        let copied = tokio::io::copy(&mut recv, out).await?;
+        if copied != self.header.size {
+            bail!("expected {} bytes, got {copied}", self.header.size);
+        }
+        Ok(copied)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +115,48 @@ impl Session {
 
     pub fn close(&self) {
         self.conn.close(0u32.into(), b"closed");
+    }
+
+    /// Sends a blob on its own stream, below input in priority, without waiting.
+    pub fn send_blob(&self, tag: u8, data: Vec<u8>) {
+        let conn = self.conn.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let mut send = conn.open_uni().await?;
+                send.set_priority(-1)?;
+                send.write_all(&[tag]).await?;
+                send.write_all(&(data.len() as u64).to_le_bytes()).await?;
+                send.write_all(&data).await?;
+                send.finish()?;
+                let _ = send.stopped().await;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if let Err(e) = result {
+                tracing::debug!("sending blob failed: {e:#}");
+            }
+        });
+    }
+
+    /// Streams a file to the peer, below input in priority. Resolves once it's sent.
+    pub async fn send_file(
+        &self,
+        header: legato_proto::FileHeader,
+        data: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> Result<()> {
+        let mut send = self.conn.open_uni().await?;
+        send.set_priority(-1)?;
+        send.write_all(&[legato_proto::blob::FILE]).await?;
+        let size = header.size;
+        write_frame(&mut send, &header).await?;
+        let sent =
+            tokio::io::copy(&mut tokio::io::AsyncReadExt::take(data, size), &mut send).await?;
+        if sent != size {
+            bail!("file changed while sending ({sent} of {size} bytes)");
+        }
+        send.finish()?;
+        let _ = send.stopped().await;
+        Ok(())
     }
 }
 
@@ -268,10 +349,24 @@ async fn run(
         }
         Ok::<_, anyhow::Error>(())
     };
+    let blobs = async {
+        loop {
+            let recv = conn.accept_uni().await?;
+            let events = events.clone();
+            tokio::spawn(async move {
+                if let Err(e) = receive_blob(peer, recv, &events).await {
+                    tracing::debug!("receiving blob failed: {e:#}");
+                }
+            });
+        }
+        #[allow(unreachable_code)]
+        Ok::<_, anyhow::Error>(())
+    };
     let result = tokio::select! {
         r = reader => r,
         r = datagrams => r,
         r = writer => r,
+        r = blobs => r,
     };
     conn.close(0u32.into(), b"bye");
 
@@ -298,6 +393,38 @@ async fn run(
         let _ = events.send(SessionEvent::Disconnected { peer, reason });
     }
     result
+}
+
+async fn receive_blob(
+    peer: EndpointId,
+    mut recv: RecvStream,
+    events: &mpsc::UnboundedSender<SessionEvent>,
+) -> Result<()> {
+    let mut tag = [0u8; 1];
+    recv.read_exact(&mut tag).await?;
+    if tag[0] == legato_proto::blob::FILE {
+        let header: legato_proto::FileHeader = expect_frame(&mut recv).await?;
+        let file = Arc::new(IncomingFile {
+            header,
+            recv: tokio::sync::Mutex::new(Some(recv)),
+        });
+        let _ = events.send(SessionEvent::File { peer, file });
+        return Ok(());
+    }
+    let mut len = [0u8; 8];
+    recv.read_exact(&mut len).await?;
+    let len = u64::from_le_bytes(len);
+    if len > legato_proto::MAX_BLOB_LEN {
+        recv.stop(1u32.into())?;
+        bail!("blob of {len} bytes is too large");
+    }
+    let data = recv.read_to_end(len as usize).await?;
+    let _ = events.send(SessionEvent::Blob {
+        peer,
+        tag: tag[0],
+        data,
+    });
+    Ok(())
 }
 
 /// Accepts sessions from paired peers (the allow-list hook has already checked).

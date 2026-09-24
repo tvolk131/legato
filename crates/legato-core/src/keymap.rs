@@ -125,6 +125,15 @@ impl KeyRemap {
         remap
     }
 
+    /// Default for a Mac keyboard driving Windows: swaps Command and Control, so Cmd+C
+    /// copies and Cmd+V pastes like on the Mac.
+    pub fn mac_keyboard_on_windows() -> Self {
+        let mut remap = Self::identity();
+        remap.swap(usage::LEFT_GUI, usage::LEFT_CTRL);
+        remap.swap(usage::RIGHT_GUI, usage::RIGHT_CTRL);
+        remap
+    }
+
     pub fn set(&mut self, from: u16, to: u16) {
         if from == to {
             self.map.remove(&from);
@@ -209,6 +218,14 @@ mod tests {
         assert_eq!(remap.apply(usage::RIGHT_ALT), usage::RIGHT_GUI);
         assert_eq!(remap.apply(usage::LEFT_CTRL), usage::LEFT_CTRL);
         assert_eq!(remap.apply(A), A);
+    }
+
+    #[test]
+    fn mac_keyboard_on_windows_swaps_command_and_control() {
+        let remap = KeyRemap::mac_keyboard_on_windows();
+        assert_eq!(remap.apply(usage::LEFT_GUI), usage::LEFT_CTRL);
+        assert_eq!(remap.apply(usage::LEFT_CTRL), usage::LEFT_GUI);
+        assert_eq!(remap.apply(usage::LEFT_ALT), usage::LEFT_ALT);
     }
 
     #[test]

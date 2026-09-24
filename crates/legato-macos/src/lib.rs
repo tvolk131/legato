@@ -5,11 +5,13 @@
 #![cfg(target_os = "macos")]
 
 mod activity;
+mod capture;
 mod displays;
 mod inject;
 mod permissions;
 
 pub use activity::ActivityMonitor;
+pub use capture::Capture;
 pub use displays::{cursor_position, screens};
 pub use inject::Injector;
 pub use permissions::{Permissions, request_accessibility};
@@ -35,4 +37,9 @@ pub fn receiver_config() -> legato_core::ReceiverConfig {
         double_click_interval: secs(NSEvent::doubleClickInterval(), 500),
         ..Default::default()
     }
+}
+
+/// Changes whenever anything is copied.
+pub fn clipboard_change_count() -> u64 {
+    objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() as u64
 }

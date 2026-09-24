@@ -58,9 +58,15 @@ jobs:
         run: |
           $dir = "legato-$env:TAG-${{ matrix.name }}"
           New-Item -ItemType Directory $dir | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/legato.exe $dir/
-          if (Test-Path target/${{ matrix.target }}/release/legato-app.exe) {
-            Copy-Item target/${{ matrix.target }}/release/legato-app.exe $dir/Legato.exe
+          $out = "target/${{ matrix.target }}/release"
+          if (Test-Path $out/legato-app.exe) {
+            # Windows file names ignore case, so the app (Legato.exe) and the CLI
+            # (legato.exe) can't share a folder.
+            Copy-Item $out/legato-app.exe $dir/Legato.exe
+            New-Item -ItemType Directory $dir/cli | Out-Null
+            Copy-Item $out/legato.exe $dir/cli/
+          } else {
+            Copy-Item $out/legato.exe $dir/
           }
           Copy-Item README.md, LICENSE $dir/
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"

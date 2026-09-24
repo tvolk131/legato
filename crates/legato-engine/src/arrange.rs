@@ -12,6 +12,9 @@ pub struct ConnectedPeer<'a> {
     pub id: String,
     pub name: &'a str,
     pub screens: &'a Screens,
+    /// Where the peer has placed this machine (this machine's desk origin in its desk
+    /// space), used when there's no arrangement for it here.
+    pub placed_us_at: Option<Point>,
 }
 
 /// Places every connected peer that has a configured position. Returns the layout and a
@@ -24,11 +27,18 @@ pub fn build(
     let mut layout = Layout::new(local.clone());
     let mut problems = Vec::new();
     for peer in peers {
-        let Some(neighbor) = config
+        let neighbor = config
             .neighbors
             .iter()
-            .find(|n| !n.peer.is_empty() && peer.id.starts_with(&n.peer))
-        else {
+            .find(|n| !n.peer.is_empty() && peer.id.starts_with(&n.peer));
+        if neighbor.is_none()
+            && let Some(o) = peer.placed_us_at
+        {
+            // Mirror the peer's arrangement: it put us at `o`, so it sits at `-o`.
+            layout.set_machine(peer.machine, peer.screens.clone(), Point::new(-o.x, -o.y));
+            continue;
+        }
+        let Some(neighbor) = neighbor else {
             problems.push(format!(
                 "\"{}\" has no position yet, so the cursor can't reach it. Run e.g. \
                  `legato layout \"{}\" --side below --display 2`.",
@@ -66,7 +76,7 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use legato_core::{Align, Side};
-    use legato_proto::{Display, Rect};
+    use legato_proto::{Display, Point, Rect};
 
     use super::*;
     use crate::config::Neighbor;
@@ -113,12 +123,14 @@ mod tests {
                 id: "abcdef".into(),
                 name: "MacBook",
                 screens: &mac,
+                placed_us_at: None,
             },
             ConnectedPeer {
                 machine: MachineId(2),
                 id: "zzz".into(),
                 name: "Laptop",
                 screens: &mac,
+                placed_us_at: None,
             },
         ];
         let (layout, problems) = build(&windows, &peers, &config);
@@ -131,6 +143,37 @@ mod tests {
         assert!(layout.machine(MachineId(2)).is_none());
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("Laptop"), "{problems:?}");
+    }
+
+    #[test]
+    fn mirrors_the_peers_arrangement_when_there_is_none_here() {
+        let mac = Screens {
+            displays: vec![display(0.0, 1728.0, 1117.0, true, 1.0)],
+            native_per_desk: 1.0,
+        };
+        let windows = Screens {
+            displays: vec![
+                display(-3840.0, 3840.0, 2160.0, false, 1.5),
+                display(0.0, 3840.0, 2160.0, true, 1.5),
+                display(3840.0, 3840.0, 2160.0, false, 1.5),
+            ],
+            native_per_desk: 1.5,
+        };
+        // Windows put the Mac's origin at (416, 1440) in its desk space.
+        let peer = [ConnectedPeer {
+            machine: MachineId(1),
+            id: "win".into(),
+            name: "PC",
+            screens: &windows,
+            placed_us_at: Some(Point::new(416.0, 1440.0)),
+        }];
+        let (layout, problems) = build(&mac, &peer, &Config::default());
+        assert!(problems.is_empty(), "{problems:?}");
+        // Just above the Mac's top edge is the PC's middle monitor.
+        assert_eq!(
+            layout.display_at(Point::new(10.0, -1.0)).map(|(m, _)| m),
+            Some(MachineId(1))
+        );
     }
 
     #[test]
@@ -155,6 +198,7 @@ mod tests {
             id: "a".into(),
             name: "Peer",
             screens: &local,
+            placed_us_at: None,
         }];
         let (_, problems) = build(&local, &peer, &config);
         assert!(problems[0].contains("display 3"), "{problems:?}");

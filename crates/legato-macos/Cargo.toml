@@ -11,9 +11,9 @@ publish.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 legato-core.workspace = true
 legato-proto.workspace = true
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFRunLoop", "CFMachPort", "CFCGTypes"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFRunLoop", "CFMachPort", "CFCGTypes", "CFDate", "CFString"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventSource", "CGEventTypes", "CGDirectDisplay", "CGDisplayConfiguration", "CGRemoteOperation", "CGError", "libc"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSPasteboard"] }
 tracing.workspace = true
 
 [lints]

@@ -37,4 +37,6 @@ workspace = true
 tokio = { workspace = true, features = ["process"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
+arboard = "3.6.1"
 legato-macos.workspace = true
+postcard.workspace = true

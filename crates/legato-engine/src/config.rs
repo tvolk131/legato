@@ -18,6 +18,43 @@ pub struct Config {
     pub switching: Switching,
     pub keys: Keys,
     pub scrolling: Scrolling,
+    pub control: Control,
+    pub clipboard: Clipboard,
+}
+
+/// Which machines may drive the others. Shared between paired machines: the most recent
+/// change wins everywhere.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Control {
+    /// Unset: whichever machine's keyboard and mouse you use takes over. Set: only the
+    /// machine with this id (or id prefix) controls the others.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller: Option<String>,
+    /// When this was last changed, in seconds since the Unix epoch.
+    pub updated_at: u64,
+}
+
+impl Control {
+    /// Whether the machine with this id may drive others.
+    pub fn allows(&self, id: &str) -> bool {
+        self.controller
+            .as_deref()
+            .is_none_or(|c| !c.is_empty() && id.starts_with(c))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Clipboard {
+    /// Share copied text and images with paired machines.
+    pub enabled: bool,
+}
+
+impl Default for Clipboard {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,8 +97,9 @@ impl Default for Switching {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Remap {
-    /// Swap Alt and the Windows key when a Windows keyboard drives a Mac, so the key next
-    /// to the space bar acts as Command.
+    /// Swap Alt and the Windows key when a Windows keyboard drives a Mac (so the key next
+    /// to the space bar acts as Command), and Command and Control when a Mac keyboard
+    /// drives Windows (so Cmd+C copies).
     #[default]
     Auto,
     None,
@@ -154,6 +192,15 @@ mod tests {
         });
         let text = toml::to_string_pretty(&config).unwrap();
         assert_eq!(toml::from_str::<Config>(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn control_mode_allows_everyone_or_just_the_controller() {
+        let mut control = Control::default();
+        assert!(control.allows("abcd"));
+        control.controller = Some("ab".into());
+        assert!(control.allows("abcd"));
+        assert!(!control.allows("zzzz"));
     }
 
     #[test]

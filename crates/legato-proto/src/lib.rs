@@ -174,6 +174,70 @@ pub enum Control {
     /// Controlled → controller: physical input happened on this machine; give it its
     /// cursor back.
     Yield,
+    /// Where the sender has placed the receiver on the shared desk: the receiver's desk
+    /// origin in the sender's desk units, or `None` if not placed. The receiver mirrors it
+    /// (placing the sender at the negated offset) unless it has its own arrangement.
+    Placement {
+        offset: Option<Point>,
+    },
+    /// The sender's control-mode setting, shared so every machine agrees. The newer one
+    /// (by `updated_at`, seconds since the Unix epoch) wins.
+    ControlMode(ControlMode),
+}
+
+/// Which machines may drive the others.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlMode {
+    /// `None`: whichever machine's keyboard and mouse is being used. `Some(id)`: only the
+    /// machine with this endpoint id (as text).
+    pub controller: Option<String>,
+    pub updated_at: u64,
+}
+
+/// Tags for bulk transfers on their own unidirectional streams.
+pub mod blob {
+    /// A [`super::ClipboardContent`].
+    pub const CLIPBOARD: u8 = 1;
+    /// A file, as a [`super::FileHeader`] frame followed by its bytes.
+    pub const FILE: u8 = 2;
+}
+
+/// Largest blob accepted in memory (clipboard contents).
+pub const MAX_BLOB_LEN: u64 = 64 * 1024 * 1024;
+
+/// Clipboard contents shared between machines.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClipboardContent {
+    Text(String),
+    /// A PNG image.
+    Image {
+        png: Vec<u8>,
+    },
+}
+
+/// Describes a file sent on a [`blob::FILE`] stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileHeader {
+    /// Groups files sent together (one drop or paste).
+    pub batch: u64,
+    /// Path relative to the batch root, with `/` separators (folders keep their shape).
+    pub name: String,
+    pub size: u64,
+    /// Files in the batch, and this one's position, for progress.
+    pub count: u32,
+    pub index: u32,
+    /// What to do once the batch has arrived.
+    pub purpose: FilePurpose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FilePurpose {
+    /// Save to Downloads and tell the user.
+    Send,
+    /// Put the files on the clipboard (someone copied them).
+    Clipboard,
+    /// Dropped here after dragging across the edge: save to Downloads and reveal.
+    Drop,
 }
 
 /// Unreliable messages sent as QUIC datagrams.

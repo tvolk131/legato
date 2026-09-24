@@ -83,3 +83,17 @@ pub fn set_autostart(on: bool) -> Result<()> {
     }
     Ok(())
 }
+
+/// Shows files in Finder or Explorer.
+pub fn reveal(paths: &[std::path::PathBuf]) {
+    let Some(first) = paths.first() else { return };
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(first)
+        .spawn();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", first.display()))
+        .spawn();
+}

@@ -75,6 +75,12 @@ pub enum Message {
     Remap(bool),
     InvertWheel(bool),
     Autostart(bool),
+    ControlMode(Option<String>),
+    Clipboard(bool),
+    SendFiles(EndpointId),
+    FilesPicked(EndpointId, Vec<std::path::PathBuf>),
+    FileDropped(std::path::PathBuf),
+    FlushDrops,
     DismissNotice,
 }
 
@@ -85,6 +91,8 @@ struct App {
     tray: Option<tray::Tray>,
     attempt: Option<Attempt>,
     next_notice: u64,
+    /// Files dropped on the window, gathered into one send.
+    dropped: Vec<std::path::PathBuf>,
 }
 
 /// Hashes by identity, so subscriptions can be keyed on the engine.
@@ -117,6 +125,7 @@ impl App {
             config: engine.config(),
             local: legato_engine::local_screens(),
             known: engine.known_screens(),
+            placed_us: HashMap::new(),
             active: None,
             problems: Vec::new(),
             notice: None,
@@ -129,6 +138,7 @@ impl App {
             tray: None,
             attempt: None,
             next_notice: 0,
+            dropped: Vec::new(),
         };
         app.refresh_paired();
         app
@@ -372,6 +382,71 @@ impl App {
                 Ok(()) => self.model.autostart = Some(on),
                 Err(e) => self.notify(format!("Couldn't change login item: {e:#}")),
             },
+            Message::ControlMode(controller) => {
+                self.model.config.control.controller = controller;
+                self.model.config.control.updated_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                self.save_config();
+            }
+            Message::Clipboard(on) => {
+                self.model.config.clipboard.enabled = on;
+                self.save_config();
+            }
+            Message::SendFiles(id) => {
+                let name = self.model.name_of(&id);
+                return Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .set_title(format!("Send to \"{name}\""))
+                            .pick_files()
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|f| f.path().to_path_buf())
+                            .collect::<Vec<_>>()
+                    },
+                    move |paths| Message::FilesPicked(id, paths),
+                );
+            }
+            Message::FilesPicked(id, paths) => {
+                if !paths.is_empty()
+                    && let Err(e) = self.engine.send_files(id, paths)
+                {
+                    self.notify(format!("Couldn't send: {e:#}"));
+                }
+            }
+            Message::FileDropped(path) => {
+                self.dropped.push(path);
+                // Files dropped together arrive one event at a time; gather them first.
+                return Task::perform(
+                    on_runtime(tokio::time::sleep(std::time::Duration::from_millis(200))),
+                    |()| Message::FlushDrops,
+                );
+            }
+            Message::FlushDrops => {
+                if self.dropped.is_empty() {
+                    return Task::none();
+                }
+                let paths = std::mem::take(&mut self.dropped);
+                let target = self
+                    .model
+                    .active
+                    .filter(|id| {
+                        self.model
+                            .paired(id)
+                            .is_some_and(|p| p.connection.is_some())
+                    })
+                    .or_else(|| self.model.connected().next().map(|p| p.device.id));
+                match target {
+                    Some(id) => {
+                        if let Err(e) = self.engine.send_files(id, paths) {
+                            self.notify(format!("Couldn't send: {e:#}"));
+                        }
+                    }
+                    None => self.notify("Connect a device first to send it files."),
+                }
+            }
             Message::DismissNotice => self.model.notice = None,
         }
         Task::none()
@@ -453,6 +528,42 @@ impl App {
                 }
             }
             Status::Error(e) => self.notify(format!("Sharing stopped: {e}")),
+            Status::PeerPlacedUs { id, offset } => match offset {
+                Some(o) => {
+                    self.model.placed_us.insert(id, o);
+                }
+                None => {
+                    self.model.placed_us.remove(&id);
+                }
+            },
+            Status::FilesSending { to, count } => {
+                let name = self.model.name_of(&to);
+                self.notify(format!("Sending {count} item(s) to \"{name}\"…"));
+            }
+            Status::FilesSent { to, bytes } => {
+                let name = self.model.name_of(&to);
+                self.notify(format!(
+                    "Sent {} to \"{name}\".",
+                    legato_engine::human_bytes(bytes)
+                ));
+            }
+            Status::FilesReceived(received) => {
+                let name = self.model.name_of(&received.from);
+                match received.purpose {
+                    legato_proto::FilePurpose::Clipboard => {
+                        self.notify(format!("Files copied on \"{name}\" are ready to paste."));
+                    }
+                    _ => {
+                        self.notify(format!(
+                            "Received {} item(s) from \"{name}\" in Downloads/Legato.",
+                            received.paths.len()
+                        ));
+                        if received.purpose == legato_proto::FilePurpose::Drop {
+                            platform::reveal(&received.paths);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -468,6 +579,12 @@ impl App {
             Subscription::run_with(engine, pairing_stream),
             Subscription::run(tray::events).map(Message::Tray),
             window::close_events().map(Message::WindowClosed),
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Window(window::Event::FileDropped(path)) => {
+                    Some(Message::FileDropped(path))
+                }
+                _ => None,
+            }),
         ])
     }
 }

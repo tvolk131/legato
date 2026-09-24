@@ -21,6 +21,7 @@ legato-core.workspace = true
 legato-engine.workspace = true
 legato-net.workspace = true
 legato-proto.workspace = true
+rfd = { version = "0.17.2", default-features = false }
 tokio = { workspace = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true

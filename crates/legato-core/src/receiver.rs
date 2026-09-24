@@ -131,7 +131,11 @@ impl Receiver {
                     out.push(Inject::Scroll(scroll));
                 }
             }
-            Control::Hello(_) | Control::Screens(_) | Control::Yield => {}
+            Control::Hello(_)
+            | Control::Screens(_)
+            | Control::Yield
+            | Control::Placement { .. }
+            | Control::ControlMode(_) => {}
         }
     }
 

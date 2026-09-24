@@ -13,9 +13,9 @@ use std::cell::RefCell;
 use std::sync::mpsc;
 use std::time::Instant;
 
-use legato_core::controller::{Action, Controller, ControllerConfig, Event, Verdict};
+use legato_core::LocalInput;
+use legato_core::controller::{Action, CaptureCommand, Controller, Event, Verdict};
 use legato_core::keymap;
-use legato_core::{KeyRemap, Layout, MachineId};
 use legato_proto::{Button, Point, Rect, Scroll};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -39,15 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::w;
 
 /// Sent to the capture thread from other threads.
-#[derive(Debug)]
-pub enum Command {
-    /// A peer yielded or disconnected.
-    Event(Event),
-    SetLayout(Layout),
-    SetRemap(MachineId, KeyRemap),
-    SetConfig(ControllerConfig),
-    Stop,
-}
+pub type Command = CaptureCommand;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CaptureOptions {
@@ -65,16 +57,28 @@ pub struct Capture {
 impl Capture {
     /// Starts capturing. `sink` receives every controller action on the capture thread
     /// (`Capture` and `Release` are also carried out here); it must not block.
+    /// `local_input` hears about the user's own input while it isn't being captured (for
+    /// handing control back when this machine is being driven).
     pub fn start(
         controller: Controller,
         options: CaptureOptions,
         sink: impl FnMut(Action) + Send + 'static,
+        local_input: impl FnMut(LocalInput) + Send + 'static,
     ) -> windows::core::Result<Self> {
         let (commands, command_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("legato-capture".into())
-            .spawn(move || run(controller, options, Box::new(sink), command_rx, ready_tx))
+            .spawn(move || {
+                run(
+                    controller,
+                    options,
+                    Box::new(sink),
+                    Box::new(local_input),
+                    command_rx,
+                    ready_tx,
+                )
+            })
             .expect("spawning the capture thread");
         match ready_rx.recv() {
             Ok(Ok(thread_id)) => Ok(Self {
@@ -110,6 +114,7 @@ impl Drop for Capture {
 struct State {
     controller: Controller,
     sink: Box<dyn FnMut(Action) + Send>,
+    local_input: Box<dyn FnMut(LocalInput) + Send>,
     options: CaptureOptions,
     commands: mpsc::Receiver<Command>,
     out: Vec<Action>,
@@ -120,6 +125,10 @@ struct State {
     /// Raw device motion since the last mouse hook event.
     raw: (i32, i32),
     raw_seen: bool,
+    /// The user's left button is down.
+    left_down: bool,
+    /// The drop catcher is under the cursor.
+    catching: bool,
 }
 
 thread_local! {
@@ -130,6 +139,9 @@ thread_local! {
 enum Effect {
     Pin(POINT),
     Unpin(POINT),
+    /// Put the drop catcher under the cursor, or take it away.
+    Catch(POINT),
+    StopCatching,
 }
 
 impl State {
@@ -145,6 +157,7 @@ impl State {
                 Action::Capture => {
                     let pin = pin_point(&self.controller);
                     self.pin = Some(pin);
+                    self.catching = false;
                     effects.push(Effect::Pin(pin));
                     (self.sink)(Action::Capture);
                 }
@@ -162,8 +175,21 @@ impl State {
     }
 
     fn on_mouse(&mut self, msg: u32, info: &MSLLHOOKSTRUCT) -> (Verdict, Vec<Effect>) {
-        if info.flags & LLMHF_INJECTED != 0 && !self.options.accept_injected {
+        if info.dwExtraInfo == crate::INJECTED_TAG
+            || (info.flags & LLMHF_INJECTED != 0 && !self.options.accept_injected)
+        {
             return (Verdict::Pass, vec![]);
+        }
+        if self.pin.is_none() {
+            let input = match (msg, self.last_pos) {
+                (WM_MOUSEMOVE, Some(last)) => LocalInput::Motion {
+                    dx: (info.pt.x - last.x) as f64,
+                    dy: (info.pt.y - last.y) as f64,
+                },
+                (WM_MOUSEMOVE, None) => LocalInput::Motion { dx: 0.0, dy: 0.0 },
+                _ => LocalInput::Other,
+            };
+            (self.local_input)(input);
         }
         let pos = info.pt;
         let wheel = ((info.mouseData >> 16) as u16 as i16) as f64;
@@ -193,14 +219,36 @@ impl State {
                     };
                     self.raw = (0, 0);
                     self.last_pos = Some(pos);
-                    Event::LocalMotion {
-                        pos: Point::new(pos.x as f64, pos.y as f64),
-                        attempted,
+                    let at = Point::new(pos.x as f64, pos.y as f64);
+                    // Dragging against an edge that leads somewhere: offer to catch files.
+                    let catch = self.left_down
+                        && !self.controller.is_carrying()
+                        && self.controller.neighbor_at_edge(at).is_some();
+                    let (verdict, mut effects) =
+                        self.handle(Event::LocalMotion { pos: at, attempted });
+                    if catch && self.pin.is_none() {
+                        self.catching = true;
+                        effects.push(Effect::Catch(pos));
+                    } else if self.catching && self.pin.is_none() && !catch {
+                        self.catching = false;
+                        effects.push(Effect::StopCatching);
                     }
+                    return (verdict, effects);
                 }
             },
-            WM_LBUTTONDOWN => button(Button::Left, true),
-            WM_LBUTTONUP => button(Button::Left, false),
+            WM_LBUTTONDOWN => {
+                self.left_down = true;
+                button(Button::Left, true)
+            }
+            WM_LBUTTONUP => {
+                self.left_down = false;
+                let (verdict, mut effects) = self.handle(button(Button::Left, false));
+                if self.catching {
+                    self.catching = false;
+                    effects.push(Effect::StopCatching);
+                }
+                return (verdict, effects);
+            }
             WM_RBUTTONDOWN => button(Button::Right, true),
             WM_RBUTTONUP => button(Button::Right, false),
             WM_MBUTTONDOWN => button(Button::Middle, true),
@@ -215,8 +263,13 @@ impl State {
     }
 
     fn on_key(&mut self, msg: u32, info: &KBDLLHOOKSTRUCT) -> (Verdict, Vec<Effect>) {
-        if info.flags.contains(LLKHF_INJECTED) && !self.options.accept_injected {
+        if info.dwExtraInfo == crate::INJECTED_TAG
+            || (info.flags.contains(LLKHF_INJECTED) && !self.options.accept_injected)
+        {
             return (Verdict::Pass, vec![]);
+        }
+        if self.pin.is_none() {
+            (self.local_input)(LocalInput::Other);
         }
         let Some(usage) = key_usage(info) else {
             return (Verdict::Pass, vec![]);
@@ -323,6 +376,20 @@ fn apply(effects: Vec<Effect>) {
                     let _ = ShowWindow(window, SW_HIDE);
                     let _ = SetCursorPos(p.x, p.y);
                 }
+                Effect::Catch(p) => {
+                    let _ = SetWindowPos(
+                        window,
+                        Some(HWND_TOPMOST),
+                        p.x - 24,
+                        p.y - 24,
+                        48,
+                        48,
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    );
+                }
+                Effect::StopCatching => {
+                    let _ = ShowWindow(window, SW_HIDE);
+                }
             }
         }
     }
@@ -375,11 +442,21 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        // Hides the cursor while it's pinned under our window.
+        // Hides the cursor while it's pinned under our window (not while catching drops).
         WM_SETCURSOR => {
-            // SAFETY: no preconditions.
-            unsafe { SetCursor(None) };
-            LRESULT(1)
+            let pinned = STATE.with(|cell| {
+                cell.try_borrow()
+                    .map(|s| s.as_ref().is_some_and(|s| s.pin.is_some()))
+                    .unwrap_or(true)
+            });
+            if pinned {
+                // SAFETY: no preconditions.
+                unsafe { SetCursor(None) };
+                LRESULT(1)
+            } else {
+                // SAFETY: default handling with the unchanged arguments.
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
         }
         WM_INPUT => {
             if let Some((dx, dy)) = read_raw_motion(HRAWINPUT(lparam.0 as *mut _)) {
@@ -425,14 +502,23 @@ fn read_raw_motion(handle: HRAWINPUT) -> Option<(i32, i32)> {
     Some((mouse.lLastX, mouse.lLastY))
 }
 
+fn ole_init() {
+    // SAFETY: once per thread, before any OLE use; balanced by OleUninitialize.
+    if let Err(e) = unsafe { windows::Win32::System::Ole::OleInitialize(None) } {
+        tracing::warn!("OLE unavailable, so file drags can't cross: {e}");
+    }
+}
+
 fn run(
     controller: Controller,
     options: CaptureOptions,
     sink: Box<dyn FnMut(Action) + Send>,
+    local_input: Box<dyn FnMut(LocalInput) + Send>,
     commands: mpsc::Receiver<Command>,
     ready: mpsc::Sender<windows::core::Result<u32>>,
 ) {
     crate::init_dpi_awareness();
+    ole_init();
     // SAFETY: standard window-class registration and creation for this thread.
     let setup = unsafe {
         (|| -> windows::core::Result<(HWND, HHOOK, HHOOK)> {
@@ -497,6 +583,7 @@ fn run(
         *s = Some(State {
             controller,
             sink,
+            local_input,
             options,
             commands,
             out: Vec::new(),
@@ -505,14 +592,30 @@ fn run(
             last_pos: None,
             raw: (0, 0),
             raw_seen: false,
+            left_down: false,
+            catching: false,
         });
     });
+    if let Err(e) = crate::drop::register(window) {
+        tracing::warn!("file drags can't cross: {e}");
+    }
     // SAFETY: no preconditions.
     let _ = ready.send(Ok(unsafe { GetCurrentThreadId() }));
 
     let mut msg = MSG::default();
     // SAFETY: standard message loop on this thread.
     'outer: while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
+        if msg.message == crate::drop::WM_FILES_ENTERED {
+            if let Some(files) = crate::drop::ENTERED.with_borrow_mut(Option::take) {
+                let effects = STATE.with_borrow_mut(|s| {
+                    s.as_mut()
+                        .map(|s| s.handle(Event::Carrying(Some(files))).1)
+                        .unwrap_or_default()
+                });
+                apply(effects);
+            }
+            continue;
+        }
         if msg.message == WM_APP {
             loop {
                 let next = STATE.with_borrow_mut(|s| {
@@ -540,10 +643,12 @@ fn run(
         apply(vec![Effect::Unpin(pin)]);
     }
     STATE.with_borrow_mut(|s| *s = None);
+    crate::drop::unregister(window);
     // SAFETY: tearing down what `setup` created.
     unsafe {
         let _ = UnhookWindowsHookEx(keyboard);
         let _ = UnhookWindowsHookEx(mouse);
         let _ = DestroyWindow(window);
+        windows::Win32::System::Ole::OleUninitialize();
     }
 }
