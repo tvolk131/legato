@@ -435,6 +435,76 @@ fn no_switching_while_a_button_is_held() {
 }
 
 #[test]
+fn carried_files_cross_with_the_button_held_and_drop_on_release() {
+    let mut h = Harness::with_config(ControllerConfig {
+        push_distance: 0.0,
+        ..Default::default()
+    });
+    let files = vec![std::path::PathBuf::from("C:/Users/me/report.pdf")];
+    assert_eq!(h.c.neighbor_at_edge(Point::new(1920.0, 2159.0)), Some(MAC));
+    assert_eq!(h.c.neighbor_at_edge(Point::new(100.0, 2159.0)), None);
+    // Left button down on a file, drag starts, the backend spots the files.
+    assert_eq!(
+        h.step(
+            0,
+            Event::Button {
+                button: Button::Left,
+                down: true
+            }
+        ),
+        Verdict::Pass
+    );
+    h.step(0, Event::Carrying(Some(files.clone())));
+    assert_eq!(
+        h.push_down(1920.0, 10.0),
+        Verdict::Swallow,
+        "crosses despite the held button"
+    );
+    h.step(
+        8,
+        Event::CapturedMotion {
+            delta: Point::new(30.0, 300.0),
+        },
+    );
+    h.take();
+    // Releasing on the Mac drops the files there; Windows still sees its own release.
+    assert_eq!(
+        h.step(
+            0,
+            Event::Button {
+                button: Button::Left,
+                down: false
+            }
+        ),
+        Verdict::Pass
+    );
+    assert_eq!(h.take(), [Action::Drop { to: MAC, files }]);
+    assert!(!h.c.is_carrying());
+}
+
+#[test]
+fn releasing_carried_files_back_home_drops_nothing() {
+    let mut h = Harness::new();
+    h.step(
+        0,
+        Event::Button {
+            button: Button::Left,
+            down: true,
+        },
+    );
+    h.step(0, Event::Carrying(Some(vec!["a".into()])));
+    h.step(
+        0,
+        Event::Button {
+            button: Button::Left,
+            down: false,
+        },
+    );
+    assert!(h.take().is_empty());
+    assert!(!h.c.is_carrying());
+}
+
+#[test]
 fn yield_returns_the_cursor_where_it_left() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);

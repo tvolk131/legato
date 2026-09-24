@@ -2,7 +2,7 @@
 
 Use one keyboard and mouse across your computers over the network. Your cursor moves smoothly from one machine's screens to the next, and the clipboard and files come along with it.
 
-**Status: early alpha.** A Windows PC's keyboard and mouse can drive a Mac from the command line. There's no UI, clipboard or file sharing yet. Downloads are on the [releases page](https://github.com/tvolk131/legato/releases).
+**Status: alpha.** Either machine's keyboard and mouse can drive the other, with a tray app for pairing, arranging screens and settings. Copy and paste works across machines (text, images and files), and files can be sent or dragged across the edge from Windows. Downloads are on the [releases page](https://github.com/tvolk131/legato/releases).
 
 - **Platforms:** macOS 26+ (Apple silicon) and Windows 11 (x64 and ARM64).
 - **Written in Rust:** [iced](https://github.com/iced-rs/iced) + [iced-m3](https://github.com/tvolk131/iced-m3) for the UI, [iroh](https://github.com/n0-computer/iroh) for encrypted, peer-to-peer networking.
@@ -11,7 +11,9 @@ Use one keyboard and mouse across your computers over the network. Your cursor m
 
 ## Quick start
 
-Run these on both machines unless noted:
+Open **Legato** on both machines. Each lists the other under "Nearby"; pick it on either side and check that both show the same 6-digit code. Then drag the other machine's screens to where they sit in the arrangement editor.
+
+Or from the command line, on both machines unless noted:
 
 ```sh
 legato pair      # pick the other machine; both show the same 6-digit code

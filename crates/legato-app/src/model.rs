@@ -62,6 +62,8 @@ pub struct Model {
     pub config: Config,
     pub local: Screens,
     pub known: HashMap<EndpointId, Screens>,
+    /// Where peers have placed this machine, for mirroring their arrangement.
+    pub placed_us: HashMap<EndpointId, legato_proto::Point>,
     /// Which peer this machine is driving, or which peer drives it.
     pub active: Option<EndpointId>,
     pub problems: Vec<String>,
@@ -72,6 +74,10 @@ pub struct Model {
 impl Model {
     pub fn paired(&self, id: &EndpointId) -> Option<&Paired> {
         self.paired.iter().find(|p| &p.device.id == id)
+    }
+
+    pub fn connected(&self) -> impl Iterator<Item = &Paired> {
+        self.paired.iter().filter(|p| p.connection.is_some())
     }
 
     pub fn name_of(&self, id: &EndpointId) -> String {

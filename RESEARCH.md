@@ -348,15 +348,17 @@ History:
 
 ---
 
-## 12. Suggested milestones
+## 12. Milestones
 
-1. **M0, spikes (partly done).** iroh LAN + mDNS + pairing + allow-list; iced + iced-m3 + canvas + daemon compile check (`spikes/`).
-2. **M1, CLI prototype, macOS ↔ macOS or macOS ↔ Windows.** Edge switching, motion datagrams, keys and buttons on the control stream, heartbeat, release-all-on-disconnect, hardcoded layout.
-3. **M2, UI.** Tray, nearby devices (mDNS `subscribe()`), pairing dialog with the 6-digit code, arrangement editor, config persistence.
-4. **M3, second OS backend plus text and image clipboard.**
-5. **M4, Linux.** X11 first, then Wayland via the portal on GNOME and KDE.
-6. **M5, files.** "Send to…" plus drag-across-the-edge that saves to Downloads.
-7. **M6.** Native drop on macOS and Windows, internet mode (self-hosted relay), Windows secure-desktop service.
+Revised once the scope settled on macOS and Windows, with a Mac next to a Windows PC as the first use case.
+
+1. **M0, spikes (done).** iroh LAN + mDNS + pairing + allow-list; iced + iced-m3 + canvas + daemon compile check (`spikes/`).
+2. **M1, CLI prototype, Windows driving a Mac (done).** Edge switching with push-through, motion datagrams, keys and buttons on the control stream, release-all-on-disconnect, stuck-key prevention.
+3. **M2, UI (done).** Tray, nearby devices, pairing dialog with the 6-digit code, arrangement editor, settings, start at login.
+4. **M3, both directions (done).** The Mac drives Windows too; "whichever machine you touch" vs "one machine controls" setting, synced between machines; text, image and file clipboard in both directions; arrangements mirrored so either side can edit them.
+5. **M4, files (done).** "Send files…" to a device, and dragging files across the edge from Windows (released on the other machine, they're saved to `Downloads/Legato`). Dragging out of Finder is still to come: macOS offers no way to see another app's drag without taking part in it.
+6. **M5, virtual monitor mode.** The Mac gets an extra display shown in a window on Windows (§14).
+7. **Later.** Native drop at the pointer on the receiving side, Finder drags, internet mode with a self-hosted relay, Windows secure-desktop service.
 
 ## 13. Open questions to prototype
 

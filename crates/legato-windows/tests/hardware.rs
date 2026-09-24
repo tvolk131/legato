@@ -118,6 +118,7 @@ fn crossing_an_edge_captures_forwards_input_and_yield_releases() {
         move |action| {
             let _ = tx.send(action);
         },
+        |_| {},
     )
     .unwrap();
 
@@ -201,5 +202,47 @@ fn crossing_an_edge_captures_forwards_input_and_yield_releases() {
         "{actions:?}"
     );
 
+    drop(capture);
+}
+
+#[test]
+#[ignore = "moves the cursor"]
+fn injected_moves_land_exactly_and_are_not_local_input() {
+    use legato_core::{Inject, LocalInput};
+    let local = screens();
+    let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
+    let (tx, rx) = mpsc::channel::<LocalInput>();
+    let capture = Capture::start(
+        Controller::new(ControllerConfig::default(), Layout::new(local)),
+        CaptureOptions {
+            accept_injected: true,
+        },
+        |_| {},
+        move |input| {
+            let _ = tx.send(input);
+        },
+    )
+    .unwrap();
+    let mut injector = legato_windows::Injector::new();
+    let target = legato_proto::Point::new(primary.center().x + 37.0, primary.center().y + 11.0);
+    injector.apply(&Inject::MoveTo { pos: target });
+    std::thread::sleep(Duration::from_millis(100));
+    let p = cursor();
+    assert!(
+        (p.x - target.x as i32).abs() <= 1 && (p.y - target.y as i32).abs() <= 1,
+        "cursor at {p:?}, wanted {target:?}"
+    );
+    assert_eq!(
+        rx.try_iter().count(),
+        0,
+        "our own injection counted as local input"
+    );
+
+    // Untagged input (like the user's mouse) is reported.
+    mouse_move(8, 0);
+    assert!(
+        rx.try_iter()
+            .any(|i| matches!(i, LocalInput::Motion { .. }))
+    );
     drop(capture);
 }

@@ -217,3 +217,63 @@ fn adverts_round_trip_and_fit() {
     assert!(advert(&config).len() <= 245);
     assert_eq!(parse_advert("irohv1|mac|x"), None);
 }
+
+#[tokio::test]
+async fn blobs_and_files_arrive_intact() {
+    let (a, b) = (node("a", Os::Windows).await, node("b", Os::MacOs).await);
+    pair(&a, &b, true, true).await;
+    a.remember(b.addr());
+    b.remember(a.addr());
+    let _a_events = a.start_sessions(hello(&a));
+    let mut b_events = b.start_sessions(hello(&b));
+    let mut a_events = _a_events;
+    let a_session = next_connected(&mut a_events).await;
+    let _b_session = next_connected(&mut b_events).await;
+
+    let blob: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+    a_session.send_blob(legato_proto::blob::CLIPBOARD, blob.clone());
+    match timeout(Duration::from_secs(10), b_events.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        SessionEvent::Blob { tag, data, peer } => {
+            assert_eq!(peer, a.id());
+            assert_eq!(tag, legato_proto::blob::CLIPBOARD);
+            assert_eq!(data, blob);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+
+    let contents: Vec<u8> = (0..3_000_000u32).map(|i| (i * 7) as u8).collect();
+    let header = legato_proto::FileHeader {
+        batch: 1,
+        name: "folder/photo.jpg".into(),
+        size: contents.len() as u64,
+        count: 1,
+        index: 0,
+        purpose: legato_proto::FilePurpose::Send,
+    };
+    let sender = {
+        let session = a_session.clone();
+        let header = header.clone();
+        let contents = contents.clone();
+        tokio::spawn(async move { session.send_file(header, &mut contents.as_slice()).await })
+    };
+    let file = match timeout(Duration::from_secs(10), b_events.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        SessionEvent::File { file, .. } => file,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(file.header, header);
+    let mut received = Vec::new();
+    assert_eq!(
+        file.recv(&mut received).await.unwrap(),
+        contents.len() as u64
+    );
+    assert_eq!(received, contents);
+    sender.await.unwrap().unwrap();
+}

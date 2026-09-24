@@ -17,11 +17,11 @@ use legato_proto::{Os, Screens};
 use tokio::sync::{broadcast, oneshot, watch};
 
 pub mod arrange;
+mod clipboard;
 pub mod config;
-#[cfg(target_os = "macos")]
-mod receive;
-#[cfg(windows)]
-mod share;
+pub mod files;
+mod platform;
+mod run;
 
 pub use config::Config;
 pub use legato_net;
@@ -45,11 +45,29 @@ pub enum Status {
         reason: String,
     },
     /// A connected peer's displays (also on connect), e.g. for the arrangement editor.
-    PeerScreens { id: EndpointId, screens: Screens },
+    PeerScreens {
+        id: EndpointId,
+        screens: Screens,
+    },
     /// This machine's keyboard and mouse are driving `id` (or nothing, `None`).
     Controlling(Option<EndpointId>),
     /// A peer is driving this machine (or nothing, `None`).
     ControlledBy(Option<EndpointId>),
+    /// A peer arranged this machine (its desk origin in the peer's desk space).
+    PeerPlacedUs {
+        id: EndpointId,
+        offset: Option<legato_proto::Point>,
+    },
+    FilesSending {
+        to: EndpointId,
+        count: usize,
+    },
+    FilesSent {
+        to: EndpointId,
+        bytes: u64,
+    },
+    /// A whole batch of files arrived.
+    FilesReceived(files::Received),
     /// A settings problem worth showing, e.g. a peer with no position.
     Problem(String),
     /// Sharing stopped because of an error.
@@ -71,6 +89,7 @@ pub struct Engine {
     status: broadcast::Sender<Status>,
     sharing: Mutex<Option<Sharing>>,
     known_screens: Mutex<HashMap<EndpointId, Screens>>,
+    run_commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<run::RunCommand>>>,
 }
 
 impl Engine {
@@ -95,6 +114,7 @@ impl Engine {
             status,
             sharing: Mutex::new(None),
             known_screens: Mutex::new(known_screens),
+            run_commands: Mutex::new(None),
         }))
     }
 
@@ -108,6 +128,21 @@ impl Engine {
 
     pub fn config(&self) -> Config {
         self.config.borrow().clone()
+    }
+
+    /// Sends files and folders to a connected peer; they land in its Downloads folder.
+    pub fn send_files(&self, to: EndpointId, paths: Vec<PathBuf>) -> Result<()> {
+        let commands = self.run_commands.lock().unwrap();
+        let Some(commands) = commands.as_ref() else {
+            bail!("sharing isn't running");
+        };
+        commands
+            .send(run::RunCommand::SendFiles {
+                to,
+                paths,
+                purpose: legato_proto::FilePurpose::Send,
+            })
+            .map_err(|_| anyhow::anyhow!("sharing isn't running"))
     }
 
     /// Changes settings, saves them, and applies them to a running session.
@@ -192,18 +227,11 @@ impl Engine {
             engine: self.clone(),
             config: self.config.subscribe(),
         };
-        #[cfg(windows)]
-        return share::run(ctx, screens, events, stop).await;
-        #[cfg(target_os = "macos")]
-        {
-            let _ = screens;
-            receive::run(ctx, events, stop).await
-        }
-        #[cfg(not(any(target_os = "macos", windows)))]
-        {
-            let _ = (ctx, screens, events, stop);
-            bail!("sharing isn't supported on this platform");
-        }
+        let (commands, command_rx) = tokio::sync::mpsc::unbounded_channel();
+        *self.run_commands.lock().unwrap() = Some(commands);
+        let result = run::run(ctx, screens, events, command_rx, stop).await;
+        *self.run_commands.lock().unwrap() = None;
+        result
     }
 
     fn remember_screens(&self, id: EndpointId, screens: &Screens) {
@@ -297,6 +325,22 @@ pub fn describe_path(path: Option<(PathKind, Duration)>) -> String {
     }
 }
 
+/// "1.5 MB" and the like.
+pub fn human_bytes(bytes: u64) -> String {
+    let mut value = bytes as f64;
+    for unit in ["bytes", "KB", "MB", "GB"] {
+        if value < 1000.0 || unit == "GB" {
+            return if unit == "bytes" {
+                format!("{bytes} bytes")
+            } else {
+                format!("{value:.1} {unit}")
+            };
+        }
+        value /= 1000.0;
+    }
+    unreachable!()
+}
+
 /// Human-readable text for a status event, for logs and the CLI.
 pub fn describe(status: &Status, name_of: impl Fn(&EndpointId) -> String) -> Option<String> {
     Some(match status {
@@ -314,7 +358,25 @@ pub fn describe(status: &Status, name_of: impl Fn(&EndpointId) -> String) -> Opt
         Status::ControlledBy(Some(id)) => {
             format!("\"{}\" is controlling this machine.", name_of(id))
         }
-        Status::Controlling(None) | Status::ControlledBy(None) | Status::PeerScreens { .. } => {
+        Status::FilesSending { count, to } => {
+            format!("Sending {count} item(s) to \"{}\"…", name_of(to))
+        }
+        Status::FilesSent { to, bytes } => {
+            format!("Sent {} to \"{}\".", human_bytes(*bytes), name_of(to))
+        }
+        Status::FilesReceived(r) => format!(
+            "Received {} item(s) from \"{}\"{}.",
+            r.paths.len(),
+            name_of(&r.from),
+            match r.purpose {
+                legato_proto::FilePurpose::Clipboard => ", ready to paste".to_string(),
+                _ => format!(" in {}", files::downloads_dir().display()),
+            }
+        ),
+        Status::Controlling(None)
+        | Status::ControlledBy(None)
+        | Status::PeerScreens { .. }
+        | Status::PeerPlacedUs { .. } => {
             return None;
         }
     })

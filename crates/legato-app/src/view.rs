@@ -94,12 +94,23 @@ fn devices(m: &Model) -> Element<'_, Message> {
                 (None, _) if m.sharing => "Not connected: is Legato running there?".to_string(),
                 (None, _) => "Not connected".to_string(),
             };
+            let send = button("Send files…").variant(ButtonVariant::Tonal);
+            let send = if p.connection.is_some() {
+                send.on_press(Message::SendFiles(p.device.id))
+            } else {
+                send
+            };
             list_item(p.device.name.clone())
                 .supporting_text(format!("{} · {status}", os_name(p.device.os)))
                 .trailing(
-                    button("Unpair")
-                        .variant(ButtonVariant::Text)
-                        .on_press(Message::Unpair(p.device.id)),
+                    row![
+                        send,
+                        button("Unpair")
+                            .variant(ButtonVariant::Text)
+                            .on_press(Message::Unpair(p.device.id)),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
                 )
                 .into()
         }))
@@ -136,7 +147,7 @@ fn devices(m: &Model) -> Element<'_, Message> {
         paired,
         heading("Nearby"),
         nearby,
-        body("Other devices appear here while Legato is open on them."),
+        body("Other devices appear here while Legato is open on them. Drop files on this window to send them to the device you're using."),
     ]
     .spacing(8)
     .into()
@@ -163,6 +174,7 @@ pub fn editor(m: &Model) -> Editor {
             id: p.device.id.to_string(),
             name: &p.device.name,
             screens: s,
+            placed_us_at: m.placed_us.get(&p.device.id).copied(),
         })
         .collect();
     let (layout, _) = arrange::build(&m.local, &connected, &m.config);
@@ -253,6 +265,9 @@ fn settings(m: &Model) -> Element<'_, Message> {
             .labeled(true)
             .on_change(Message::PushDistance)
             .on_release(Message::SaveSettings),
+        heading("Control"),
+        body("Which device's keyboard and mouse can move onto the others. This applies to all your paired devices."),
+        control_mode(m),
         heading("Keyboard"),
         switch(m.config.keys.remap == Remap::Auto)
             .label("On Macs, use the key next to the space bar as Command")
@@ -261,6 +276,10 @@ fn settings(m: &Model) -> Element<'_, Message> {
         switch(m.config.scrolling.invert_wheel)
             .label("Reverse the mouse wheel when this device is being controlled")
             .on_toggle(Message::InvertWheel),
+        heading("Clipboard"),
+        switch(m.config.clipboard.enabled)
+            .label("Share copied text, images and files with paired devices")
+            .on_toggle(Message::Clipboard),
         heading("General"),
     ]
     .spacing(8);
@@ -275,6 +294,34 @@ fn settings(m: &Model) -> Element<'_, Message> {
         .push(body(format!("Device id: {}", m.this.id)))
         .push(body(format!("Settings folder: {}", m.state_dir)))
         .push(Space::new().height(16))
+        .into()
+}
+
+fn control_mode(m: &Model) -> Element<'_, Message> {
+    use iced_m3::{Segment, SegmentSelection, segmented_buttons};
+    let this = m.this.id.to_string();
+    let mut segments = vec![
+        Segment::new(None, "Any device"),
+        Segment::new(Some(this.clone()), "Only this device"),
+    ];
+    for p in &m.paired {
+        segments.push(Segment::new(
+            Some(p.device.id.to_string()),
+            format!("Only {}", p.device.name),
+        ));
+    }
+    // Normalise a stored id prefix to the full id it matches.
+    let selected = m.config.control.controller.as_ref().map(|c| {
+        std::iter::once(this.clone())
+            .chain(m.paired.iter().map(|p| p.device.id.to_string()))
+            .find(|id| id.starts_with(c.as_str()))
+            .unwrap_or_else(|| c.clone())
+    });
+    segmented_buttons(segments, SegmentSelection::Single(Some(selected)))
+        .on_change(|selection| match selection {
+            SegmentSelection::Single(Some(value)) => Message::ControlMode(value),
+            _ => Message::ControlMode(None),
+        })
         .into()
 }
 

@@ -91,6 +91,7 @@ fn model(page: Page) -> Model {
             native_per_desk: 1.5,
         },
         known,
+        placed_us: HashMap::new(),
         active: None,
         problems: vec![],
         notice: None,
@@ -182,7 +183,11 @@ fn unplaced_peers_are_parked_beside_the_displays() {
 #[test]
 fn settings_toggles_send_messages() {
     let m = model(Page::Settings);
-    let mut ui = simulator(crate::view::root(&m));
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        (1024.0, 1600.0),
+        crate::view::root(&m),
+    );
     save(&mut ui, "settings");
     ui.click("Reverse the mouse wheel when this device is being controlled")
         .unwrap();
@@ -198,6 +203,49 @@ fn settings_toggles_send_messages() {
         messages
             .iter()
             .any(|m| matches!(m, Message::Autostart(true))),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn control_mode_can_be_limited_to_one_device() {
+    let m = model(Page::Settings);
+    let mac = m.paired[0].device.id.to_string();
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        (1024.0, 1600.0),
+        crate::view::root(&m),
+    );
+    save(&mut ui, "settings-full");
+    ui.click("Only Tommy's MacBook Pro").unwrap();
+    ui.click("Share copied text, images and files with paired devices")
+        .unwrap();
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::ControlMode(Some(id)) if *id == mac)),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::Clipboard(false))),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn connected_devices_can_be_sent_files() {
+    let m = model(Page::Devices);
+    let mac = m.paired[0].device.id;
+    let mut ui = simulator(crate::view::root(&m));
+    ui.click("Send files…").unwrap();
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::SendFiles(id) if *id == mac)),
         "{messages:?}"
     );
 }

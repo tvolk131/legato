@@ -63,6 +63,20 @@ pub enum Event {
     PeerYield(MachineId),
     /// The connection to the peer dropped.
     PeerLost(MachineId),
+    /// The user is dragging these files (or stopped: `None`). While files are carried the
+    /// cursor may cross with the button held; releasing it on a peer drops them there.
+    Carrying(Option<Vec<std::path::PathBuf>>),
+}
+
+/// Sent to a capture backend's thread from elsewhere.
+#[derive(Debug)]
+pub enum CaptureCommand {
+    /// A peer yielded or disconnected.
+    Event(Event),
+    SetLayout(Layout),
+    SetRemap(MachineId, KeyRemap),
+    SetConfig(ControllerConfig),
+    Stop,
 }
 
 /// Whether the backend should let the OS see the event.
@@ -83,6 +97,11 @@ pub enum Action {
     Capture,
     /// Stop capturing and show the local cursor at `warp` (local native coordinates).
     Release { warp: Point },
+    /// The user let go of dragged files over a peer: send them there.
+    Drop {
+        to: MachineId,
+        files: Vec<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -151,6 +170,7 @@ pub struct Controller {
     seq: u32,
     keys: HashMap<u16, Route>,
     buttons: HashMap<Button, Route>,
+    carrying: Option<Vec<std::path::PathBuf>>,
 }
 
 impl Controller {
@@ -164,7 +184,38 @@ impl Controller {
             seq: 0,
             keys: HashMap::new(),
             buttons: HashMap::new(),
+            carrying: None,
         }
+    }
+
+    /// Whether files are being carried.
+    pub fn is_carrying(&self) -> bool {
+        self.carrying.is_some()
+    }
+
+    /// The peer the local pointer would cross to by pushing past an edge at `pos` (local
+    /// native coordinates), if any.
+    pub fn neighbor_at_edge(&self, pos: Point) -> Option<MachineId> {
+        let local = self.layout.local();
+        let display = local
+            .screens
+            .displays
+            .iter()
+            .map(|d| d.bounds)
+            .find(|b| b.contains(pos))?;
+        [Dir::Left, Dir::Right, Dir::Up, Dir::Down]
+            .into_iter()
+            .filter(|&dir| at_native_edge(display, pos, dir))
+            .find_map(|dir| {
+                let beyond = add(
+                    local.to_desk(edge_point_native(display, pos, dir)),
+                    scale(dir.unit(), 0.5),
+                );
+                match self.layout.display_at(beyond) {
+                    Some((MachineId::LOCAL, _)) | None => None,
+                    Some((target, _)) => Some(target),
+                }
+            })
     }
 
     pub fn layout(&self) -> &Layout {
@@ -218,6 +269,10 @@ impl Controller {
             Event::Key { usage, down } => self.key(usage, down, out),
             Event::Button { button, down } => self.button(button, down, out),
             Event::Scroll(scroll) => self.scroll(scroll, out),
+            Event::Carrying(files) => {
+                self.carrying = files;
+                Verdict::Pass
+            }
             Event::PeerYield(peer) | Event::PeerLost(peer) => {
                 let yielded = matches!(event, Event::PeerYield(_));
                 if self.active_peer() == Some(peer) {
@@ -371,6 +426,13 @@ impl Controller {
     }
 
     fn button(&mut self, button: Button, down: bool, out: &mut Vec<Action>) -> Verdict {
+        if !down
+            && button == Button::Left
+            && let Some(files) = self.carrying.take()
+            && let Route::Peer(to) = self.current_route()
+        {
+            out.push(Action::Drop { to, files });
+        }
         let route = if down {
             let route = self.current_route();
             self.buttons.insert(button, route);
@@ -427,7 +489,9 @@ impl Controller {
     }
 
     fn switch_blocked(&self) -> bool {
-        self.config.block_switch_while_button_held && !self.buttons.is_empty()
+        self.config.block_switch_while_button_held
+            && !self.buttons.is_empty()
+            && self.carrying.is_none()
     }
 
     /// Adds `pushing` to the push in progress; returns true once it's far enough to switch.

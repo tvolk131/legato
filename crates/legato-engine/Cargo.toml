@@ -10,6 +10,10 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+arboard = "3.6.1"
+directories.workspace = true
+png = "0.18.1"
+postcard.workspace = true
 legato-core.workspace = true
 legato-net.workspace = true
 legato-proto.workspace = true
