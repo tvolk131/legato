@@ -1,0 +1,21 @@
+[package]
+name = "legato-core"
+description = "Platform-independent Legato logic: layout, edge switching, key routing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+keycode.workspace = true
+legato-proto.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
