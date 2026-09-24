@@ -199,6 +199,9 @@ impl Net {
 
         let endpoint = builder.bind().await.context("binding network endpoint")?;
         let _ = shared.endpoint.set(endpoint.clone());
+        if config.relays {
+            tokio::spawn(log_relay_status(endpoint.clone()));
+        }
         endpoint.set_user_data_for_address_lookup(advert(&config).parse().ok());
 
         let router = Router::builder(endpoint.clone())
@@ -356,3 +359,40 @@ fn parse_advert(advert: &str) -> Option<(Option<Os>, String)> {
 
 #[cfg(test)]
 mod tests;
+
+/// Logs when this machine gains or loses its relay: without one, paired peers on other
+/// networks can't reach it.
+async fn log_relay_status(endpoint: Endpoint) {
+    use iroh::Watcher;
+    let mut relays = endpoint.home_relay_status();
+    let closed = endpoint.closed();
+    tokio::pin!(closed);
+    // The relay we're reachable through, once there is one.
+    let mut current: Option<String> = None;
+    loop {
+        let up = relays
+            .get()
+            .iter()
+            .find(|r| r.is_connected())
+            .map(|r| r.url().to_string());
+        if up != current {
+            match &up {
+                Some(url) => tracing::info!("reachable from other networks via relay {url}"),
+                // Not at startup, before the first relay connects: only when one is lost.
+                None => tracing::warn!(
+                    "lost the relay connection: paired devices on other networks can't reach \
+                     this one until it's back"
+                ),
+            }
+            current = up;
+        }
+        tokio::select! {
+            _ = &mut closed => return,
+            updated = relays.updated() => {
+                if updated.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
