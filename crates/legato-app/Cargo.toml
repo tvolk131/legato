@@ -1,0 +1,38 @@
+[package]
+name = "legato-app"
+description = "The Legato app: tray icon, pairing, arrangement and settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "legato-app"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+auto-launch = "0.6"
+iced.workspace = true
+iced-m3.workspace = true
+legato-core.workspace = true
+legato-engine.workspace = true
+legato-net.workspace = true
+legato-proto.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tray-icon = "0.25.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
+
+[dev-dependencies]
+iced_test.workspace = true
+iroh.workspace = true
+
+[lints]
+workspace = true

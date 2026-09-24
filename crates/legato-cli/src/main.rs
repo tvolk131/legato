@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use legato_core::{Align, Side};
 use legato_engine::{Engine, Status};
-use legato_net::{Net, NetConfig, PairedPeer};
+use legato_net::{Net, PairedPeer};
 use tokio::sync::broadcast::error::RecvError;
 
 mod commands;
@@ -164,10 +164,9 @@ impl From<AlignArg> for Align {
     }
 }
 
-pub(crate) async fn start_net(home: &Option<PathBuf>) -> Result<Net> {
-    let mut config = NetConfig::for_this_machine(VERSION);
-    config.store_dir = home.clone();
-    Net::start(config).await
+/// Starts the engine (which also makes sure no other Legato uses the same state).
+pub(crate) async fn start_engine(home: &Option<PathBuf>) -> Result<std::sync::Arc<Engine>> {
+    Engine::start(home.clone(), VERSION).await
 }
 
 /// Finds a paired device by id prefix or (case-insensitive) name.

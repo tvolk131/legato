@@ -14,7 +14,7 @@ use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};
 use legato_engine::config::{self, Neighbor};
 use legato_engine::local_screens;
 
-use crate::{find_paired, start_net};
+use crate::{find_paired, start_engine};
 
 fn os_name(os: Option<Os>) -> &'static str {
     match os {
@@ -25,7 +25,8 @@ fn os_name(os: Option<Os>) -> &'static str {
 }
 
 pub async fn devices(home: &Option<PathBuf>, watch: bool) -> Result<()> {
-    let net = start_net(home).await?;
+    let engine = start_engine(home).await?;
+    let net = engine.net();
     println!(
         "This device: \"{}\" ({})",
         net.config().name,
@@ -83,12 +84,13 @@ pub async fn devices(home: &Option<PathBuf>, watch: bool) -> Result<()> {
             );
         }
     }
-    net.shutdown().await;
+    net.clone().shutdown().await;
     Ok(())
 }
 
 pub async fn pair(home: &Option<PathBuf>, device: Option<String>) -> Result<()> {
-    let net = start_net(home).await?;
+    let engine = start_engine(home).await?;
+    let net = engine.net();
     let mut incoming = net.listen_for_pairing();
     let mut stdin = BufReader::new(tokio::io::stdin()).lines();
     println!("Pairing as \"{}\".", net.config().name);
@@ -151,7 +153,7 @@ pub async fn pair(home: &Option<PathBuf>, device: Option<String>) -> Result<()> 
         PairOutcome::DeclinedHere => println!("Not paired."),
         PairOutcome::DeclinedThere => println!("The other device declined, so they're not paired."),
     }
-    net.shutdown().await;
+    net.clone().shutdown().await;
     Ok(())
 }
 
@@ -174,8 +176,9 @@ async fn confirm(attempt: PairAttempt, stdin: &mut Lines<BufReader<Stdin>>) -> R
 }
 
 pub async fn unpair(home: &Option<PathBuf>, query: &str) -> Result<()> {
-    let net = start_net(home).await?;
-    let peer = find_paired(&net, query)?;
+    let engine = start_engine(home).await?;
+    let net = engine.net();
+    let peer = find_paired(net, query)?;
     net.unpair(&peer.id)?;
     let dir = net.store().dir().to_path_buf();
     let mut config = config::load(&dir)?;
@@ -186,7 +189,7 @@ pub async fn unpair(home: &Option<PathBuf>, query: &str) -> Result<()> {
         config::save(&dir, &config)?;
     }
     println!("Forgot \"{}\". Unpair on the other device too.", peer.name);
-    net.shutdown().await;
+    net.clone().shutdown().await;
     Ok(())
 }
 
@@ -198,8 +201,9 @@ pub async fn layout(
     align: Align,
     nudge: f64,
 ) -> Result<()> {
-    let net = start_net(home).await?;
-    let peer = find_paired(&net, query)?;
+    let engine = start_engine(home).await?;
+    let net = engine.net();
+    let peer = find_paired(net, query)?;
     let screens = local_screens();
     if display == 0 || display > screens.displays.len() {
         bail!(
@@ -233,12 +237,13 @@ pub async fn layout(
         screens.displays[display - 1].name,
         config::path(&dir).display()
     );
-    net.shutdown().await;
+    net.clone().shutdown().await;
     Ok(())
 }
 
 pub async fn doctor(home: &Option<PathBuf>) -> Result<()> {
-    let net = start_net(home).await?;
+    let engine = start_engine(home).await?;
+    let net = engine.net();
     println!(
         "Legato {} on {}",
         crate::VERSION,
@@ -300,7 +305,7 @@ pub async fn doctor(home: &Option<PathBuf>) -> Result<()> {
             .map_or("no position set".to_string(), |n| {
                 format!("{:?} display {} ({:?})", n.side, n.display, n.align).to_lowercase()
             });
-        let reach = reachability(&net, p.id).await;
+        let reach = reachability(net, p.id).await;
         println!(
             "  {} ({}, {}): {position}; {reach}",
             p.name,
@@ -330,7 +335,7 @@ pub async fn doctor(home: &Option<PathBuf>) -> Result<()> {
             }
         }
     }
-    net.shutdown().await;
+    net.clone().shutdown().await;
     Ok(())
 }
 

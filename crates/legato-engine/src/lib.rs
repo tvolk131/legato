@@ -63,6 +63,9 @@ struct Sharing {
 
 pub struct Engine {
     net: Net,
+    /// Held for the engine's lifetime: only one Legato (app or CLI) per state directory,
+    /// since they share an identity.
+    _lock: std::fs::File,
     dir: PathBuf,
     config: watch::Sender<Config>,
     status: broadcast::Sender<Status>,
@@ -73,15 +76,20 @@ pub struct Engine {
 impl Engine {
     /// Loads this machine's identity and settings and starts the network node.
     pub async fn start(home: Option<PathBuf>, app_version: &str) -> Result<Arc<Self>> {
+        let dir = match home {
+            Some(dir) => dir,
+            None => legato_net::store::default_dir()?,
+        };
+        let lock = lock(&dir)?;
         let mut net_config = NetConfig::for_this_machine(app_version);
-        net_config.store_dir = home;
+        net_config.store_dir = Some(dir.clone());
         let net = Net::start(net_config).await?;
-        let dir = net.store().dir().to_path_buf();
         let config = config::load(&dir)?;
         let known_screens = load_known_screens(&dir);
         let (status, _) = broadcast::channel(256);
         Ok(Arc::new(Self {
             net,
+            _lock: lock,
             dir,
             config: watch::Sender::new(config),
             status,
@@ -226,6 +234,22 @@ impl Ctx {
             self.engine.remember_screens(*id, screens);
         }
         let _ = self.engine.status.send(status);
+    }
+}
+
+fn lock(dir: &Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(dir)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("legato.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            bail!("Legato is already running (the app or `legato run`); quit it first")
+        }
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }
 }
 
