@@ -1,0 +1,4 @@
+[env]
+# UI snapshot tests compare against golden images rendered on the CPU (tiny-skia), which
+# needs no GPU and gives the same pixels everywhere.
+ICED_TEST_BACKEND = "tiny-skia"
