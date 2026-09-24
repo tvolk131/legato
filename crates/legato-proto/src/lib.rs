@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
@@ -183,6 +183,32 @@ pub enum Control {
     /// The sender's control-mode setting, shared so every machine agrees. The newer one
     /// (by `updated_at`, seconds since the Unix epoch) wins.
     ControlMode(ControlMode),
+    /// Virtual monitor mode, viewer → Mac: add a display of this many pixels and stream it
+    /// to me.
+    ExtendRequest(ExtendRequest),
+    /// Mac → viewer: the display exists at `bounds` (the Mac's native coordinates);
+    /// frames follow on a video stream.
+    Extended {
+        bounds: Rect,
+    },
+    /// Either side: stop showing the extra display. `reason` is shown if it isn't empty.
+    ExtendStop {
+        reason: String,
+    },
+    /// Viewer → Mac: send a keyframe (the viewer started, or lost its place).
+    Keyframe,
+}
+
+/// The extra display a viewer asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtendRequest {
+    pub width: u32,
+    pub height: u32,
+    /// Retina: the display looks like half its pixel size.
+    pub hidpi: bool,
+    pub fps: u32,
+    /// Bits per second.
+    pub bitrate: u32,
 }
 
 /// Which machines may drive the others.
@@ -200,6 +226,36 @@ pub mod blob {
     pub const CLIPBOARD: u8 = 1;
     /// A file, as a [`super::FileHeader`] frame followed by its bytes.
     pub const FILE: u8 = 2;
+    /// A stream of H.264 frames, each a [`super::VideoFrameHeader`] then its bytes.
+    pub const VIDEO: u8 = 3;
+}
+
+/// Precedes each frame on a video stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoFrameHeader {
+    pub len: u32,
+    pub keyframe: bool,
+}
+
+impl VideoFrameHeader {
+    pub const SIZE: usize = 5;
+    /// Larger frames are refused.
+    pub const MAX_LEN: u32 = 32 * 1024 * 1024;
+
+    pub fn encode(self) -> [u8; Self::SIZE] {
+        let mut out = [0u8; Self::SIZE];
+        out[..4].copy_from_slice(&self.len.to_le_bytes());
+        out[4] = u8::from(self.keyframe);
+        out
+    }
+
+    pub fn decode(bytes: [u8; Self::SIZE]) -> Option<Self> {
+        let len = u32::from_le_bytes(bytes[..4].try_into().ok()?);
+        (len <= Self::MAX_LEN && bytes[4] <= 1).then_some(Self {
+            len,
+            keyframe: bytes[4] == 1,
+        })
+    }
 }
 
 /// Largest blob accepted in memory (clipboard contents).
@@ -363,6 +419,20 @@ mod tests {
             },
             Control::Scroll(Scroll::Wheel { x: 0.0, y: -120.0 }),
             Control::Yield,
+            Control::ExtendRequest(ExtendRequest {
+                width: 3840,
+                height: 2160,
+                hidpi: true,
+                fps: 60,
+                bitrate: 40_000_000,
+            }),
+            Control::Extended {
+                bounds: Rect::new(-1920.0, 0.0, 1920.0, 1080.0),
+            },
+            Control::ExtendStop {
+                reason: "closed".into(),
+            },
+            Control::Keyframe,
         ];
         for msg in msgs {
             let frame = encode_frame(&msg);
@@ -370,6 +440,21 @@ mod tests {
             assert_eq!(check_frame_len(len).unwrap(), frame.len() - 4);
             assert_eq!(decode_frame::<Control>(&frame[4..]).unwrap(), msg);
         }
+    }
+
+    #[test]
+    fn video_frame_headers_round_trip_and_refuse_nonsense() {
+        let header = VideoFrameHeader {
+            len: 123_456,
+            keyframe: true,
+        };
+        assert_eq!(VideoFrameHeader::decode(header.encode()), Some(header));
+        let mut huge = header.encode();
+        huge[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(VideoFrameHeader::decode(huge), None);
+        let mut bad_flag = header.encode();
+        bad_flag[4] = 7;
+        assert_eq!(VideoFrameHeader::decode(bad_flag), None);
     }
 
     #[test]

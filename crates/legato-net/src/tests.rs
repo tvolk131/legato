@@ -277,3 +277,50 @@ async fn blobs_and_files_arrive_intact() {
     assert_eq!(received, contents);
     sender.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn video_frames_arrive_in_order() {
+    let (a, b) = (node("a", Os::MacOs).await, node("b", Os::Windows).await);
+    pair(&a, &b, true, true).await;
+    a.remember(b.addr());
+    b.remember(a.addr());
+    let mut a_events = a.start_sessions(hello(&a));
+    let mut b_events = b.start_sessions(hello(&b));
+    let a_session = next_connected(&mut a_events).await;
+    let _b_session = next_connected(&mut b_events).await;
+
+    let frames: Vec<(Vec<u8>, bool)> = (0..20u32)
+        .map(|i| (vec![i as u8; 1000 + i as usize * 5000], i % 10 == 0))
+        .collect();
+    let sender = {
+        let frames = frames.clone();
+        tokio::spawn(async move {
+            let mut video = a_session.open_video().await.unwrap();
+            for (data, keyframe) in &frames {
+                video.send(data, *keyframe).await.unwrap();
+            }
+            video.finish();
+        })
+    };
+    let video = match timeout(Duration::from_secs(10), b_events.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        SessionEvent::Video { peer, video } => {
+            assert_eq!(peer, a.id());
+            video
+        }
+        other => panic!("unexpected {other:?}"),
+    };
+    for expected in &frames {
+        let got = timeout(Duration::from_secs(10), video.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(&got, expected);
+    }
+    assert_eq!(video.next().await.unwrap(), None, "the stream ends cleanly");
+    sender.await.unwrap();
+}

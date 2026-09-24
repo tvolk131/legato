@@ -9,17 +9,21 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use anyhow::Result;
-use legato_core::controller::{Action, CaptureCommand, Controller, ControllerConfig, Event};
+use legato_core::controller::{
+    Action, CaptureCommand, Controller, ControllerConfig, Event, Portal,
+};
 use legato_core::{ActivityFilter, Inject, KeyRemap, Layout, MachineId, Receiver};
 use legato_net::{EndpointId, Session, SessionEvent};
 use legato_proto::{
-    ClipboardContent, Control, ControlMode, Datagram, FilePurpose, Os, Point, Screens, blob,
+    ClipboardContent, Control, ControlMode, Datagram, ExtendRequest, FilePurpose, Os, Point,
+    Screens, blob,
 };
 use tokio::sync::{mpsc, oneshot};
 
 use crate::arrange::{self, ConnectedPeer};
 use crate::clipboard::{ClipboardSync, Copied};
 use crate::config::{Config, Remap};
+use crate::extend::{self, Viewing};
 use crate::files::{self, Inbox};
 use crate::platform::{self, Capture, Injector};
 use crate::{Ctx, Status};
@@ -72,6 +76,14 @@ pub(crate) enum RunCommand {
         paths: Vec<PathBuf>,
         purpose: FilePurpose,
     },
+    Extend {
+        to: EndpointId,
+        request: ExtendRequest,
+    },
+    StopExtend {
+        to: EndpointId,
+    },
+    ViewerWindow(Option<u64>),
 }
 
 fn send_files_in_background(
@@ -191,6 +203,24 @@ pub(crate) async fn run(
     let mut ids: HashMap<EndpointId, MachineId> = HashMap::new();
     let mut peers: HashMap<MachineId, Peer> = HashMap::new();
 
+    // Virtual monitor mode: this Mac's extra display shown elsewhere, or a Mac's shown here.
+    #[cfg(target_os = "macos")]
+    let mut host: Option<extend::Host> = None;
+    let mut viewing: Option<Viewing> = None;
+    let mut viewer_window: Option<u64> = None;
+    let frames = ctx.engine.viewer_frames.clone();
+    let set_portal =
+        |viewing: &Option<Viewing>, window: Option<u64>, ids: &HashMap<EndpointId, MachineId>| {
+            let portal = viewing.and_then(|v| {
+                Some(Portal {
+                    peer: *ids.get(&v.peer)?,
+                    remote: v.bounds?,
+                    window: window?,
+                })
+            });
+            capture.send(CaptureCommand::SetPortal(portal));
+        };
+
     // Rebuilds the layout and tells each peer where we've put it.
     let relayout = |peers: &HashMap<MachineId, Peer>, config: &Config, ctx: &Ctx| {
         let may_drive = config.control.allows(&own_id);
@@ -289,6 +319,39 @@ pub(crate) async fn run(
                         None => ctx.status(Status::Problem("That device isn't connected.".into())),
                     }
                 }
+                RunCommand::Extend { to, request } => {
+                    match by_peer.read().unwrap().get(&to).cloned() {
+                        Some(session) => {
+                            if let Some(old) = viewing.take()
+                                && old.peer != to
+                                && let Some(s) = by_peer.read().unwrap().get(&old.peer)
+                            {
+                                s.send(Control::ExtendStop { reason: String::new() });
+                            }
+                            viewing = Some(Viewing { peer: to, bounds: None });
+                            session.send(Control::ExtendRequest(request));
+                        }
+                        None => ctx.status(Status::ExtendEnded {
+                            id: to,
+                            reason: "that device isn't connected".into(),
+                        }),
+                    }
+                    set_portal(&viewing, viewer_window, &ids);
+                }
+                RunCommand::StopExtend { to } => {
+                    if viewing.is_some_and(|v| v.peer == to) {
+                        viewing = None;
+                        frames.send_replace(None);
+                        if let Some(s) = by_peer.read().unwrap().get(&to) {
+                            s.send(Control::ExtendStop { reason: String::new() });
+                        }
+                        set_portal(&viewing, viewer_window, &ids);
+                    }
+                }
+                RunCommand::ViewerWindow(window) => {
+                    viewer_window = window;
+                    set_portal(&viewing, viewer_window, &ids);
+                }
             },
             Some(result) = inbox_done.recv() => match result {
                 Ok((info, _path)) => {
@@ -359,6 +422,59 @@ pub(crate) async fn run(
                                     });
                                 }
                             }
+                            Control::ExtendRequest(request) => {
+                                let Some(session) = peers.get(&machine).map(|p| p.session.clone()) else {
+                                    continue;
+                                };
+                                #[cfg(target_os = "macos")]
+                                {
+                                    if let Some(old) = host.take() {
+                                        old.stop().await;
+                                    }
+                                    match extend::Host::start(session.clone(), request, "Legato".into()).await {
+                                        Ok(h) => host = Some(h),
+                                        Err(e) => {
+                                            ctx.status(Status::Problem(format!(
+                                                "Couldn't show an extra display on \"{}\": {e:#}",
+                                                session.remote.name
+                                            )));
+                                            session.send(Control::ExtendStop { reason: format!("{e:#}") });
+                                        }
+                                    }
+                                }
+                                #[cfg(not(target_os = "macos"))]
+                                {
+                                    let _ = request;
+                                    session.send(Control::ExtendStop {
+                                        reason: "only a Mac can show an extra display".into(),
+                                    });
+                                }
+                            }
+                            Control::Extended { bounds } => {
+                                if let Some(v) = viewing.as_mut().filter(|v| v.peer == peer) {
+                                    v.bounds = Some(bounds);
+                                    ctx.status(Status::Extended { id: peer, bounds });
+                                    set_portal(&viewing, viewer_window, &ids);
+                                }
+                            }
+                            Control::ExtendStop { reason } => {
+                                #[cfg(target_os = "macos")]
+                                if let Some(h) = host.take_if(|h| h.peer == peer) {
+                                    h.stop().await;
+                                }
+                                if viewing.is_some_and(|v| v.peer == peer) {
+                                    viewing = None;
+                                    frames.send_replace(None);
+                                    set_portal(&viewing, viewer_window, &ids);
+                                    ctx.status(Status::ExtendEnded { id: peer, reason });
+                                }
+                            }
+                            Control::Keyframe => {
+                                #[cfg(target_os = "macos")]
+                                if let Some(h) = host.as_ref().filter(|h| h.peer == peer) {
+                                    h.request_keyframe();
+                                }
+                            }
                             Control::Hello(_) => {}
                             input => {
                                 let _ = inject_tx.send(Input::Control(peer, input));
@@ -377,6 +493,16 @@ pub(crate) async fn run(
                         }
                     }
                     SessionEvent::File { peer, file } => inbox.receive(peer, file),
+                    SessionEvent::Video { peer, video } => {
+                        #[cfg(windows)]
+                        if viewing.is_some_and(|v| v.peer == peer)
+                            && let Some(session) = by_peer.read().unwrap().get(&peer).cloned()
+                        {
+                            extend::decode(video, session, frames.clone());
+                            continue;
+                        }
+                        let _ = (peer, video);
+                    }
                     SessionEvent::Disconnected { peer, reason } => {
                         let Some(&machine) = ids.get(&peer) else { continue };
                         if let Some(p) = peers.remove(&machine) {
@@ -388,6 +514,16 @@ pub(crate) async fn run(
                         }
                         sessions.write().unwrap().remove(&machine);
                         by_peer.write().unwrap().remove(&peer);
+                        #[cfg(target_os = "macos")]
+                        if let Some(h) = host.take_if(|h| h.peer == peer) {
+                            h.stop().await;
+                        }
+                        if viewing.is_some_and(|v| v.peer == peer) {
+                            viewing = None;
+                            frames.send_replace(None);
+                            set_portal(&viewing, viewer_window, &ids);
+                            ctx.status(Status::ExtendEnded { id: peer, reason: "disconnected".into() });
+                        }
                         capture.send(CaptureCommand::Event(Event::PeerLost(machine)));
                         let _ = inject_tx.send(Input::Disconnected(peer));
                         relayout(&peers, &config, &ctx);
@@ -395,6 +531,17 @@ pub(crate) async fn run(
                 }
             }
         }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(h) = host.take() {
+        h.stop().await;
+    }
+    if let Some(v) = viewing {
+        frames.send_replace(None);
+        ctx.status(Status::ExtendEnded {
+            id: v.peer,
+            reason: String::new(),
+        });
     }
     drop(clipboard);
     drop(capture);

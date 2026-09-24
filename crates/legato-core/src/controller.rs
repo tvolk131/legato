@@ -66,6 +66,41 @@ pub enum Event {
     /// The user is dragging these files (or stopped: `None`). While files are carried the
     /// cursor may cross with the button held; releasing it on a peer drops them there.
     Carrying(Option<Vec<std::path::PathBuf>>),
+    /// The pointer moved over the picture in the [`Portal`] window, to `at` (0..1 across
+    /// and down the picture). Sent instead of `LocalMotion` while it's there.
+    PortalMotion {
+        at: Point,
+    },
+}
+
+/// Where a picture of `size` sits when fitted into `area` (letterboxed, centred). The
+/// portal window draws the peer's display this way, and the capture backend hit-tests it
+/// the same way.
+pub fn fit_picture(size: (f64, f64), area: Rect) -> Rect {
+    let (w, h) = size;
+    if w <= 0.0 || h <= 0.0 || area.width <= 0.0 || area.height <= 0.0 {
+        return area;
+    }
+    let scale = (area.width / w).min(area.height / h);
+    let (fw, fh) = (w * scale, h * scale);
+    Rect::new(
+        area.x + (area.width - fw) / 2.0,
+        area.y + (area.height - fh) / 2.0,
+        fw,
+        fh,
+    )
+}
+
+/// Virtual monitor mode: a window on this machine showing one of a peer's displays. While
+/// the pointer is over the picture, input goes to that display, placed absolutely, and the
+/// local cursor keeps moving as usual.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Portal {
+    pub peer: MachineId,
+    /// The display shown, in the peer's native coordinates.
+    pub remote: Rect,
+    /// The window it's shown in, as the capture backend knows it (an `HWND` on Windows).
+    pub window: u64,
 }
 
 /// Sent to a capture backend's thread from elsewhere.
@@ -76,6 +111,7 @@ pub enum CaptureCommand {
     SetLayout(Layout),
     SetRemap(MachineId, KeyRemap),
     SetConfig(ControllerConfig),
+    SetPortal(Option<Portal>),
     Stop,
 }
 
@@ -157,6 +193,12 @@ enum State {
         /// control back.
         return_to: Point,
     },
+    /// The pointer is over the portal window.
+    Portal {
+        peer: MachineId,
+        /// The peer's cursor, in its native coordinates.
+        pos: Point,
+    },
 }
 
 pub struct Controller {
@@ -171,6 +213,7 @@ pub struct Controller {
     keys: HashMap<u16, Route>,
     buttons: HashMap<Button, Route>,
     carrying: Option<Vec<std::path::PathBuf>>,
+    portal: Option<Portal>,
 }
 
 impl Controller {
@@ -185,7 +228,22 @@ impl Controller {
             keys: HashMap::new(),
             buttons: HashMap::new(),
             carrying: None,
+            portal: None,
         }
+    }
+
+    pub fn portal(&self) -> Option<&Portal> {
+        self.portal.as_ref()
+    }
+
+    /// Shows (or stops showing) a peer's display in a window here.
+    pub fn set_portal(&mut self, portal: Option<Portal>, out: &mut Vec<Action>) {
+        if let State::Portal { peer, .. } = self.state
+            && portal.is_none_or(|p| p.peer != peer)
+        {
+            self.leave_portal(peer, out);
+        }
+        self.portal = portal;
     }
 
     /// Whether files are being carried.
@@ -226,6 +284,11 @@ impl Controller {
     /// to the local machine.
     pub fn set_layout(&mut self, layout: Layout, out: &mut Vec<Action>) {
         self.layout = layout;
+        if let State::Portal { peer, .. } = self.state
+            && self.layout.machine(peer).is_none()
+        {
+            self.leave_portal(peer, out);
+        }
         if let State::Remote { peer, cursor, .. } = self.state {
             match self.layout.machine(peer) {
                 None => {
@@ -255,7 +318,7 @@ impl Controller {
     pub fn active_peer(&self) -> Option<MachineId> {
         match self.state {
             State::Local => None,
-            State::Remote { peer, .. } => Some(peer),
+            State::Remote { peer, .. } | State::Portal { peer, .. } => Some(peer),
         }
     }
 
@@ -273,6 +336,7 @@ impl Controller {
                 self.carrying = files;
                 Verdict::Pass
             }
+            Event::PortalMotion { at } => self.portal_motion(at, out),
             Event::PeerYield(peer) | Event::PeerLost(peer) => {
                 let yielded = matches!(event, Event::PeerYield(_));
                 if self.active_peer() == Some(peer) {
@@ -291,6 +355,10 @@ impl Controller {
         attempted: Point,
         out: &mut Vec<Action>,
     ) -> Verdict {
+        if let State::Portal { peer, .. } = self.state {
+            // Off the portal's picture: back to this machine.
+            self.leave_portal(peer, out);
+        }
         if self.active_peer().is_some() {
             // Shouldn't happen while captured; don't let it move the shared cursor.
             return Verdict::Swallow;
@@ -339,6 +407,48 @@ impl Controller {
         self.enter_peer(target, entry, pos, out);
         out.push(Action::Capture);
         Verdict::Swallow
+    }
+
+    fn portal_motion(&mut self, at: Point, out: &mut Vec<Action>) -> Verdict {
+        let Some(portal) = self.portal else {
+            return Verdict::Pass;
+        };
+        if matches!(self.state, State::Remote { .. }) || self.layout.machine(portal.peer).is_none()
+        {
+            // Captured (shouldn't happen), or not allowed to drive that peer.
+            return Verdict::Pass;
+        }
+        let r = portal.remote;
+        let pos = Point::new(
+            (r.x + at.x.clamp(0.0, 1.0) * r.width).min(r.right() - 1.0),
+            (r.y + at.y.clamp(0.0, 1.0) * r.height).min(r.bottom() - 1.0),
+        );
+        self.seq = self.seq.wrapping_add(1);
+        match self.state {
+            State::Portal { peer, .. } if peer == portal.peer => {
+                out.push(Action::Datagram {
+                    to: peer,
+                    msg: Datagram::Motion { seq: self.seq, pos },
+                });
+            }
+            _ => {
+                self.push = None;
+                out.push(Action::Send {
+                    to: portal.peer,
+                    msg: Control::Enter { seq: self.seq, pos },
+                });
+            }
+        }
+        self.state = State::Portal {
+            peer: portal.peer,
+            pos,
+        };
+        Verdict::Pass
+    }
+
+    fn leave_portal(&mut self, peer: MachineId, out: &mut Vec<Action>) {
+        self.leave_peer(peer, out);
+        self.state = State::Local;
     }
 
     fn captured_motion(&mut self, now: Instant, delta: Point, out: &mut Vec<Action>) {
@@ -558,6 +668,13 @@ impl Controller {
     }
 
     fn exit_to_local(&mut self, notify_peer: bool, out: &mut Vec<Action>) {
+        if let State::Portal { peer, .. } = self.state {
+            if notify_peer {
+                self.leave_peer(peer, out);
+            }
+            self.state = State::Local;
+            return;
+        }
         let State::Remote {
             peer, return_to, ..
         } = self.state
@@ -575,7 +692,7 @@ impl Controller {
     fn return_point(&self) -> Point {
         match self.state {
             State::Remote { return_to, .. } => return_to,
-            State::Local => Point::default(),
+            State::Local | State::Portal { .. } => Point::default(),
         }
     }
 
@@ -597,6 +714,7 @@ impl Controller {
             State::Remote {
                 peer: p, cursor, ..
             } if p == peer => self.layout.machine(peer).map(|m| m.to_native(cursor)),
+            State::Portal { peer: p, pos } if p == peer => Some(pos),
             _ => None,
         }
     }

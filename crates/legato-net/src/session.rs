@@ -12,7 +12,9 @@ use bytes::Bytes;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointId};
-use legato_proto::{Control, Datagram, Hello, PROTOCOL_VERSION, SESSION_ALPN, Screens};
+use legato_proto::{
+    Control, Datagram, Hello, PROTOCOL_VERSION, SESSION_ALPN, Screens, VideoFrameHeader,
+};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -23,6 +25,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
+/// Stream priorities: input (the control stream, 0) beats video, which beats bulk data.
+const VIDEO_PRIORITY: i32 = -1;
+const BULK_PRIORITY: i32 = -2;
 
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -46,6 +51,11 @@ pub enum SessionEvent {
         peer: EndpointId,
         file: Arc<IncomingFile>,
     },
+    /// A video stream (virtual monitor mode). Read frames with [`IncomingVideo::next`].
+    Video {
+        peer: EndpointId,
+        video: Arc<IncomingVideo>,
+    },
     Disconnected {
         peer: EndpointId,
         reason: String,
@@ -68,6 +78,52 @@ impl IncomingFile {
             bail!("expected {} bytes, got {copied}", self.header.size);
         }
         Ok(copied)
+    }
+}
+
+/// A video stream arriving from a peer.
+#[derive(Debug)]
+pub struct IncomingVideo {
+    recv: tokio::sync::Mutex<RecvStream>,
+}
+
+impl IncomingVideo {
+    /// The next frame and whether it's a keyframe, or `None` once the stream ends.
+    pub async fn next(&self) -> Result<Option<(Vec<u8>, bool)>> {
+        let mut recv = self.recv.lock().await;
+        let mut header = [0u8; VideoFrameHeader::SIZE];
+        match recv.read_exact(&mut header).await {
+            Ok(()) => {}
+            Err(iroh::endpoint::ReadExactError::FinishedEarly(0)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+        let header = VideoFrameHeader::decode(header).context("bad video frame header")?;
+        let mut data = vec![0u8; header.len as usize];
+        recv.read_exact(&mut data).await?;
+        Ok(Some((data, header.keyframe)))
+    }
+}
+
+/// Sends frames on a video stream, in order.
+#[derive(Debug)]
+pub struct VideoSender {
+    send: SendStream,
+}
+
+impl VideoSender {
+    /// Resolves once the frame is handed to the connection (not when it arrives).
+    pub async fn send(&mut self, frame: &[u8], keyframe: bool) -> Result<()> {
+        let header = VideoFrameHeader {
+            len: frame.len().try_into().context("frame too large")?,
+            keyframe,
+        };
+        self.send.write_all(&header.encode()).await?;
+        self.send.write_all(frame).await?;
+        Ok(())
+    }
+
+    pub fn finish(mut self) {
+        let _ = self.send.finish();
     }
 }
 
@@ -123,7 +179,7 @@ impl Session {
         tokio::spawn(async move {
             let result = async {
                 let mut send = conn.open_uni().await?;
-                send.set_priority(-1)?;
+                send.set_priority(BULK_PRIORITY)?;
                 send.write_all(&[tag]).await?;
                 send.write_all(&(data.len() as u64).to_le_bytes()).await?;
                 send.write_all(&data).await?;
@@ -145,7 +201,7 @@ impl Session {
         data: &mut (impl tokio::io::AsyncRead + Unpin),
     ) -> Result<()> {
         let mut send = self.conn.open_uni().await?;
-        send.set_priority(-1)?;
+        send.set_priority(BULK_PRIORITY)?;
         send.write_all(&[legato_proto::blob::FILE]).await?;
         let size = header.size;
         write_frame(&mut send, &header).await?;
@@ -157,6 +213,14 @@ impl Session {
         send.finish()?;
         let _ = send.stopped().await;
         Ok(())
+    }
+
+    /// Opens a video stream to the peer.
+    pub async fn open_video(&self) -> Result<VideoSender> {
+        let mut send = self.conn.open_uni().await?;
+        send.set_priority(VIDEO_PRIORITY)?;
+        send.write_all(&[legato_proto::blob::VIDEO]).await?;
+        Ok(VideoSender { send })
     }
 }
 
@@ -409,6 +473,13 @@ async fn receive_blob(
             recv: tokio::sync::Mutex::new(Some(recv)),
         });
         let _ = events.send(SessionEvent::File { peer, file });
+        return Ok(());
+    }
+    if tag[0] == legato_proto::blob::VIDEO {
+        let video = Arc::new(IncomingVideo {
+            recv: tokio::sync::Mutex::new(recv),
+        });
+        let _ = events.send(SessionEvent::Video { peer, video });
         return Ok(());
     }
     let mut len = [0u8; 8];

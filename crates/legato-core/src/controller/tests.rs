@@ -714,3 +714,209 @@ proptest! {
         }
     }
 }
+
+/// The Mac's extra display, 1920×1080 points to the left of its built-in one.
+const EXTRA: Rect = Rect::new(-1920.0, 0.0, 1920.0, 1080.0);
+
+fn with_portal() -> Harness {
+    let mut h = Harness::new();
+    let mut out = vec![];
+    h.c.set_portal(
+        Some(Portal {
+            peer: MAC,
+            remote: EXTRA,
+            window: 42,
+        }),
+        &mut out,
+    );
+    assert!(out.is_empty());
+    h
+}
+
+#[test]
+fn the_portal_places_the_mac_cursor_absolutely_and_leaves_the_local_one_alone() {
+    let mut h = with_portal();
+    let v = h.step(
+        8,
+        Event::PortalMotion {
+            at: Point::new(0.5, 0.25),
+        },
+    );
+    assert_eq!(v, Verdict::Pass, "the local cursor keeps moving");
+    let out = h.take();
+    assert!(
+        matches!(&out[..], [Action::Send { to: MAC, msg: Control::Enter { pos, .. } }]
+            if *pos == Point::new(-960.0, 270.0)),
+        "{out:?}"
+    );
+    assert!(!out.contains(&Action::Capture));
+    assert_eq!(h.c.active_peer(), Some(MAC));
+
+    h.step(
+        8,
+        Event::PortalMotion {
+            at: Point::new(1.0, 1.0),
+        },
+    );
+    let out = h.take();
+    assert!(
+        matches!(&out[..], [Action::Datagram { to: MAC, msg: Datagram::Motion { pos, .. } }]
+            if *pos == Point::new(-1.0, 1079.0)),
+        "clamped inside the display: {out:?}"
+    );
+}
+
+#[test]
+fn input_over_the_portal_goes_to_the_mac_and_leaving_ends_it() {
+    let mut h = with_portal();
+    h.step(
+        8,
+        Event::PortalMotion {
+            at: Point::new(0.1, 0.1),
+        },
+    );
+    h.take();
+    let v = h.step(
+        0,
+        Event::Button {
+            button: Button::Left,
+            down: true,
+        },
+    );
+    assert_eq!(v, Verdict::Swallow);
+    assert!(matches!(
+        &sent(&h.take())[..],
+        [Control::Button { button: Button::Left, down: true, pos }] if *pos == Point::new(-1728.0, 108.0)
+    ));
+    let v = h.step(
+        0,
+        Event::Key {
+            usage: A,
+            down: true,
+        },
+    );
+    assert_eq!(v, Verdict::Swallow);
+    h.take();
+
+    // Off the picture: the Mac is told, and this machine gets its input back.
+    let v = h.step(
+        8,
+        Event::LocalMotion {
+            pos: Point::new(100.0, 100.0),
+            attempted: Point::new(-5.0, 0.0),
+        },
+    );
+    assert_eq!(v, Verdict::Pass);
+    assert_eq!(sent(&h.take()), [Control::Leave]);
+    assert_eq!(h.c.active_peer(), None);
+    // What was pressed over the portal was released by the Mac; the releases go nowhere.
+    let v = h.step(
+        0,
+        Event::Key {
+            usage: A,
+            down: false,
+        },
+    );
+    assert_eq!(v, Verdict::Swallow);
+    assert!(h.take().is_empty());
+    let v = h.step(
+        0,
+        Event::Key {
+            usage: A,
+            down: true,
+        },
+    );
+    assert_eq!(v, Verdict::Pass, "new keys are local");
+}
+
+#[test]
+fn closing_the_portal_or_losing_the_mac_ends_it() {
+    let mut h = with_portal();
+    h.step(
+        8,
+        Event::PortalMotion {
+            at: Point::new(0.5, 0.5),
+        },
+    );
+    h.take();
+    let mut out = vec![];
+    h.c.set_portal(None, &mut out);
+    assert_eq!(sent(&out), [Control::Leave]);
+    assert_eq!(h.c.active_peer(), None);
+    assert_eq!(
+        h.step(
+            8,
+            Event::PortalMotion {
+                at: Point::new(0.5, 0.5)
+            }
+        ),
+        Verdict::Pass
+    );
+    assert!(h.take().is_empty(), "no portal, nothing sent");
+
+    let mut h = with_portal();
+    h.step(
+        8,
+        Event::PortalMotion {
+            at: Point::new(0.5, 0.5),
+        },
+    );
+    h.take();
+    h.step(0, Event::PeerLost(MAC));
+    assert!(h.take().is_empty(), "no Release: nothing was captured");
+    assert_eq!(h.c.active_peer(), None);
+}
+
+#[test]
+fn touching_the_mac_hands_it_back_until_the_pointer_moves_over_the_portal_again() {
+    let mut h = with_portal();
+    h.step(
+        8,
+        Event::PortalMotion {
+            at: Point::new(0.5, 0.5),
+        },
+    );
+    h.take();
+    h.step(0, Event::PeerYield(MAC));
+    assert_eq!(sent(&h.take()), [Control::Leave]);
+    assert_eq!(h.c.active_peer(), None);
+    h.step(
+        8,
+        Event::PortalMotion {
+            at: Point::new(0.5, 0.6),
+        },
+    );
+    assert!(matches!(&sent(&h.take())[..], [Control::Enter { .. }]));
+}
+
+#[test]
+fn the_portal_is_ignored_when_this_machine_may_not_drive_the_mac() {
+    let mut h = with_portal();
+    let mut out = vec![];
+    h.c.set_layout(Layout::new(windows_triple_4k()), &mut out);
+    assert_eq!(
+        h.step(
+            8,
+            Event::PortalMotion {
+                at: Point::new(0.5, 0.5)
+            }
+        ),
+        Verdict::Pass
+    );
+    assert!(h.take().is_empty());
+    assert_eq!(h.c.active_peer(), None);
+}
+
+#[test]
+fn pictures_are_letterboxed_and_centred() {
+    // A 16:9 picture in a square window: bars above and below.
+    assert_eq!(
+        fit_picture((1920.0, 1080.0), Rect::new(100.0, 0.0, 1600.0, 1600.0)),
+        Rect::new(100.0, 350.0, 1600.0, 900.0)
+    );
+    // In a wide window: bars at the sides.
+    assert_eq!(
+        fit_picture((1600.0, 900.0), Rect::new(0.0, 0.0, 3200.0, 900.0)),
+        Rect::new(800.0, 0.0, 1600.0, 900.0)
+    );
+}

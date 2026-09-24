@@ -20,6 +20,46 @@ pub struct Config {
     pub scrolling: Scrolling,
     pub control: Control,
     pub clipboard: Clipboard,
+    pub extend: Extend,
+}
+
+/// Virtual monitor mode: the extra display a Mac shows on this machine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Extend {
+    /// Size in pixels. With `hidpi` the Mac treats it as Retina, so it looks like half
+    /// this size (3840×2160 looks like 1920×1080, sharp on a 4K monitor).
+    pub width: u32,
+    pub height: u32,
+    pub hidpi: bool,
+    pub fps: u32,
+    /// Video quality, in megabits per second.
+    pub bitrate_mbps: u32,
+}
+
+impl Default for Extend {
+    fn default() -> Self {
+        Self {
+            width: 3840,
+            height: 2160,
+            hidpi: true,
+            fps: 60,
+            bitrate_mbps: 40,
+        }
+    }
+}
+
+impl Extend {
+    /// The request sent to the Mac, within what the video pipeline handles.
+    pub fn request(&self) -> legato_proto::ExtendRequest {
+        legato_proto::ExtendRequest {
+            width: self.width.clamp(1280, 7680) & !1,
+            height: self.height.clamp(720, 4320) & !1,
+            hidpi: self.hidpi,
+            fps: self.fps.clamp(10, 120),
+            bitrate: self.bitrate_mbps.clamp(2, 200) * 1_000_000,
+        }
+    }
 }
 
 /// Which machines may drive the others. Shared between paired machines: the most recent

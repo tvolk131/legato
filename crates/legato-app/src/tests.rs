@@ -92,6 +92,7 @@ fn model(page: Page) -> Model {
         },
         known,
         placed_us: HashMap::new(),
+        viewing: None,
         active: None,
         problems: vec![],
         notice: None,
@@ -247,5 +248,43 @@ fn connected_devices_can_be_sent_files() {
             .iter()
             .any(|m| matches!(m, Message::SendFiles(id) if *id == mac)),
         "{messages:?}"
+    );
+}
+
+#[test]
+fn a_connected_mac_can_be_shown_as_a_display_on_windows() {
+    let mut m = model(Page::Devices);
+    let mac = m.paired[0].device.id;
+    let mut ui = simulator(crate::view::root(&m));
+    ui.click("Show as display").unwrap();
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::ShowDisplay(id) if *id == mac)),
+        "{messages:?}"
+    );
+
+    m.viewing = Some(mac);
+    let mut ui = simulator(crate::view::root(&m));
+    ui.click("Stop display").unwrap();
+    assert!(
+        ui.into_messages()
+            .any(|m| matches!(m, Message::StopDisplay))
+    );
+
+    // A Mac can't show another machine's display.
+    m.this.os = Some(Os::MacOs);
+    m.viewing = None;
+    let mut ui = simulator(crate::view::root(&m));
+    assert!(ui.find("Show as display").is_err());
+}
+
+#[test]
+fn the_viewer_waits_for_the_first_picture() {
+    let mut ui = simulator(crate::view::viewer("Tommy's MacBook Pro", None));
+    assert!(
+        ui.find("Waiting for \"Tommy's MacBook Pro\" to add its display…")
+            .is_ok()
     );
 }

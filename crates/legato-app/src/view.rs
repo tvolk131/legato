@@ -54,6 +54,38 @@ pub fn root(m: &Model) -> Element<'_, Message> {
     iced_m3::focus::scope(modal(main, pairing_dialog(m), m.pairing_open))
 }
 
+/// The window showing a Mac's extra display.
+pub fn viewer(name: &str, frame: Option<legato_engine::ViewerFrame>) -> Element<'static, Message> {
+    let content: Element<'static, Message> = match frame {
+        Some(frame) => iced::widget::shader(crate::viewer::Picture(frame))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        None => container(
+            column![
+                container(loading_indicator()).width(48).height(48),
+                typography(
+                    format!("Waiting for \"{name}\" to add its display…"),
+                    TypeScale::BodyLarge
+                ),
+            ]
+            .spacing(16)
+            .align_x(Alignment::Center),
+        )
+        .center(Length::Fill)
+        .into(),
+    };
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(iced::Color::BLACK.into()),
+            text_color: Some(iced::Color::WHITE),
+            ..Default::default()
+        })
+        .into()
+}
+
 fn heading(text: &str) -> Element<'_, Message> {
     container(typography(text, TypeScale::TitleMedium))
         .padding([12, 0])
@@ -100,10 +132,24 @@ fn devices(m: &Model) -> Element<'_, Message> {
             } else {
                 send
             };
+            let display: Option<Element<'_, Message>> = m.can_view(p).then(|| {
+                if m.viewing == Some(p.device.id) {
+                    button("Stop display")
+                        .variant(ButtonVariant::Tonal)
+                        .on_press(Message::StopDisplay)
+                        .into()
+                } else {
+                    button("Show as display")
+                        .variant(ButtonVariant::Tonal)
+                        .on_press(Message::ShowDisplay(p.device.id))
+                        .into()
+                }
+            });
             list_item(p.device.name.clone())
                 .supporting_text(format!("{} · {status}", os_name(p.device.os)))
                 .trailing(
                     row![
+                        display,
                         send,
                         button("Unpair")
                             .variant(ButtonVariant::Text)

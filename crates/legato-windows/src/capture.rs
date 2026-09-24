@@ -17,7 +17,8 @@ use legato_core::LocalInput;
 use legato_core::controller::{Action, CaptureCommand, Controller, Event, Verdict};
 use legato_core::keymap;
 use legato_proto::{Button, Point, Rect, Scroll};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, VK_RSHIFT};
@@ -26,15 +27,16 @@ use windows::Win32::UI::Input::{
     RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED,
-    LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostThreadMessageW, RegisterClassW, SW_HIDE, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SetCursor, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos,
-    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, XBUTTON1,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT,
+    GetAncestor, GetClientRect, GetMessageW, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
+    LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostThreadMessageW,
+    RegisterClassW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetCursorPos,
+    SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_INPUT,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WindowFromPoint, XBUTTON1,
 };
 use windows::core::w;
 
@@ -219,6 +221,9 @@ impl State {
                     };
                     self.raw = (0, 0);
                     self.last_pos = Some(pos);
+                    if let Some(at) = self.portal_hit(pos) {
+                        return self.handle(Event::PortalMotion { at });
+                    }
                     let at = Point::new(pos.x as f64, pos.y as f64);
                     // Dragging against an edge that leads somewhere: offer to catch files.
                     let catch = self.left_down
@@ -278,6 +283,43 @@ impl State {
         self.handle(Event::Key { usage, down })
     }
 
+    /// Where on the portal's picture `pos` is (0..1 each way), if it's over it and the
+    /// portal window isn't covered there.
+    fn portal_hit(&self, pos: POINT) -> Option<Point> {
+        let portal = self.controller.portal()?;
+        let window = HWND(portal.window as usize as *mut core::ffi::c_void);
+        // SAFETY: window queries; a stale handle just fails them.
+        unsafe {
+            let under = WindowFromPoint(pos);
+            if under.is_invalid() || GetAncestor(under, GA_ROOT) != window {
+                return None;
+            }
+            let mut client = RECT::default();
+            GetClientRect(window, &mut client).ok()?;
+            let mut origin = POINT::default();
+            if !ClientToScreen(window, &mut origin).as_bool() {
+                return None;
+            }
+            let area = Rect::new(
+                origin.x as f64,
+                origin.y as f64,
+                (client.right - client.left) as f64,
+                (client.bottom - client.top) as f64,
+            );
+            let picture = legato_core::controller::fit_picture(
+                (portal.remote.width, portal.remote.height),
+                area,
+            );
+            let p = Point::new(pos.x as f64, pos.y as f64);
+            picture.contains(p).then(|| {
+                Point::new(
+                    (p.x - picture.x) / picture.width,
+                    (p.y - picture.y) / picture.height,
+                )
+            })
+        }
+    }
+
     fn on_command(&mut self, command: Command) -> Option<Vec<Effect>> {
         match command {
             Command::Event(event) => Some(self.handle(event).1),
@@ -292,6 +334,10 @@ impl State {
             Command::SetConfig(config) => {
                 self.controller.set_config(config);
                 Some(vec![])
+            }
+            Command::SetPortal(portal) => {
+                self.controller.set_portal(portal, &mut self.out);
+                Some(self.drain())
             }
             Command::Stop => None,
         }

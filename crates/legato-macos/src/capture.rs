@@ -171,6 +171,8 @@ impl TapState {
                 }
                 CaptureCommand::SetRemap(peer, remap) => self.controller.set_remap(peer, remap),
                 CaptureCommand::SetConfig(config) => self.controller.set_config(config),
+                // Portals are shown on Windows only.
+                CaptureCommand::SetPortal(_) => {}
                 CaptureCommand::Stop => return false,
             }
         }

@@ -121,6 +121,25 @@ Setup notes:
 
 Limits: runners are single-display VMs with no real input devices, and their permission state (TCC) differs from users' machines. This is a regression net, not proof the app feels right.
 
+### Virtual monitor mode
+
+The Mac encodes and Windows decodes, so the two ends are tested against each other through a committed fixture:
+- **Encoder (macOS, every PR):** VideoToolbox encodes a known test pattern (`legato_screen::test_pattern`). The test checks the stream starts with SPS, PPS and an IDR slice and that later frames are P-slices.
+- **Decoder (Windows, every PR):** Media Foundation decodes `crates/legato-screen/tests/fixtures/pattern.frames`, which the encoder test wrote, and checks the colours of every frame. It also checks that low-latency mode gives one picture per frame. Regenerate the fixture on a Mac with `LEGATO_WRITE_FIXTURES=1 cargo test -p legato-screen --test mac_hardware encoder`.
+- **Virtual display (macOS, ignored):** the display appears with the requested point and pixel size and Legato's vendor and product ids, and goes away when dropped.
+- **Capture (macOS, ignored; needs Screen Recording):** a virtual display streams a keyframe first, and a keyframe on request even while nothing on it changes.
+- **Portal (pure core):** motion over the picture places the Mac cursor absolutely, input over it goes to the Mac, and leaving, closing, yielding and losing the Mac each end it.
+- **Video stream (in-process network):** frames arrive intact and in order, and the stream ends cleanly.
+
+Lab checklist:
+- text is sharp at 100% zoom in full screen on a 4K monitor
+- the Windows pointer lines up with where the Mac clicks, including at the picture's edges and in letterboxed windows
+- latency feels close to a local display when dragging windows on it
+- moving windows onto the display from the Mac's own screen, and back
+- rearranging displays in System Settings while it's shown
+- closing the viewer, stopping from the Mac, quitting either app, and pulling the network cable all remove the display
+- the Screen Recording prompt on first use, and relaunch after granting it
+
 ---
 
 ## 4. Cross-OS lab

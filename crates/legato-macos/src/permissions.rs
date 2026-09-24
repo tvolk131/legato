@@ -33,6 +33,8 @@ pub struct Permissions {
     pub post_events: bool,
     /// Listening to all input (Input Monitoring, also covered by Accessibility).
     pub listen_events: bool,
+    /// Screen Recording: only needed to show this Mac as a display on another machine.
+    pub screen_recording: bool,
 }
 
 impl Permissions {
@@ -43,6 +45,7 @@ impl Permissions {
             accessibility,
             post_events: CGPreflightPostEventAccess(),
             listen_events: CGPreflightListenEventAccess(),
+            screen_recording: objc2_core_graphics::CGPreflightScreenCaptureAccess(),
         }
     }
 

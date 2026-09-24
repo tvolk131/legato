@@ -135,7 +135,11 @@ impl Receiver {
             | Control::Screens(_)
             | Control::Yield
             | Control::Placement { .. }
-            | Control::ControlMode(_) => {}
+            | Control::ControlMode(_)
+            | Control::ExtendRequest(_)
+            | Control::Extended { .. }
+            | Control::ExtendStop { .. }
+            | Control::Keyframe => {}
         }
     }
 
