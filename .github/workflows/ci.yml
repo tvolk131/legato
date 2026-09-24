@@ -13,6 +13,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Deterministic headless rendering for UI tests (no GPU on runners).
+  ICED_TEST_BACKEND: tiny-skia
 
 jobs:
   fmt:

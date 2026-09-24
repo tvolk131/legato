@@ -12,6 +12,9 @@ repository = "https://github.com/tvolk131/legato"
 publish = false
 
 [workspace.dependencies]
+iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "canvas", "svg", "thread-pool"] }
+iced-m3 = "=0.1.0-beta.2"
+iced_test = "=0.14.0"
 legato-proto = { path = "crates/legato-proto" }
 legato-core = { path = "crates/legato-core" }
 legato-net = { path = "crates/legato-net" }
