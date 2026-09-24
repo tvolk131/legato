@@ -158,6 +158,18 @@ impl Encoder {
         }
     }
 
+    /// Encodes a picture and waits until it has been delivered to `on_frame`.
+    ///
+    /// Left to itself the encoder keeps about five frames in flight, which adds about
+    /// five frame intervals of lag (80 ms at 60 fps) and holds the last pictures back
+    /// when the screen goes still. Waiting costs throughput instead: about 16 ms per
+    /// 4K frame and 8 ms per 1440p frame on Apple silicon.
+    pub fn encode_now(&self, image: &CVPixelBuffer, pts: Duration, keyframe: bool) -> Result<()> {
+        self.encode(image, pts, keyframe)?;
+        self.flush();
+        Ok(())
+    }
+
     /// Waits until every queued picture has been delivered.
     pub fn flush(&self) {
         // SAFETY: a live session.
