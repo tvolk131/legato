@@ -183,6 +183,37 @@ pub enum Datagram {
     Motion { seq: u32, pos: Point },
 }
 
+/// Messages on the pairing stream (ALPN [`PAIR_ALPN`]).
+///
+/// Both sides send `Hello`, then show the user a short code derived from the TLS session
+/// (see [`pairing_code`]) and send the user's `Decision`. The peers are paired only if
+/// both accept.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Pair {
+    Hello {
+        protocol: u16,
+        app_version: String,
+        name: String,
+        os: Os,
+    },
+    Decision {
+        accept: bool,
+    },
+}
+
+/// Label for deriving the pairing code with TLS keying-material export (RFC 5705).
+pub const PAIRING_CODE_LABEL: &[u8] = b"legato pairing code v1";
+
+/// Turns 4 bytes of exported keying material into a 6-digit code.
+pub fn pairing_code(keying_material: [u8; 4]) -> u32 {
+    u32::from_le_bytes(keying_material) % 1_000_000
+}
+
+/// Formats a pairing code for display, e.g. `042 917`.
+pub fn format_pairing_code(code: u32) -> String {
+    format!("{:03} {:03}", code / 1000, code % 1000)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     #[error("frame of {0} bytes exceeds the {MAX_FRAME_LEN}-byte limit")]
@@ -191,8 +222,8 @@ pub enum DecodeError {
     Malformed(#[from] postcard::Error),
 }
 
-/// Encodes a control frame: a little-endian `u32` length followed by the postcard payload.
-pub fn encode_control(msg: &Control) -> Vec<u8> {
+/// Encodes a stream frame: a little-endian `u32` length followed by the postcard payload.
+pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
     let payload = postcard::to_stdvec(msg).expect("serializing to a Vec cannot fail");
     let mut out = Vec::with_capacity(4 + payload.len());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -200,7 +231,7 @@ pub fn encode_control(msg: &Control) -> Vec<u8> {
     out
 }
 
-/// Validates a control frame length read from the stream.
+/// Validates a frame length read from a stream.
 pub fn check_frame_len(len: u32) -> Result<usize, DecodeError> {
     let len = len as usize;
     if len > MAX_FRAME_LEN {
@@ -210,8 +241,8 @@ pub fn check_frame_len(len: u32) -> Result<usize, DecodeError> {
     }
 }
 
-/// Decodes a control frame payload (without its length prefix).
-pub fn decode_control(payload: &[u8]) -> Result<Control, DecodeError> {
+/// Decodes a frame payload (without its length prefix).
+pub fn decode_frame<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T, DecodeError> {
     Ok(postcard::from_bytes(payload)?)
 }
 
@@ -270,10 +301,10 @@ mod tests {
             Control::Yield,
         ];
         for msg in msgs {
-            let frame = encode_control(&msg);
+            let frame = encode_frame(&msg);
             let len = u32::from_le_bytes(frame[..4].try_into().unwrap());
             assert_eq!(check_frame_len(len).unwrap(), frame.len() - 4);
-            assert_eq!(decode_control(&frame[4..]).unwrap(), msg);
+            assert_eq!(decode_frame::<Control>(&frame[4..]).unwrap(), msg);
         }
     }
 
@@ -293,6 +324,13 @@ mod tests {
     }
 
     #[test]
+    fn pairing_codes_are_six_digits() {
+        assert_eq!(pairing_code([0xff; 4]), 967_295);
+        assert_eq!(format_pairing_code(42_917), "042 917");
+        assert_eq!(format_pairing_code(7), "000 007");
+    }
+
+    #[test]
     fn oversized_frames_are_rejected() {
         assert!(check_frame_len(MAX_FRAME_LEN as u32 + 1).is_err());
     }
@@ -301,7 +339,8 @@ mod tests {
         // Anything off the network must be rejected cleanly, never panic.
         #[test]
         fn decoders_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
-            let _ = decode_control(&bytes);
+            let _ = decode_frame::<Control>(&bytes);
+            let _ = decode_frame::<Pair>(&bytes);
             let _ = decode_datagram(&bytes);
         }
     }
