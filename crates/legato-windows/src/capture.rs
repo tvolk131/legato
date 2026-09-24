@@ -529,9 +529,8 @@ fn run(
     }
 
     // Don't leave the cursor pinned and hidden.
-    let pinned = STATE.with_borrow(|s| s.as_ref().and_then(|s| s.pin));
-    if pinned.is_some() {
-        apply(vec![Effect::Unpin(pinned.unwrap())]);
+    if let Some(pin) = STATE.with_borrow(|s| s.as_ref().and_then(|s| s.pin)) {
+        apply(vec![Effect::Unpin(pin)]);
     }
     STATE.with_borrow_mut(|s| *s = None);
     // SAFETY: tearing down what `setup` created.
