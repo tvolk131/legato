@@ -1,0 +1,19 @@
+[package]
+name = "ui-compile-check"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+iced = { version = "=0.14.0", features = ["tokio", "canvas", "advanced", "wgpu", "tiny-skia", "thread-pool", "svg"] }
+iced-m3 = "=0.1.0-beta.2"
+iced_aw = "0.14.1"
+tokio = { version = "1", features = ["full"] }
+tray-icon = "0.25.1"
+muda = "0.20"
+auto-launch = "0.6"
+single-instance = "0.3.3"
+arboard = "3.6.1"
+clipboard-rs = "0.3.5"
+drag = "2.1.1"
+display-info = "0.5.9"
+xcap = "0.9.8"

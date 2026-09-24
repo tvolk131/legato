@@ -1,0 +1,53 @@
+# Early signal that the chosen stack builds and runs on every target platform.
+# To be replaced by the real workspace CI once the crates exist.
+name: spikes
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  spikes:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            spikes/iroh-probe
+            spikes/ui-compile-check
+
+      - name: Build iroh-probe
+        working-directory: spikes/iroh-probe
+        run: cargo build --locked --release --bins
+      # Local-only checks; hybrid and upgrade need n0's public relays and are skipped.
+      - name: iroh LAN round trips, allow-list rejection
+        working-directory: spikes/iroh-probe
+        run: cargo run --locked --release --bin iroh-probe
+      - name: iroh pairing code
+        working-directory: spikes/iroh-probe
+        run: cargo run --locked --release --bin pair
+      - name: iroh after_handshake allow-list hook
+        working-directory: spikes/iroh-probe
+        run: cargo run --locked --release --bin hook
+      - name: iroh datagrams from a plain OS thread
+        working-directory: spikes/iroh-probe
+        run: cargo run --locked --release --bin thread
+
+      - name: UI stack type-checks (iced + iced-m3 + tray + clipboard + drag)
+        working-directory: spikes/ui-compile-check
+        run: cargo check --locked
