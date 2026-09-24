@@ -69,6 +69,8 @@ pub struct Model {
     pub problems: Vec<String>,
     pub notice: Option<(u64, String)>,
     pub autostart: Option<bool>,
+    /// The Mac whose extra display is shown here (virtual monitor mode).
+    pub viewing: Option<EndpointId>,
 }
 
 impl Model {
@@ -78,6 +80,13 @@ impl Model {
 
     pub fn connected(&self) -> impl Iterator<Item = &Paired> {
         self.paired.iter().filter(|p| p.connection.is_some())
+    }
+
+    /// Whether this machine can show `peer`'s extra display: only Windows shows a Mac's.
+    pub fn can_view(&self, peer: &Paired) -> bool {
+        self.this.os == Some(Os::Windows)
+            && peer.device.os == Some(Os::MacOs)
+            && peer.connection.is_some()
     }
 
     pub fn name_of(&self, id: &EndpointId) -> String {

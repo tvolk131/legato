@@ -21,6 +21,7 @@ mod platform;
 mod snap;
 mod tray;
 mod view;
+mod viewer;
 
 use model::{Device, Model, Page, Paired, Pairing, PairingStage};
 
@@ -82,6 +83,21 @@ pub enum Message {
     FileDropped(std::path::PathBuf),
     FlushDrops,
     DismissNotice,
+    /// Virtual monitor mode: show this Mac's extra display in a window here.
+    ShowDisplay(EndpointId),
+    StopDisplay,
+    ViewerOpened(window::Id),
+    ViewerHandle(Option<u64>),
+    ViewerFrame(Option<legato_engine::ViewerFrame>),
+    ToggleFullscreen(window::Id),
+}
+
+/// The window showing a Mac's extra display.
+struct Viewer {
+    peer: EndpointId,
+    window: window::Id,
+    frame: Option<legato_engine::ViewerFrame>,
+    fullscreen: bool,
 }
 
 struct App {
@@ -93,6 +109,7 @@ struct App {
     next_notice: u64,
     /// Files dropped on the window, gathered into one send.
     dropped: Vec<std::path::PathBuf>,
+    viewer: Option<Viewer>,
 }
 
 /// Hashes by identity, so subscriptions can be keyed on the engine.
@@ -130,6 +147,7 @@ impl App {
             problems: Vec::new(),
             notice: None,
             autostart: platform::autostart_enabled(),
+            viewing: None,
         };
         let mut app = Self {
             engine,
@@ -139,6 +157,7 @@ impl App {
             attempt: None,
             next_notice: 0,
             dropped: Vec::new(),
+            viewer: None,
         };
         app.refresh_paired();
         app
@@ -220,6 +239,11 @@ impl App {
                     self.window = None;
                     platform::show_in_dock(false);
                 }
+                if let Some(viewer) = self.viewer.take_if(|v| v.window == id) {
+                    self.engine.set_viewer_window(None);
+                    self.engine.stop_extend(viewer.peer);
+                    self.model.viewing = None;
+                }
             }
             Message::Tray(event) => match event {
                 tray::Event::Open => return self.update(Message::OpenWindow),
@@ -255,7 +279,7 @@ impl App {
             }
             Message::Sharing(Err(e)) => self.notify(format!("Couldn't start sharing: {e}")),
             Message::Sharing(Ok(())) => {}
-            Message::Status(status) => self.status(status),
+            Message::Status(status) => return self.status(status),
             Message::Nearby(event) => match event {
                 NearbyEvent::Found(d) => {
                     self.model.nearby.retain(|n| n.id != d.id);
@@ -448,6 +472,64 @@ impl App {
                 }
             }
             Message::DismissNotice => self.model.notice = None,
+            Message::ShowDisplay(peer) => {
+                if let Some(viewer) = &self.viewer {
+                    return window::gain_focus(viewer.window);
+                }
+                if let Err(e) = self.engine.extend(peer) {
+                    self.notify(format!("Couldn't show the display: {e:#}"));
+                    return Task::none();
+                }
+                let (id, open) = window::open(window::Settings {
+                    size: Size::new(1280.0, 720.0),
+                    min_size: Some(Size::new(480.0, 270.0)),
+                    ..Default::default()
+                });
+                self.viewer = Some(Viewer {
+                    peer,
+                    window: id,
+                    frame: None,
+                    fullscreen: false,
+                });
+                self.model.viewing = Some(peer);
+                return open.map(Message::ViewerOpened);
+            }
+            Message::StopDisplay => {
+                if let Some(viewer) = &self.viewer {
+                    return window::close(viewer.window);
+                }
+            }
+            Message::ViewerOpened(id) => {
+                // Input over the picture goes to the Mac: the capture needs the window.
+                return window::run(id, |w| {
+                    #[cfg(windows)]
+                    if let Ok(iced::window::raw_window_handle::RawWindowHandle::Win32(h)) =
+                        w.window_handle().map(|h| h.as_raw())
+                    {
+                        return Some(h.hwnd.get() as u64);
+                    }
+                    let _ = w;
+                    None
+                })
+                .map(Message::ViewerHandle);
+            }
+            Message::ViewerHandle(handle) => self.engine.set_viewer_window(handle),
+            Message::ViewerFrame(frame) => {
+                if let Some(viewer) = &mut self.viewer {
+                    viewer.frame = frame;
+                }
+            }
+            Message::ToggleFullscreen(id) => {
+                if let Some(viewer) = self.viewer.as_mut().filter(|v| v.window == id) {
+                    viewer.fullscreen = !viewer.fullscreen;
+                    let mode = if viewer.fullscreen {
+                        window::Mode::Fullscreen
+                    } else {
+                        window::Mode::Windowed
+                    };
+                    return window::set_mode(id, mode);
+                }
+            }
         }
         Task::none()
     }
@@ -489,7 +571,7 @@ impl App {
         self.save_config();
     }
 
-    fn status(&mut self, status: Status) {
+    fn status(&mut self, status: Status) -> Task<Message> {
         match status {
             Status::Sharing(on) => {
                 self.model.sharing = on;
@@ -528,6 +610,18 @@ impl App {
                 }
             }
             Status::Error(e) => self.notify(format!("Sharing stopped: {e}")),
+            Status::Extended { .. } => {}
+            Status::ExtendEnded { id, reason } => {
+                if let Some(viewer) = self.viewer.take_if(|v| v.peer == id) {
+                    self.model.viewing = None;
+                    self.engine.set_viewer_window(None);
+                    let name = self.model.name_of(&id);
+                    if !reason.is_empty() {
+                        self.notify(format!("\"{name}\" stopped its display: {reason}"));
+                    }
+                    return window::close(viewer.window);
+                }
+            }
             Status::PeerPlacedUs { id, offset } => match offset {
                 Some(o) => {
                     self.model.placed_us.insert(id, o);
@@ -565,10 +659,25 @@ impl App {
                 }
             }
         }
+        Task::none()
     }
 
-    fn view(&self, _window: window::Id) -> Element<'_, Message> {
-        view::root(&self.model)
+    fn view(&self, window: window::Id) -> Element<'_, Message> {
+        match &self.viewer {
+            Some(viewer) if viewer.window == window => {
+                view::viewer(&self.model.name_of(&viewer.peer), viewer.frame.clone())
+            }
+            _ => view::root(&self.model),
+        }
+    }
+
+    fn title(&self, window: window::Id) -> String {
+        match &self.viewer {
+            Some(viewer) if viewer.window == window => {
+                format!("{} · Legato", self.model.name_of(&viewer.peer))
+            }
+            _ => "Legato".into(),
+        }
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -576,13 +685,22 @@ impl App {
         Subscription::batch([
             Subscription::run_with(engine.clone(), status_stream),
             Subscription::run_with(engine.clone(), nearby_stream),
-            Subscription::run_with(engine, pairing_stream),
+            Subscription::run_with(engine.clone(), pairing_stream),
             Subscription::run(tray::events).map(Message::Tray),
+            if self.viewer.is_some() {
+                Subscription::run_with(engine, frames_stream)
+            } else {
+                Subscription::none()
+            },
             window::close_events().map(Message::WindowClosed),
-            iced::event::listen_with(|event, _, _| match event {
+            iced::event::listen_with(|event, _, window| match event {
                 iced::Event::Window(window::Event::FileDropped(path)) => {
                     Some(Message::FileDropped(path))
                 }
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::F11),
+                    ..
+                }) => Some(Message::ToggleFullscreen(window)),
                 _ => None,
             }),
         ])
@@ -613,6 +731,24 @@ fn status_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
                 }
                 Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => return,
+            }
+        }
+    })
+}
+
+/// The latest pictures of the Mac's extra display. Pictures that arrive while the UI is
+/// busy are skipped.
+fn frames_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
+    let engine = engine.0.clone();
+    iced::stream::channel(1, async move |mut out| {
+        let mut frames = engine.viewer_frames();
+        loop {
+            let frame = frames.borrow_and_update().clone();
+            if out.send(Message::ViewerFrame(frame)).await.is_err() {
+                return;
+            }
+            if frames.changed().await.is_err() {
+                return;
             }
         }
     })
@@ -688,7 +824,7 @@ fn main() -> iced::Result {
     };
 
     iced::daemon(move || App::boot(engine.clone()), App::update, App::view)
-        .title(|_: &App, _| "Legato".to_string())
+        .title(App::title)
         .subscription(App::subscription)
         .theme(theme)
         .default_font(iced_m3::fonts::REGULAR)

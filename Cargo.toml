@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["spikes"]
 
 [workspace.package]
-version = "0.2.0-alpha.1"
+version = "0.3.0-alpha.1"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
@@ -20,6 +20,7 @@ legato-core = { path = "crates/legato-core" }
 legato-net = { path = "crates/legato-net" }
 legato-macos = { path = "crates/legato-macos" }
 legato-windows = { path = "crates/legato-windows" }
+legato-screen = { path = "crates/legato-screen" }
 legato-engine = { path = "crates/legato-engine" }
 
 anyhow = "1.0.104"

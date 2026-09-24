@@ -19,11 +19,13 @@ use tokio::sync::{broadcast, oneshot, watch};
 pub mod arrange;
 mod clipboard;
 pub mod config;
+pub mod extend;
 pub mod files;
 mod platform;
 mod run;
 
 pub use config::Config;
+pub use extend::ViewerFrame;
 pub use legato_net;
 
 const SCREENS_FILE: &str = "screens.json";
@@ -68,6 +70,17 @@ pub enum Status {
     },
     /// A whole batch of files arrived.
     FilesReceived(files::Received),
+    /// Virtual monitor mode: the Mac `id` added the display this machine asked for, at
+    /// `bounds` in its coordinates (sent again if it moves).
+    Extended {
+        id: EndpointId,
+        bounds: legato_proto::Rect,
+    },
+    /// The extra display from `id` went away; `reason` says why if it wasn't asked for.
+    ExtendEnded {
+        id: EndpointId,
+        reason: String,
+    },
     /// A settings problem worth showing, e.g. a peer with no position.
     Problem(String),
     /// Sharing stopped because of an error.
@@ -90,6 +103,8 @@ pub struct Engine {
     sharing: Mutex<Option<Sharing>>,
     known_screens: Mutex<HashMap<EndpointId, Screens>>,
     run_commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<run::RunCommand>>>,
+    /// The latest picture of a Mac's extra display shown here, if any.
+    viewer_frames: watch::Sender<Option<ViewerFrame>>,
 }
 
 impl Engine {
@@ -115,6 +130,7 @@ impl Engine {
             sharing: Mutex::new(None),
             known_screens: Mutex::new(known_screens),
             run_commands: Mutex::new(None),
+            viewer_frames: watch::Sender::new(None),
         }))
     }
 
@@ -132,17 +148,44 @@ impl Engine {
 
     /// Sends files and folders to a connected peer; they land in its Downloads folder.
     pub fn send_files(&self, to: EndpointId, paths: Vec<PathBuf>) -> Result<()> {
+        self.run_command(run::RunCommand::SendFiles {
+            to,
+            paths,
+            purpose: legato_proto::FilePurpose::Send,
+        })
+    }
+
+    fn run_command(&self, command: run::RunCommand) -> Result<()> {
         let commands = self.run_commands.lock().unwrap();
         let Some(commands) = commands.as_ref() else {
             bail!("sharing isn't running");
         };
         commands
-            .send(run::RunCommand::SendFiles {
-                to,
-                paths,
-                purpose: legato_proto::FilePurpose::Send,
-            })
+            .send(command)
             .map_err(|_| anyhow::anyhow!("sharing isn't running"))
+    }
+
+    /// Asks the Mac `to` for an extra display to show here, sized by the `[extend]`
+    /// settings. Frames arrive on [`Engine::viewer_frames`].
+    pub fn extend(&self, to: EndpointId) -> Result<()> {
+        let request = self.config().extend.request();
+        self.run_command(run::RunCommand::Extend { to, request })
+    }
+
+    /// Stops showing the extra display from `to`.
+    pub fn stop_extend(&self, to: EndpointId) {
+        let _ = self.run_command(run::RunCommand::StopExtend { to });
+    }
+
+    /// The window the extra display is drawn in (an `HWND` on Windows), so input over it
+    /// goes to the Mac. `None` when it closes.
+    pub fn set_viewer_window(&self, window: Option<u64>) {
+        let _ = self.run_command(run::RunCommand::ViewerWindow(window));
+    }
+
+    /// Pictures of the extra display shown here: the latest, or `None` when there's none.
+    pub fn viewer_frames(&self) -> watch::Receiver<Option<ViewerFrame>> {
+        self.viewer_frames.subscribe()
     }
 
     /// Changes settings, saves them, and applies them to a running session.
@@ -373,10 +416,18 @@ pub fn describe(status: &Status, name_of: impl Fn(&EndpointId) -> String) -> Opt
                 _ => format!(" in {}", files::downloads_dir().display()),
             }
         ),
+        Status::ExtendEnded { id, reason } if !reason.is_empty() => {
+            format!(
+                "The extra display from \"{}\" closed: {reason}",
+                name_of(id)
+            )
+        }
         Status::Controlling(None)
         | Status::ControlledBy(None)
         | Status::PeerScreens { .. }
-        | Status::PeerPlacedUs { .. } => {
+        | Status::PeerPlacedUs { .. }
+        | Status::Extended { .. }
+        | Status::ExtendEnded { .. } => {
             return None;
         }
     })

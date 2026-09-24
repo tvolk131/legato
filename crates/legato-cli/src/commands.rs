@@ -375,6 +375,15 @@ fn permissions_report() {
                 "MISSING (System Settings → Privacy & Security → Accessibility)"
             }
         );
+        println!(
+            "  Screen Recording: {}",
+            if p.screen_recording {
+                "granted"
+            } else {
+                "not granted (only needed to show this Mac as a display on Windows; \
+                 allowed on first use)"
+            }
+        );
     }
     #[cfg(windows)]
     {

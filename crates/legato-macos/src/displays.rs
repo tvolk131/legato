@@ -1,10 +1,20 @@
 use legato_proto::{Display, Point, Rect, Screens};
 use objc2_core_graphics::{
-    CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayIsBuiltin, CGDisplayMode, CGEvent,
-    CGGetActiveDisplayList, CGMainDisplayID,
+    CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayIsBuiltin, CGDisplayMode,
+    CGDisplayModelNumber, CGDisplayVendorNumber, CGEvent, CGGetActiveDisplayList, CGMainDisplayID,
 };
 
-/// The active displays, in global display coordinates (points, origin at the top-left of
+/// The vendor and product ids of Legato's own virtual display (see `legato-screen`). It's
+/// shown in a window on another machine, so it isn't part of the shared desk.
+const VIRTUAL_VENDOR: u32 = 0x4c47;
+const VIRTUAL_PRODUCT: u32 = 0x0001;
+
+/// Whether `id` is Legato's own virtual display.
+pub fn is_legato_virtual_display(id: u32) -> bool {
+    CGDisplayVendorNumber(id) == VIRTUAL_VENDOR && CGDisplayModelNumber(id) == VIRTUAL_PRODUCT
+}
+
+/// The active displays (except Legato's virtual one), in global display coordinates (points, origin at the top-left of
 /// the main display).
 pub fn screens() -> Screens {
     let mut ids = [0u32; 32];
@@ -18,6 +28,7 @@ pub fn screens() -> Screens {
     let main = CGMainDisplayID();
     let displays = ids[..count as usize]
         .iter()
+        .filter(|&&id| !is_legato_virtual_display(id))
         .map(|&id| {
             let b = CGDisplayBounds(id);
             let pixel_scale = CGDisplayCopyDisplayMode(id)

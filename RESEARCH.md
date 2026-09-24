@@ -357,7 +357,7 @@ Revised once the scope settled on macOS and Windows, with a Mac next to a Window
 3. **M2, UI (done).** Tray, nearby devices, pairing dialog with the 6-digit code, arrangement editor, settings, start at login.
 4. **M3, both directions (done).** The Mac drives Windows too; "whichever machine you touch" vs "one machine controls" setting, synced between machines; text, image and file clipboard in both directions; arrangements mirrored so either side can edit them.
 5. **M4, files (done).** "Send files…" to a device, and dragging files across the edge from Windows (released on the other machine, they're saved to `Downloads/Legato`). Dragging out of Finder is still to come: macOS offers no way to see another app's drag without taking part in it.
-6. **M5, virtual monitor mode.** The Mac gets an extra display shown in a window on Windows (§14).
+6. **M5, virtual monitor mode (done).** The Mac gets an extra display shown in a window on Windows (§14): "Show as display" next to a connected Mac, F11 for full screen.
 7. **Later.** Native drop at the pointer on the receiving side, Finder drags, internet mode with a self-hosted relay, Windows secure-desktop service.
 
 ## 13. Open questions to prototype
@@ -372,7 +372,17 @@ Revised once the scope settled on macOS and Windows, with a Mac next to a Window
 
 ---
 
-## 14. Future: virtual monitor mode (macOS shown on Windows)
+## 14. Virtual monitor mode (macOS shown on Windows)
+
+Built in `legato-screen` as planned below, with these choices:
+- **Display size:** 3840×2160 pixels in HiDPI by default, so it looks like 1920×1080 and is sharp full screen on a 4K monitor. Change it under `[extend]` in `legato.toml`.
+- **Encoding:** H.264 Constrained High, low-latency rate control, 60 fps, 40 Mbit/s. Keyframes come on request, plus one a minute. When the screen is still, the last picture is re-sent as a keyframe.
+- **Transport:** one ordered stream for the whole video, below input and above file transfers. Ordered delivery keeps P-frames decodable. When frames back up, the Mac skips new pictures before encoding them.
+- **Viewer:** a wgpu shader widget draws NV12 textures directly (BT.709 limited range, converted on the GPU).
+- **Input:** a *portal*. While the Windows pointer is over the picture, and the viewer isn't covered there, moves go to the Mac as absolute positions on the display, and so do clicks, keys and scrolling. The Windows pointer stays visible and ScreenCaptureKit leaves the Mac's cursor out of the picture, so there is no laggy second cursor.
+- **Arrangement:** the virtual display is left out of the Mac's shared desk, so pushing past an edge never lands on it; it's reached through the viewer.
+
+The original plan:
 
 The Mac gets an extra display in its own arrangement. That display's picture is streamed to Windows and shown in one viewer window, or full screen on one of the monitors. Any windows, menus and popups dragged onto it just work, because macOS treats it as a real display.
 
