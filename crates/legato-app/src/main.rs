@@ -90,6 +90,8 @@ pub enum Message {
     ViewerHandle(Option<u64>),
     ViewerFrame(Option<legato_engine::ViewerFrame>),
     ToggleFullscreen(window::Id),
+    /// The system's light or dark appearance, at startup and whenever it changes.
+    SystemTheme(iced::theme::Mode),
 }
 
 /// The window showing a Mac's extra display.
@@ -110,6 +112,9 @@ struct App {
     /// Files dropped on the window, gathered into one send.
     dropped: Vec<std::path::PathBuf>,
     viewer: Option<Viewer>,
+    /// Follows the system's appearance. Kept here because iced asks for the theme on every
+    /// redraw: looking it up there must cost nothing.
+    dark: bool,
 }
 
 /// Hashes by identity, so subscriptions can be keyed on the engine.
@@ -158,6 +163,7 @@ impl App {
             next_notice: 0,
             dropped: Vec::new(),
             viewer: None,
+            dark: false,
         };
         app.refresh_paired();
         app
@@ -170,7 +176,8 @@ impl App {
         } else {
             Task::done(Message::OpenWindow)
         };
-        (app, Task::batch([Task::done(Message::Init), open]))
+        let theme = iced::system::theme().map(Message::SystemTheme);
+        (app, Task::batch([theme, Task::done(Message::Init), open]))
     }
 
     fn refresh_paired(&mut self) {
@@ -472,6 +479,7 @@ impl App {
                 }
             }
             Message::DismissNotice => self.model.notice = None,
+            Message::SystemTheme(mode) => self.dark = mode == iced::theme::Mode::Dark,
             Message::ShowDisplay(peer) => {
                 if let Some(viewer) = &self.viewer {
                     return window::gain_focus(viewer.window);
@@ -687,6 +695,7 @@ impl App {
             Subscription::run_with(engine.clone(), nearby_stream),
             Subscription::run_with(engine.clone(), pairing_stream),
             Subscription::run(tray::events).map(Message::Tray),
+            iced::system::theme_changes().map(Message::SystemTheme),
             if self.viewer.is_some() {
                 Subscription::run_with(engine, frames_stream)
             } else {
@@ -782,11 +791,8 @@ fn pairing_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
     })
 }
 
-fn theme(_app: &App, _window: window::Id) -> Theme {
-    Theme::from_accent(
-        iced::Color::from_rgb8(0x3d, 0x5a, 0xfe),
-        platform::dark_mode(),
-    )
+fn theme(app: &App, _window: window::Id) -> Theme {
+    Theme::from_accent(iced::Color::from_rgb8(0x3d, 0x5a, 0xfe), app.dark)
 }
 
 fn main() -> iced::Result {
