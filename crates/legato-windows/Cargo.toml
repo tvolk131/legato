@@ -1,0 +1,36 @@
+[package]
+name = "legato-windows"
+description = "Legato Windows backend: display info and input capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Only the `windows` crate: no C dependencies, so this crate can be type-checked from
+# macOS with `cargo check --target x86_64-pc-windows-msvc`.
+[target.'cfg(windows)'.dependencies]
+legato-core.workspace = true
+legato-proto.workspace = true
+tracing.workspace = true
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

@@ -16,6 +16,7 @@ legato-proto = { path = "crates/legato-proto" }
 legato-core = { path = "crates/legato-core" }
 legato-net = { path = "crates/legato-net" }
 legato-macos = { path = "crates/legato-macos" }
+legato-windows = { path = "crates/legato-windows" }
 
 anyhow = "1.0.104"
 bytes = "1.12.1"
