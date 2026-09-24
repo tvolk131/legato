@@ -1,0 +1,308 @@
+//! Legato wire protocol.
+//!
+//! A session between two paired machines is a single iroh connection with:
+//! - one bidirectional **control stream** carrying length-prefixed [`Control`] frames
+//!   (reliable, ordered: keys, buttons, scroll, enter/leave, hello), and
+//! - unreliable **datagrams** carrying [`Datagram`]s (pointer motion, where only the
+//!   newest position matters).
+//!
+//! All coordinates on the wire are in the *receiving* machine's native global
+//! coordinate space (points on macOS, physical pixels on Windows).
+
+use serde::{Deserialize, Serialize};
+
+/// Bumped on incompatible wire changes.
+pub const PROTOCOL_VERSION: u16 = 1;
+
+/// ALPN for the input-sharing session. Only paired peers may use it.
+pub const SESSION_ALPN: &[u8] = b"legato/1";
+
+/// ALPN for pairing. Open to any peer on the network, gated by a user-confirmed code.
+pub const PAIR_ALPN: &[u8] = b"legato/pair/1";
+
+/// Largest control frame we accept, to bound memory use on hostile input.
+pub const MAX_FRAME_LEN: usize = 64 * 1024;
+
+/// Operating system of a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Os {
+    MacOs,
+    Windows,
+}
+
+/// A 2D point in some coordinate space. Which space is documented at each use.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Point {
+    pub const fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+}
+
+/// An axis-aligned rectangle. `x`/`y` is the top-left corner; y grows downwards.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Rect {
+    pub const fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub fn left(&self) -> f64 {
+        self.x
+    }
+
+    pub fn right(&self) -> f64 {
+        self.x + self.width
+    }
+
+    pub fn top(&self) -> f64 {
+        self.y
+    }
+
+    pub fn bottom(&self) -> f64 {
+        self.y + self.height
+    }
+
+    pub fn center(&self) -> Point {
+        Point::new(self.x + self.width / 2.0, self.y + self.height / 2.0)
+    }
+
+    /// Half-open containment: the right and bottom edges are outside.
+    pub fn contains(&self, p: Point) -> bool {
+        p.x >= self.left() && p.x < self.right() && p.y >= self.top() && p.y < self.bottom()
+    }
+}
+
+/// One physical display as the owning machine sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Display {
+    /// Stable-ish identifier from the OS, for matching across reconnects.
+    pub id: u32,
+    /// Bounds in the machine's native global coordinates.
+    pub bounds: Rect,
+    /// Pixels per native unit (2.0 on Retina Macs, 1.0 on Windows where native units are pixels).
+    pub pixel_scale: f64,
+    /// UI scale of this display relative to 96 DPI on Windows (1.5 = 150%); 1.0 on macOS.
+    pub ui_scale: f64,
+    pub primary: bool,
+    pub name: String,
+}
+
+/// A machine's display configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Screens {
+    pub displays: Vec<Display>,
+    /// Native units per desk unit. Desk units are the shared layout space in which all
+    /// machines are arranged; they approximate the OS's logical (scaled) units so that
+    /// pointer speed feels consistent across machines. On macOS this is 1.0 (native units
+    /// are already points); on Windows it is the primary display's UI scale.
+    pub native_per_desk: f64,
+}
+
+/// First frame each side sends on the control stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Hello {
+    pub protocol: u16,
+    pub app_version: String,
+    pub name: String,
+    pub os: Os,
+    pub screens: Screens,
+}
+
+/// Mouse buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Button {
+    Left,
+    Right,
+    Middle,
+    Back,
+    Forward,
+}
+
+/// Scroll amounts.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Scroll {
+    /// Wheel movement in units where 120 is one notch (Windows convention; high-resolution
+    /// wheels send fractions of a notch). Positive `y` scrolls up/away, positive `x` right.
+    Wheel { x: f64, y: f64 },
+    /// Continuous (trackpad) scrolling in native units of the sender.
+    Pixels { x: f64, y: f64 },
+}
+
+/// Reliable, ordered messages on the control stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Control {
+    Hello(Hello),
+    /// The sender's displays changed.
+    Screens(Screens),
+    /// Controller → controlled: the shared cursor enters your screen at `pos`.
+    /// Motion datagrams with a `seq` lower than `seq` belong to an earlier visit.
+    Enter {
+        seq: u32,
+        pos: Point,
+    },
+    /// Controller → controlled: the cursor left. Release every key and button you pressed.
+    Leave,
+    /// A key, identified by its USB HID usage on the keyboard page (0x07).
+    Key {
+        usage: u16,
+        down: bool,
+    },
+    /// A mouse button, with the cursor position so clicks land correctly even if the
+    /// latest motion datagram was lost.
+    Button {
+        button: Button,
+        down: bool,
+        pos: Point,
+    },
+    Scroll(Scroll),
+    /// Controlled → controller: physical input happened on this machine; give it its
+    /// cursor back.
+    Yield,
+}
+
+/// Unreliable messages sent as QUIC datagrams.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Datagram {
+    /// Absolute cursor position. Newer `seq` wins; older ones are dropped.
+    Motion { seq: u32, pos: Point },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    #[error("frame of {0} bytes exceeds the {MAX_FRAME_LEN}-byte limit")]
+    TooLarge(usize),
+    #[error("malformed message: {0}")]
+    Malformed(#[from] postcard::Error),
+}
+
+/// Encodes a control frame: a little-endian `u32` length followed by the postcard payload.
+pub fn encode_control(msg: &Control) -> Vec<u8> {
+    let payload = postcard::to_stdvec(msg).expect("serializing to a Vec cannot fail");
+    let mut out = Vec::with_capacity(4 + payload.len());
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(&payload);
+    out
+}
+
+/// Validates a control frame length read from the stream.
+pub fn check_frame_len(len: u32) -> Result<usize, DecodeError> {
+    let len = len as usize;
+    if len > MAX_FRAME_LEN {
+        Err(DecodeError::TooLarge(len))
+    } else {
+        Ok(len)
+    }
+}
+
+/// Decodes a control frame payload (without its length prefix).
+pub fn decode_control(payload: &[u8]) -> Result<Control, DecodeError> {
+    Ok(postcard::from_bytes(payload)?)
+}
+
+pub fn encode_datagram(msg: &Datagram) -> Vec<u8> {
+    postcard::to_stdvec(msg).expect("serializing to a Vec cannot fail")
+}
+
+pub fn decode_datagram(bytes: &[u8]) -> Result<Datagram, DecodeError> {
+    Ok(postcard::from_bytes(bytes)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn hello() -> Hello {
+        Hello {
+            protocol: PROTOCOL_VERSION,
+            app_version: "0.1.0".into(),
+            name: "Studio PC".into(),
+            os: Os::Windows,
+            screens: Screens {
+                displays: vec![Display {
+                    id: 1,
+                    bounds: Rect::new(0.0, 0.0, 3840.0, 2160.0),
+                    pixel_scale: 1.0,
+                    ui_scale: 1.5,
+                    primary: true,
+                    name: "DELL U2723QE".into(),
+                }],
+                native_per_desk: 1.5,
+            },
+        }
+    }
+
+    #[test]
+    fn control_round_trips() {
+        let msgs = [
+            Control::Hello(hello()),
+            Control::Enter {
+                seq: 7,
+                pos: Point::new(10.5, 20.0),
+            },
+            Control::Leave,
+            Control::Key {
+                usage: 0x04,
+                down: true,
+            },
+            Control::Button {
+                button: Button::Right,
+                down: false,
+                pos: Point::new(1.0, 2.0),
+            },
+            Control::Scroll(Scroll::Wheel { x: 0.0, y: -120.0 }),
+            Control::Yield,
+        ];
+        for msg in msgs {
+            let frame = encode_control(&msg);
+            let len = u32::from_le_bytes(frame[..4].try_into().unwrap());
+            assert_eq!(check_frame_len(len).unwrap(), frame.len() - 4);
+            assert_eq!(decode_control(&frame[4..]).unwrap(), msg);
+        }
+    }
+
+    #[test]
+    fn motion_datagram_is_small() {
+        let d = Datagram::Motion {
+            seq: u32::MAX,
+            pos: Point::new(-3840.25, 2159.75),
+        };
+        let bytes = encode_datagram(&d);
+        assert!(
+            bytes.len() <= 24,
+            "motion datagram is {} bytes",
+            bytes.len()
+        );
+        assert_eq!(decode_datagram(&bytes).unwrap(), d);
+    }
+
+    #[test]
+    fn oversized_frames_are_rejected() {
+        assert!(check_frame_len(MAX_FRAME_LEN as u32 + 1).is_err());
+    }
+
+    proptest! {
+        // Anything off the network must be rejected cleanly, never panic.
+        #[test]
+        fn decoders_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
+            let _ = decode_control(&bytes);
+            let _ = decode_datagram(&bytes);
+        }
+    }
+}

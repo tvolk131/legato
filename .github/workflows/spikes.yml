@@ -4,7 +4,10 @@ name: spikes
 
 on:
   push:
+    branches: [main]
+    paths: ["spikes/**", ".github/workflows/spikes.yml"]
   pull_request:
+    paths: ["spikes/**", ".github/workflows/spikes.yml"]
   workflow_dispatch:
 
 concurrency:
