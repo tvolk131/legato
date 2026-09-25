@@ -404,8 +404,10 @@ impl Controller {
             .displays
             .iter()
             .map(|d| d.bounds)
-            .find(|b| b.contains(pos))
-            .or_else(|| nearest_rect(local.screens.displays.iter().map(|d| d.bounds), pos))?;
+            // Backends report positions on their displays (Windows clamps what its hook
+            // reports). One on none of them is on a display this machine doesn't share,
+            // like the extra display a Mac shows on a PC, where nothing is an edge.
+            .find(|b| b.contains(pos))?;
         // Which edges of its display is the pointer sitting on, and pushing into?
         let attempted_desk = scale(attempted, local.desk_per_native());
         for dir in [Dir::Left, Dir::Right, Dir::Up, Dir::Down] {
@@ -862,12 +864,6 @@ fn clamp_into(r: Rect, p: Point, eps: f64) -> Point {
         p.x.clamp(r.left(), (r.right() - eps).max(r.left())),
         p.y.clamp(r.top(), (r.bottom() - eps).max(r.top())),
     )
-}
-
-fn nearest_rect(rects: impl Iterator<Item = Rect>, p: Point) -> Option<Rect> {
-    rects.min_by(|a, b| {
-        dist2(clamp_into(*a, p, 1.0), p).total_cmp(&dist2(clamp_into(*b, p, 1.0), p))
-    })
 }
 
 /// Is `pos` on the outermost native pixel row/column of `display` in direction `dir`?

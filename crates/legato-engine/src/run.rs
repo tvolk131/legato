@@ -637,6 +637,9 @@ fn inject_loop(
     let mut out = Vec::new();
     // The peer currently driving this machine.
     let mut driver: Option<EndpointId> = None;
+    // For the log: where the first typing after each entry went, and whether typing that
+    // arrived while not being driven was noted.
+    let (mut typing_noted, mut ignored_noted) = (false, false);
     let mut controlled = false;
     loop {
         let input = match receiver.next_deadline() {
@@ -648,10 +651,36 @@ fn inject_loop(
             Ok(Input::Control(peer, msg)) => {
                 if matches!(msg, Control::Enter { .. }) {
                     driver = Some(peer);
+                    (typing_noted, ignored_noted) = (false, false);
                 }
+                let key_down = matches!(msg, Control::Key { down: true, .. });
                 // Only the current driver's input counts.
                 if driver == Some(peer) {
                     receiver.control(now, msg, &mut out);
+                }
+                if key_down {
+                    let name = || {
+                        sessions
+                            .read()
+                            .unwrap()
+                            .get(&peer)
+                            .map_or_else(|| peer.fmt_short().to_string(), |s| s.remote.name.clone())
+                    };
+                    if driver == Some(peer) && receiver.is_controlled() {
+                        if !std::mem::replace(&mut typing_noted, true) {
+                            tracing::info!(
+                                "Typing from \"{}\" goes to {}.",
+                                name(),
+                                platform::frontmost_app()
+                                    .unwrap_or_else(|| "an unknown app".into())
+                            );
+                        }
+                    } else if !std::mem::replace(&mut ignored_noted, true) {
+                        tracing::info!(
+                            "Typing from \"{}\" was ignored: it isn't driving this machine now.",
+                            name()
+                        );
+                    }
                 }
                 false
             }

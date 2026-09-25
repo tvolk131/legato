@@ -10,6 +10,13 @@ mod drop;
 mod inject;
 
 pub use capture::{Capture, CaptureOptions, Command};
+
+/// The window in front, which gets typing (for the log).
+pub fn foreground_app() -> Option<String> {
+    // SAFETY: no preconditions.
+    let window = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    (!window.is_invalid()).then(|| capture::describe(window))
+}
 pub use displays::{init_dpi_awareness, screens};
 pub use inject::{INJECTED_TAG, Injector};
 
