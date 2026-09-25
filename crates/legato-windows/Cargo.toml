@@ -37,6 +37,8 @@ windows = { version = "0.62.2", features = [
 workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
+# A real winit window, like the app's viewer, for the portal keyboard test.
+winit = "0.30.13"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
