@@ -284,6 +284,16 @@ mod viewer {
         /// A borderless window at `(x, y, w, h)` whose thread takes `busy` over each
         /// message.
         pub fn open(x: i32, y: i32, w: i32, h: i32, busy: Duration) -> Self {
+            Self::open_with(x, y, w, h, busy, false)
+        }
+
+        /// As [`Viewer::open`], with the thread registered for raw mouse and keyboard
+        /// input the way winit registers the app's UI thread (delivered while in front).
+        pub fn open_with_raw_input(x: i32, y: i32, w: i32, h: i32) -> Self {
+            Self::open_with(x, y, w, h, Duration::ZERO, true)
+        }
+
+        fn open_with(x: i32, y: i32, w: i32, h: i32, busy: Duration, raw_input: bool) -> Self {
             let (tx, rx) = mpsc::channel();
             let thread = std::thread::spawn(move || unsafe {
                 let instance = GetModuleHandleW(None).unwrap().into();
@@ -308,6 +318,34 @@ mod viewer {
                     None,
                 )
                 .unwrap();
+                if raw_input {
+                    use windows::Win32::UI::Input::{
+                        RAWINPUTDEVICE, RIDEV_DEVNOTIFY, RegisterRawInputDevices,
+                    };
+                    // winit targets a hidden window of the UI thread.
+                    let target = CreateWindowExW(
+                        Default::default(),
+                        w!("LegatoTestViewer"),
+                        w!("raw input target"),
+                        WS_POPUP,
+                        0,
+                        0,
+                        0,
+                        0,
+                        None,
+                        None,
+                        Some(instance),
+                        None,
+                    )
+                    .unwrap();
+                    let devices = [0x02u16, 0x06].map(|usage| RAWINPUTDEVICE {
+                        usUsagePage: 0x01,
+                        usUsage: usage,
+                        dwFlags: RIDEV_DEVNOTIFY,
+                        hwndTarget: target,
+                    });
+                    RegisterRawInputDevices(&devices, size_of::<RAWINPUTDEVICE>() as u32).unwrap();
+                }
                 tx.send((hwnd.0 as usize, GetCurrentThreadId())).unwrap();
                 let mut msg = MSG::default();
                 while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -331,18 +369,23 @@ mod viewer {
         /// Tries to make this the foreground window (Windows may refuse). Returns whether
         /// it is.
         pub fn focus(&self) -> bool {
-            unsafe {
-                let current = GetForegroundWindow();
-                let theirs = GetWindowThreadProcessId(current, None);
-                let ours = GetCurrentThreadId();
-                let attached = theirs != 0 && AttachThreadInput(ours, theirs, true).as_bool();
-                let _ = SetForegroundWindow(self.hwnd);
-                if attached {
-                    let _ = AttachThreadInput(ours, theirs, false);
-                }
-                std::thread::sleep(Duration::from_millis(200));
-                GetForegroundWindow() == self.hwnd
+            focus(self.hwnd)
+        }
+    }
+
+    /// Tries to make `hwnd` the foreground window. Returns whether it is.
+    pub fn focus(hwnd: HWND) -> bool {
+        unsafe {
+            let current = GetForegroundWindow();
+            let theirs = GetWindowThreadProcessId(current, None);
+            let ours = GetCurrentThreadId();
+            let attached = theirs != 0 && AttachThreadInput(ours, theirs, true).as_bool();
+            let _ = SetForegroundWindow(hwnd);
+            if attached {
+                let _ = AttachThreadInput(ours, theirs, false);
             }
+            std::thread::sleep(Duration::from_millis(200));
+            GetForegroundWindow() == hwnd
         }
     }
 
@@ -721,5 +764,206 @@ fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
         std::thread::sleep(Duration::from_millis(300));
     }
     drop(capture);
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+mod winit_viewer {
+    //! The app's viewer is a winit window: this is one, on its own thread.
+
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use windows::Win32::Foundation::HWND;
+    use winit::application::ApplicationHandler;
+    use winit::dpi::{PhysicalPosition, PhysicalSize};
+    use winit::event::WindowEvent;
+    use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
+
+    struct App {
+        attributes: Option<WindowAttributes>,
+        window: Option<Window>,
+        hwnd: mpsc::Sender<isize>,
+    }
+
+    impl ApplicationHandler for App {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            if let Some(attributes) = self.attributes.take() {
+                let window = event_loop.create_window(attributes).unwrap();
+                if let Ok(handle) = window.window_handle()
+                    && let RawWindowHandle::Win32(h) = handle.as_raw()
+                {
+                    let _ = self.hwnd.send(h.hwnd.get());
+                }
+                self.window = Some(window);
+            }
+        }
+
+        fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
+            event_loop.exit();
+        }
+
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+
+    pub struct WinitViewer {
+        pub hwnd: HWND,
+        proxy: EventLoopProxy<()>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl WinitViewer {
+        /// A borderless, always-on-top winit window at `(x, y, w, h)`. Only one per
+        /// process: winit allows a single event loop.
+        pub fn open(x: i32, y: i32, w: u32, h: u32) -> Self {
+            let (hwnd_tx, hwnd_rx) = mpsc::channel();
+            let (proxy_tx, proxy_rx) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let event_loop = EventLoop::with_user_event()
+                    .with_any_thread(true)
+                    .build()
+                    .unwrap();
+                proxy_tx.send(event_loop.create_proxy()).unwrap();
+                let attributes = Window::default_attributes()
+                    .with_title("Legato test winit viewer")
+                    .with_decorations(false)
+                    .with_position(PhysicalPosition::new(x, y))
+                    .with_inner_size(PhysicalSize::new(w, h))
+                    .with_window_level(WindowLevel::AlwaysOnTop);
+                let mut app = App {
+                    attributes: Some(attributes),
+                    window: None,
+                    hwnd: hwnd_tx,
+                };
+                event_loop.run_app(&mut app).unwrap();
+            });
+            let proxy = proxy_rx.recv().unwrap();
+            let hwnd = hwnd_rx.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            Self {
+                hwnd: HWND(hwnd as *mut _),
+                proxy,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for WinitViewer {
+        fn drop(&mut self) {
+            let _ = self.proxy.send_event(());
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+/// The app's viewer registers the process for raw keyboard input (winit does, for device
+/// events) and is a winit window. With it focused and the pointer on its picture, keys
+/// still have to reach the Mac.
+#[test]
+#[ignore = "moves the cursor and shows windows"]
+fn keys_go_through_the_portal_to_a_focused_winit_viewer() {
+    use legato_core::controller::Portal;
+
+    let local = screens();
+    let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
+    let rightmost = (0..local.displays.len())
+        .max_by(|&a, &b| {
+            local.displays[a]
+                .bounds
+                .right()
+                .total_cmp(&local.displays[b].bounds.right())
+        })
+        .unwrap();
+    let layout = || {
+        let mut layout = Layout::new(local.clone());
+        let peer = Screens {
+            displays: vec![Display {
+                id: 1,
+                bounds: Rect::new(0.0, 0.0, 1512.0, 982.0),
+                pixel_scale: 2.0,
+                ui_scale: 1.0,
+                primary: true,
+                name: "peer".into(),
+            }],
+            native_per_desk: 1.0,
+        };
+        assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
+        layout
+    };
+    let (w, h) = (640, 360);
+    let (x, y) = (
+        primary.center().x as i32 - w / 2,
+        primary.center().y as i32 - h / 2,
+    );
+    let (cx, cy) = (x + w / 2, y + h / 2);
+
+    // Types on the focused window `hwnd` shown as a portal; returns what reached the peer.
+    let try_typing = |what: &str, hwnd: windows::Win32::Foundation::HWND| {
+        let (tx, rx) = mpsc::channel();
+        let capture = Capture::start(
+            Controller::new(ControllerConfig::default(), layout()),
+            CaptureOptions {
+                accept_injected: true,
+            },
+            move |action| {
+                let _ = tx.send(action);
+            },
+            |_| {},
+        )
+        .unwrap();
+        capture.send(Command::SetPortal(Some(Portal {
+            peer: PEER,
+            remote: Rect::new(1512.0, 0.0, 1920.0, 1080.0),
+            window: hwnd.0 as usize as u64,
+        })));
+        let focused = viewer::focus(hwnd);
+        unsafe { SetCursorPos(cx, cy).unwrap() };
+        mouse_move(3, 0);
+        mouse_move(-3, 0);
+        for _ in 0..3 {
+            key(0x1e, true); // A
+            key(0x1e, false);
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        let actions: Vec<Action> = rx.try_iter().collect();
+        let count = |m: &dyn Fn(&Control) -> bool| {
+            actions
+                .iter()
+                .filter(|a| matches!(a, Action::Send { to: PEER, msg } if m(msg)))
+                .count()
+        };
+        let (entered, keys) = (
+            count(&|m| matches!(m, Control::Enter { .. })),
+            count(&|m| matches!(m, Control::Key { usage: 0x04, .. })),
+        );
+        let under = window_at(cx, cy, hwnd);
+        eprintln!(
+            "{what}: focused {focused}, under the pointer: {under}; entered {entered}, keys {keys}/6"
+        );
+        unsafe { SetCursorPos(x - 50, y - 50).unwrap() };
+        mouse_move(-3, 0);
+        capture.send(Command::SetPortal(None));
+        drop(capture);
+        (under == "the viewer", entered, keys)
+    };
+
+    let mut failures = Vec::new();
+    // Registered first, as winit's event loop is before sharing starts.
+    let raw = viewer::Viewer::open_with_raw_input(x, y, w, h);
+    let (shown, entered, keys) = try_typing("a window registered for raw input", raw.hwnd);
+    if shown && (entered, keys) != (1, 6) {
+        failures.push(format!("raw input window: entered {entered}, keys {keys}"));
+    }
+    drop(raw);
+    let winit = winit_viewer::WinitViewer::open(x, y, w as u32, h as u32);
+    let (shown, entered, keys) = try_typing("a winit window", winit.hwnd);
+    if shown && (entered, keys) != (1, 6) {
+        failures.push(format!("winit window: entered {entered}, keys {keys}"));
+    }
+    drop(winit);
     assert!(failures.is_empty(), "{failures:#?}");
 }
