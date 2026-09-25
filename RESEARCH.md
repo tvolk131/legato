@@ -230,6 +230,11 @@ Because the code is derived from the live TLS session, a man-in-the-middle can't
 
 The mDNS `user_data` field (≤245 bytes, unauthenticated) can advertise a display name for the "nearby devices" list.
 
+### 4.5 Windows: low-level hooks and raw input
+- Windows doesn't call a process's own `WH_KEYBOARD_LL` hook while one of its windows is in front, if the process is registered for raw keyboard input. winit registers every app for raw mouse and keyboard input, for `DeviceEvent`s, which iced doesn't use. So with Legato's viewer or main window in front, the hook never saw a key: typing on the Mac's display went to Windows, and so did typing meant for a MacBook driven over the edge.
+- Raw input registrations are per process (one target per device type, and the last one wins). The capture therefore takes the mouse's for itself and removes the keyboard's, both when it starts and again whenever a portal is set.
+- Found with a CI hardware test using a real winit window. A plain window in the same process doesn't show the problem.
+
 ### 6.4 iroh gotchas
 
 - **Keep one connection per peer.** iroh issues #4509 and #4390 report unbounded memory growth with two or more connections to the same peer; the fixes aren't merged as of 1.2.0.
