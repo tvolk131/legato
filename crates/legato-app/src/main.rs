@@ -39,12 +39,22 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-/// Runs `f` on the engine runtime and resolves to its output.
-fn on_runtime<T: Send + 'static>(
-    f: impl Future<Output = T> + Send + 'static,
-) -> impl Future<Output = T> {
-    let handle = runtime().spawn(f);
+/// Runs the future `f` makes on the engine runtime, and resolves to its output.
+///
+/// `f` is called on the runtime, not here: the UI thread isn't in the runtime, and making
+/// some futures outside it (a `tokio::time::sleep`) panics.
+fn on_runtime<T, F>(f: impl FnOnce() -> F + Send + 'static) -> impl Future<Output = T>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    let handle = runtime().spawn(async move { f().await });
     async move { handle.await.expect("engine task panicked") }
+}
+
+/// Resolves after `delay`, for acting on the last of a burst of events.
+fn after(delay: std::time::Duration) -> impl Future<Output = ()> {
+    on_runtime(move || tokio::time::sleep(delay))
 }
 
 /// A pairing attempt handed between the engine and the UI.
@@ -238,7 +248,7 @@ impl App {
     fn start_sharing(&self) -> Task<Message> {
         let engine = self.engine.clone();
         Task::perform(
-            on_runtime(async move { engine.start_sharing().map_err(|e| format!("{e:#}")) }),
+            on_runtime(move || async move { engine.start_sharing().map_err(|e| format!("{e:#}")) }),
             Message::Sharing,
         )
     }
@@ -290,7 +300,7 @@ impl App {
             Message::Quit => {
                 let engine = self.engine.clone();
                 return Task::perform(
-                    on_runtime(async move {
+                    on_runtime(move || async move {
                         engine.stop_sharing().await;
                         engine.net().clone().shutdown().await;
                     }),
@@ -305,7 +315,7 @@ impl App {
                 }
                 let engine = self.engine.clone();
                 return Task::perform(
-                    on_runtime(async move {
+                    on_runtime(move || async move {
                         engine.stop_sharing().await;
                         Ok(())
                     }),
@@ -338,7 +348,7 @@ impl App {
                 self.model.pairing_open = true;
                 let engine = self.engine.clone();
                 return Task::perform(
-                    on_runtime(async move {
+                    on_runtime(move || async move {
                         engine
                             .net()
                             .pair(id)
@@ -478,10 +488,9 @@ impl App {
             Message::FileDropped(path) => {
                 self.dropped.push(path);
                 // Files dropped together arrive one event at a time; gather them first.
-                return Task::perform(
-                    on_runtime(tokio::time::sleep(std::time::Duration::from_millis(200))),
-                    |()| Message::FlushDrops,
-                );
+                return Task::perform(after(std::time::Duration::from_millis(200)), |()| {
+                    Message::FlushDrops
+                });
             }
             Message::FlushDrops => {
                 if self.dropped.is_empty() {
@@ -554,9 +563,7 @@ impl App {
                 viewer.size = size.or(viewer.size);
                 viewer.changes += 1;
                 let changes = viewer.changes;
-                return Task::perform(on_runtime(tokio::time::sleep(SETTLE)), move |()| {
-                    Message::ViewerSettled(changes)
-                });
+                return Task::perform(after(SETTLE), move |()| Message::ViewerSettled(changes));
             }
             Message::ViewerScale(id, scale) => {
                 if let Some(viewer) = self.viewer.as_mut().filter(|v| v.window == id) {
@@ -926,7 +933,9 @@ fn decide(attempt: Attempt, accept: bool) -> Task<Message> {
         return Task::none();
     };
     Task::perform(
-        on_runtime(async move { attempt.decide(accept).await.map_err(|e| format!("{e:#}")) }),
+        on_runtime(
+            move || async move { attempt.decide(accept).await.map_err(|e| format!("{e:#}")) },
+        ),
         Message::PairFinished,
     )
 }
@@ -986,7 +995,8 @@ fn stats_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
 fn nearby_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
     let engine = engine.0.clone();
     iced::stream::channel(16, async move |mut out| {
-        let Ok(mut nearby) = on_runtime(async move { engine.net().nearby().await }).await else {
+        let Ok(mut nearby) = on_runtime(move || async move { engine.net().nearby().await }).await
+        else {
             return;
         };
         use iced::futures::StreamExt;
