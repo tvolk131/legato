@@ -24,7 +24,7 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, VK_RSHIFT};
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
-    RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEMOUSE, RegisterRawInputDevices,
+    RID_INPUT, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT,
@@ -508,6 +508,13 @@ impl State {
                 Some(vec![])
             }
             Command::SetPortal(portal) => {
+                if portal.is_some() {
+                    // The viewer's window exists by now, and so does whatever registered
+                    // raw input for it.
+                    if let Err(e) = claim_raw_input(self.window) {
+                        tracing::warn!("couldn't set up raw input: {e}");
+                    }
+                }
                 self.controller.set_portal(portal, &mut self.out);
                 Some(self.drain())
             }
@@ -739,6 +746,42 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+/// Takes this process's raw input for the capture: the mouse's (its motion keeps coming
+/// when the cursor is stuck against a screen edge, which is what push-through measures),
+/// and none of the keyboard's.
+///
+/// Windows doesn't call this process's low-level keyboard hook while one of its windows
+/// is in front and the process is registered for raw keyboard input. winit registers every
+/// app for it (for device events, which the app doesn't use), so with the viewer in
+/// front, typing on the Mac's picture never reached the hook, or the Mac. Registrations
+/// are per process, so the last one wins; this is also done again once a viewer exists.
+fn claim_raw_input(window: HWND) -> windows::core::Result<()> {
+    let size = size_of::<RAWINPUTDEVICE>() as u32;
+    // SAFETY: registrations with valid structures; `window` is this thread's own.
+    unsafe {
+        RegisterRawInputDevices(
+            &[RAWINPUTDEVICE {
+                usUsagePage: 0x01, // generic desktop
+                usUsage: 0x02,     // mouse
+                dwFlags: RIDEV_INPUTSINK,
+                hwndTarget: window,
+            }],
+            size,
+        )?;
+        // Fails harmlessly when nothing is registered for the keyboard.
+        let _ = RegisterRawInputDevices(
+            &[RAWINPUTDEVICE {
+                usUsagePage: 0x01,
+                usUsage: 0x06, // keyboard
+                dwFlags: RIDEV_REMOVE,
+                hwndTarget: HWND::default(),
+            }],
+            size,
+        );
+    }
+    Ok(())
+}
+
 fn read_raw_motion(handle: HRAWINPUT) -> Option<(i32, i32)> {
     let mut data = RAWINPUT::default();
     let mut size = size_of::<RAWINPUT>() as u32;
@@ -812,15 +855,7 @@ fn run(
             // Alpha 1, not 0: fully transparent windows don't get mouse messages, and it's
             // WM_SETCURSOR on this window that hides the cursor.
             SetLayeredWindowAttributes(window, COLORREF(0), 1, LWA_ALPHA)?;
-            RegisterRawInputDevices(
-                &[RAWINPUTDEVICE {
-                    usUsagePage: 0x01, // generic desktop
-                    usUsage: 0x02,     // mouse
-                    dwFlags: RIDEV_INPUTSINK,
-                    hwndTarget: window,
-                }],
-                size_of::<RAWINPUTDEVICE>() as u32,
-            )?;
+            claim_raw_input(window)?;
             let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(instance), 0)?;
             let keyboard =
                 match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(instance), 0) {

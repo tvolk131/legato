@@ -901,8 +901,10 @@ fn keys_go_through_the_portal_to_a_focused_winit_viewer() {
     );
     let (cx, cy) = (x + w / 2, y + h / 2);
 
-    // Types on the focused window `hwnd` shown as a portal; returns what reached the peer.
-    let try_typing = |what: &str, hwnd: windows::Win32::Foundation::HWND| {
+    // Types on a focused window shown as a portal; returns what reached the peer. The
+    // window is `hwnd`, or opened by `open` once sharing has started.
+    type Open = dyn Fn() -> viewer::Viewer;
+    let try_typing = |what: &str, hwnd: Option<windows::Win32::Foundation::HWND>, open: &Open| {
         let (tx, rx) = mpsc::channel();
         let capture = Capture::start(
             Controller::new(ControllerConfig::default(), layout()),
@@ -915,6 +917,8 @@ fn keys_go_through_the_portal_to_a_focused_winit_viewer() {
             |_| {},
         )
         .unwrap();
+        let late = hwnd.is_none().then(open);
+        let hwnd = hwnd.or(late.as_ref().map(|v| v.hwnd)).unwrap();
         capture.send(Command::SetPortal(Some(Portal {
             peer: PEER,
             remote: Rect::new(1512.0, 0.0, 1920.0, 1080.0),
@@ -948,19 +952,36 @@ fn keys_go_through_the_portal_to_a_focused_winit_viewer() {
         mouse_move(-3, 0);
         capture.send(Command::SetPortal(None));
         drop(capture);
+        drop(late);
         (under == "the viewer", entered, keys)
     };
+    let open_raw = move || viewer::Viewer::open_with_raw_input(x, y, w, h);
 
     let mut failures = Vec::new();
     // Registered first, as winit's event loop is before sharing starts.
-    let raw = viewer::Viewer::open_with_raw_input(x, y, w, h);
-    let (shown, entered, keys) = try_typing("a window registered for raw input", raw.hwnd);
+    let raw = open_raw();
+    let (shown, entered, keys) = try_typing(
+        "a window registered for raw input",
+        Some(raw.hwnd),
+        &open_raw,
+    );
     if shown && (entered, keys) != (1, 6) {
         failures.push(format!("raw input window: entered {entered}, keys {keys}"));
     }
     drop(raw);
+    // Registered after sharing started: taken back when the portal is set.
+    let (shown, entered, keys) = try_typing(
+        "a window registered for raw input after sharing started",
+        None,
+        &open_raw,
+    );
+    if shown && (entered, keys) != (1, 6) {
+        failures.push(format!(
+            "late raw input window: entered {entered}, keys {keys}"
+        ));
+    }
     let winit = winit_viewer::WinitViewer::open(x, y, w as u32, h as u32);
-    let (shown, entered, keys) = try_typing("a winit window", winit.hwnd);
+    let (shown, entered, keys) = try_typing("a winit window", Some(winit.hwnd), &open_raw);
     if shown && (entered, keys) != (1, 6) {
         failures.push(format!("winit window: entered {entered}, keys {keys}"));
     }
