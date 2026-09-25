@@ -246,3 +246,229 @@ fn injected_moves_land_exactly_and_are_not_local_input() {
     );
     drop(capture);
 }
+
+mod viewer {
+    //! A stand-in for the app's viewer window: shown on its own thread, like iced's UI
+    //! thread, optionally slow to handle its messages, like a thread busy drawing.
+
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
+        GetMessageW, GetWindowThreadProcessId, MSG, PostThreadMessageW, RegisterClassW,
+        SetForegroundWindow, TranslateMessage, WM_QUIT, WNDCLASSW, WS_EX_TOPMOST, WS_POPUP,
+        WS_VISIBLE,
+    };
+    use windows::core::w;
+
+    unsafe extern "system" fn proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+
+    pub struct Viewer {
+        pub hwnd: HWND,
+        thread_id: u32,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Viewer {
+        /// A borderless window at `(x, y, w, h)` whose thread takes `busy` over each
+        /// message.
+        pub fn open(x: i32, y: i32, w: i32, h: i32, busy: Duration) -> Self {
+            let (tx, rx) = mpsc::channel();
+            let thread = std::thread::spawn(move || unsafe {
+                let instance = GetModuleHandleW(None).unwrap().into();
+                RegisterClassW(&WNDCLASSW {
+                    lpfnWndProc: Some(proc),
+                    hInstance: instance,
+                    lpszClassName: w!("LegatoTestViewer"),
+                    ..Default::default()
+                });
+                let hwnd = CreateWindowExW(
+                    WS_EX_TOPMOST,
+                    w!("LegatoTestViewer"),
+                    w!("Legato test viewer"),
+                    WS_POPUP | WS_VISIBLE,
+                    x,
+                    y,
+                    w,
+                    h,
+                    None,
+                    None,
+                    Some(instance),
+                    None,
+                )
+                .unwrap();
+                tx.send((hwnd.0 as usize, GetCurrentThreadId())).unwrap();
+                let mut msg = MSG::default();
+                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                    if !busy.is_zero() {
+                        std::thread::sleep(busy);
+                    }
+                }
+                let _ = DestroyWindow(hwnd);
+            });
+            let (hwnd, thread_id) = rx.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            Self {
+                hwnd: HWND(hwnd as *mut _),
+                thread_id,
+                thread: Some(thread),
+            }
+        }
+
+        /// Tries to make this the foreground window (Windows may refuse). Returns whether
+        /// it is.
+        pub fn focus(&self) -> bool {
+            unsafe {
+                let current = GetForegroundWindow();
+                let theirs = GetWindowThreadProcessId(current, None);
+                let ours = GetCurrentThreadId();
+                let attached = theirs != 0 && AttachThreadInput(ours, theirs, true).as_bool();
+                let _ = SetForegroundWindow(self.hwnd);
+                if attached {
+                    let _ = AttachThreadInput(ours, theirs, false);
+                }
+                std::thread::sleep(Duration::from_millis(200));
+                GetForegroundWindow() == self.hwnd
+            }
+        }
+    }
+
+    impl Drop for Viewer {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+fn click(down: bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP};
+    send(&[INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dwFlags: if down {
+                    MOUSEEVENTF_LEFTDOWN
+                } else {
+                    MOUSEEVENTF_LEFTUP
+                },
+                ..Default::default()
+            },
+        },
+    }]);
+}
+
+/// Virtual monitor mode: with the pointer over the viewer's picture, clicks and keys go
+/// to the Mac whether or not the viewer window has focus, and however busy its thread is.
+#[test]
+#[ignore = "moves the cursor and shows a window"]
+fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
+    use legato_core::controller::Portal;
+
+    let local = screens();
+    let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
+    let rightmost = (0..local.displays.len())
+        .max_by(|&a, &b| {
+            local.displays[a]
+                .bounds
+                .right()
+                .total_cmp(&local.displays[b].bounds.right())
+        })
+        .unwrap();
+    let mut layout = Layout::new(local.clone());
+    let peer = Screens {
+        displays: vec![Display {
+            id: 1,
+            bounds: Rect::new(0.0, 0.0, 1512.0, 982.0),
+            pixel_scale: 2.0,
+            ui_scale: 1.0,
+            primary: true,
+            name: "peer".into(),
+        }],
+        native_per_desk: 1.0,
+    };
+    assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
+    let (tx, rx) = mpsc::channel();
+    let capture = Capture::start(
+        Controller::new(ControllerConfig::default(), layout),
+        CaptureOptions {
+            accept_injected: true,
+        },
+        move |action| {
+            let _ = tx.send(action);
+        },
+        |_| {},
+    )
+    .unwrap();
+
+    let (w, h) = (640, 360);
+    let (x, y) = (
+        primary.center().x as i32 - w / 2,
+        primary.center().y as i32 - h / 2,
+    );
+    let mut failures = Vec::new();
+    for (focused, busy_ms) in [(false, 0), (true, 0), (false, 40), (true, 40)] {
+        let viewer = viewer::Viewer::open(x, y, w, h, Duration::from_millis(busy_ms));
+        let has_focus = focused && viewer.focus();
+        capture.send(Command::SetPortal(Some(Portal {
+            peer: PEER,
+            remote: Rect::new(1512.0, 0.0, 1920.0, 1080.0),
+            window: viewer.hwnd.0 as usize as u64,
+        })));
+        std::thread::sleep(Duration::from_millis(100));
+        unsafe { SetCursorPos(x + w / 2, y + h / 2).unwrap() };
+        mouse_move(3, 0);
+        mouse_move(-3, 0);
+        click(true);
+        click(false);
+        for _ in 0..3 {
+            key(0x64, true); // F13
+            key(0x64, false);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let actions: Vec<Action> = rx.try_iter().collect();
+        let sent = |m: &dyn Fn(&Control) -> bool| {
+            actions
+                .iter()
+                .filter(|a| matches!(a, Action::Send { to: PEER, msg } if m(msg)))
+                .count()
+        };
+        let entered = sent(&|m| matches!(m, Control::Enter { .. }));
+        let clicks = sent(&|m| matches!(m, Control::Button { .. }));
+        let keys = sent(&|m| matches!(m, Control::Key { usage: 0x68, .. }));
+        let case = format!(
+            "viewer focused: {has_focus} (asked {focused}), its thread busy {busy_ms} ms per \
+             message: entered {entered}, clicks {clicks}/2, keys {keys}/6"
+        );
+        eprintln!("{case}");
+        if entered == 0 || clicks != 2 || keys != 6 {
+            failures.push(case);
+        }
+        // Off the picture before the next case.
+        unsafe { SetCursorPos(x - 50, y - 50).unwrap() };
+        mouse_move(-3, 0);
+        capture.send(Command::SetPortal(None));
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = rx.try_iter().count();
+        drop(viewer);
+    }
+    drop(capture);
+    assert!(failures.is_empty(), "{failures:#?}");
+}
