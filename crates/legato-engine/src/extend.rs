@@ -63,8 +63,22 @@ mod host {
     /// This Mac's extra display, streaming to one viewer.
     pub(crate) struct Host {
         pub(crate) peer: EndpointId,
+        session: Arc<Session>,
         stream: Arc<DisplayStream>,
         task: tokio::task::JoinHandle<()>,
+    }
+
+    /// What the stream should be for `request`, within what the Mac can encode.
+    fn stream_config(request: ExtendRequest) -> StreamConfig {
+        use legato_core::extend::{max_fps, usable_size};
+        let (width, height) = usable_size(request.width, request.height);
+        StreamConfig {
+            width,
+            height,
+            hidpi: request.hidpi,
+            fps: request.fps.clamp(1, max_fps(width, height)),
+            bitrate: request.bitrate.clamp(1_000_000, 200_000_000),
+        }
     }
 
     impl Host {
@@ -75,13 +89,7 @@ mod host {
         ) -> Result<Self> {
             let (tx, mut rx) = mpsc::unbounded_channel::<EncodedFrame>();
             let queued = Arc::new(AtomicUsize::new(0));
-            let config = StreamConfig {
-                width: request.width,
-                height: request.height,
-                hidpi: request.hidpi,
-                fps: request.fps,
-                bitrate: request.bitrate,
-            };
+            let config = stream_config(request);
             let stream = {
                 let queued = queued.clone();
                 tokio::task::spawn_blocking(move || {
@@ -138,6 +146,7 @@ mod host {
             };
             Ok(Self {
                 peer: session.peer,
+                session,
                 stream,
                 task,
             })
@@ -145,6 +154,42 @@ mod host {
 
         pub(crate) fn request_keyframe(&self) {
             self.stream.request_keyframe();
+        }
+
+        /// Tells the viewer where the display is now.
+        fn report_bounds(&self) {
+            let bounds = to_rect(self.stream.display().bounds());
+            self.session.send(Control::Extended { bounds });
+        }
+
+        /// Changes the display's size or frame rate, as the viewer asked.
+        pub(crate) async fn reconfigure(&self, request: ExtendRequest) {
+            let config = stream_config(request);
+            let stream = self.stream.clone();
+            match tokio::task::spawn_blocking(move || stream.reconfigure(config)).await {
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        "extra display is now {}x{} at {} fps",
+                        config.width,
+                        config.height,
+                        config.fps
+                    );
+                    self.report_bounds();
+                }
+                Ok(Err(e)) => tracing::warn!("couldn't resize the extra display: {e:#}"),
+                Err(e) => tracing::warn!("couldn't resize the extra display: {e}"),
+            }
+        }
+
+        /// Moves the display in the Mac's arrangement, as the viewer asked.
+        pub(crate) async fn arrange(&self, origin: legato_proto::Point) {
+            let stream = self.stream.clone();
+            let (x, y) = (origin.x.round() as i32, origin.y.round() as i32);
+            match tokio::task::spawn_blocking(move || stream.display().set_origin(x, y)).await {
+                Ok(Ok(())) => self.report_bounds(),
+                Ok(Err(e)) => tracing::warn!("couldn't arrange the extra display: {e:#}"),
+                Err(e) => tracing::warn!("couldn't arrange the extra display: {e}"),
+            }
         }
 
         /// Stops streaming and removes the display.
@@ -296,4 +341,42 @@ pub(crate) struct Viewing {
     pub(crate) peer: legato_net::EndpointId,
     /// Where the display sits on the Mac, once it exists.
     pub(crate) bounds: Option<Rect>,
+    /// Where it's shown here, in native coordinates.
+    pub(crate) area: Option<Rect>,
+    /// The area and display size the Mac was last asked to arrange for, so a request
+    /// isn't repeated when macOS nudges the display a little.
+    pub(crate) arranged_for: Option<(Rect, (f64, f64))>,
+}
+
+impl Viewing {
+    pub(crate) fn new(peer: legato_net::EndpointId) -> Self {
+        Self {
+            peer,
+            bounds: None,
+            area: None,
+            arranged_for: None,
+        }
+    }
+
+    /// Where the Mac should put the display so it matches where it's shown here, if that
+    /// hasn't been asked for already.
+    pub(crate) fn arrangement(
+        &mut self,
+        layout: &legato_core::Layout,
+        machine: legato_core::MachineId,
+    ) -> Option<legato_proto::Point> {
+        let (bounds, area) = (self.bounds?, self.area?);
+        let key = (area, (bounds.width, bounds.height));
+        if self.arranged_for == Some(key) {
+            return None;
+        }
+        let origin = legato_core::extend::place_extra_display(
+            layout,
+            machine,
+            area,
+            (bounds.width, bounds.height),
+        )?;
+        self.arranged_for = Some(key);
+        Some(origin)
+    }
 }

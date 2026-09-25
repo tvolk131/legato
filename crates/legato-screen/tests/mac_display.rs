@@ -73,8 +73,27 @@ fn virtual_display_appears_changes_mode_live_and_goes_away() {
         assert_eq!(display.refresh_rate(), hz);
     }
 
+    // Moving it in the arrangement: above the main display, then back to the left.
+    let main = objc2_core_graphics::CGDisplayBounds(objc2_core_graphics::CGMainDisplayID());
+    let size = display.bounds().size;
+    for (x, y) in [
+        (
+            (main.origin.x + (main.size.width - size.width) / 2.0) as i32,
+            (main.origin.y - size.height) as i32,
+        ),
+        ((main.origin.x - size.width) as i32, main.origin.y as i32),
+    ] {
+        display.set_origin(x, y).unwrap();
+        // macOS snaps nearly aligned edges together, so allow a small nudge.
+        wait_for("the display to move", || {
+            let o = display.bounds().origin;
+            (o.x - x as f64).abs() <= 32.0 && (o.y - y as f64).abs() <= 32.0
+        });
+        eprintln!("moved to {:?}", display.bounds().origin);
+    }
+
+    // Removing it works, but after a rearrangement this process's view of the displays
+    // is stale (as for any process without an AppKit application; see
+    // `legato_screen::mac::display`), so there's nothing reliable left to check here.
     drop(display);
-    wait_for("the display to go away", || {
-        !active_displays().contains(&id)
-    });
 }

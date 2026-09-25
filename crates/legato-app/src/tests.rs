@@ -98,6 +98,8 @@ fn model(page: Page) -> Model {
         known,
         placed_us: HashMap::new(),
         viewing: None,
+        display_options: None,
+        display_options_open: false,
         active: None,
         problems: vec![],
         notice: None,
@@ -429,4 +431,101 @@ fn the_stats_panel_sits_in_the_corner() {
     );
     snapshot(&mut ui, "viewer-stats");
     assert!(ui.find("3840×2160 · 60 fps · 24.1 Mbit/s · direct").is_ok());
+}
+
+fn with_display_options(placement: legato_engine::config::Placement) -> Model {
+    let mut m = model(Page::Devices);
+    let mac = m.paired[0].device.id;
+    let mut options = crate::model::DisplayOptions::from_config(mac, &m.config.extend);
+    options.placement = placement;
+    options.display = 2;
+    options.fps = 60;
+    m.display_options = Some(options);
+    m.display_options_open = true;
+    m
+}
+
+#[test]
+fn display_options_offer_each_screen_and_limit_the_frame_rate() {
+    use legato_engine::config::{Placement, Resolution};
+    let m = with_display_options(Placement::FullScreen);
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        (1024.0, 1300.0),
+        crate::view::root(&m),
+    );
+    snapshot(&mut ui, "display-options");
+    assert!(ui.find("Full screen on display 2 (3840×2160)").is_ok());
+    assert!(
+        ui.find("At 3840×2160 the Mac can keep up with 60 fps. Smaller sizes can go faster.")
+            .is_ok()
+    );
+    // 120 fps is more than the Mac can encode at 4K: choosing it does nothing.
+    ui.click("120 fps").unwrap();
+    ui.click("Always 2560×1440").unwrap();
+    ui.click("In a window").unwrap();
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, Message::DisplayOptionsChanged(o) if o.fps == 120)),
+        "{messages:?}"
+    );
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        Message::DisplayOptionsChanged(o) if o.resolution == Resolution::Fixed && o.fixed == (2560, 1440)
+    )));
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        Message::DisplayOptionsChanged(o) if o.placement == Placement::Window
+    )));
+
+    // At 2560×1440, 120 fps is fine.
+    let mut m = with_display_options(Placement::FullScreen);
+    if let Some(o) = &mut m.display_options {
+        o.resolution = Resolution::Fixed;
+        o.fixed = (2560, 1440);
+    }
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        (1024.0, 1300.0),
+        crate::view::root(&m),
+    );
+    ui.click("120 fps").unwrap();
+    ui.click("Show").unwrap();
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::DisplayOptionsChanged(o) if o.fps == 120))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::DisplayOptionsDone(true)))
+    );
+}
+
+#[test]
+fn display_options_are_saved_to_the_settings() {
+    use legato_engine::config::{Extend, Placement, Resolution};
+    let mut extend = Extend::default();
+    let options = crate::model::DisplayOptions {
+        peer: id(9),
+        placement: Placement::FullScreen,
+        display: 3,
+        resolution: Resolution::Fixed,
+        fixed: (1920, 1080),
+        fps: 144,
+    };
+    options.save_to(&mut extend);
+    assert_eq!(extend.placement, Some(Placement::FullScreen));
+    assert_eq!(
+        (extend.display, extend.width, extend.height, extend.fps),
+        (3, 1920, 1080, 144)
+    );
+    assert_eq!(
+        crate::model::DisplayOptions::from_config(id(9), &extend),
+        options
+    );
 }

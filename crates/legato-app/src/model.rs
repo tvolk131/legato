@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use legato_engine::Config;
+use legato_engine::config::{Placement, Resolution};
 use legato_net::{EndpointId, PathKind};
 use legato_proto::{Os, Screens};
 
@@ -71,6 +72,42 @@ pub struct Model {
     pub autostart: Option<bool>,
     /// The Mac whose extra display is shown here (virtual monitor mode).
     pub viewing: Option<EndpointId>,
+    /// The "Show as display" choices being made. Kept while the dialog closes.
+    pub display_options: Option<DisplayOptions>,
+    pub display_options_open: bool,
+}
+
+/// Where and how to show a Mac's extra display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayOptions {
+    pub peer: EndpointId,
+    pub placement: Placement,
+    /// For full screen: which of this machine's displays, 1-based, left to right.
+    pub display: usize,
+    pub resolution: Resolution,
+    pub fixed: (u32, u32),
+    pub fps: u32,
+}
+
+impl DisplayOptions {
+    pub fn from_config(peer: EndpointId, extend: &legato_engine::config::Extend) -> Self {
+        Self {
+            peer,
+            placement: extend.placement.unwrap_or(Placement::FullScreen),
+            display: extend.display.max(1),
+            resolution: extend.resolution,
+            fixed: (extend.width, extend.height),
+            fps: extend.fps,
+        }
+    }
+
+    pub fn save_to(&self, extend: &mut legato_engine::config::Extend) {
+        extend.placement = Some(self.placement);
+        extend.display = self.display;
+        extend.resolution = self.resolution;
+        (extend.width, extend.height) = self.fixed;
+        extend.fps = self.fps;
+    }
 }
 
 impl Model {
@@ -87,6 +124,13 @@ impl Model {
         self.this.os == Some(Os::Windows)
             && peer.device.os == Some(Os::MacOs)
             && peer.connection.is_some()
+    }
+
+    /// This machine's displays, left to right as `legato doctor` numbers them.
+    pub fn displays(&self) -> Vec<legato_proto::Display> {
+        let mut displays = self.local.displays.clone();
+        displays.sort_by(|a, b| a.bounds.x.total_cmp(&b.bounds.x));
+        displays
     }
 
     pub fn name_of(&self, id: &EndpointId) -> String {

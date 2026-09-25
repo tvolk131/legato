@@ -92,6 +92,14 @@ pub enum Message {
     ToggleFullscreen(window::Id),
     Stats(bool),
     ToggleStats(window::Id),
+    DisplayOptions(EndpointId),
+    DisplayOptionsChanged(model::DisplayOptions),
+    DisplayOptionsDone(bool),
+    /// The viewer window moved (`position`) or was resized (`size`), in logical units.
+    ViewerChanged(window::Id, Option<iced::Point>, Option<Size>),
+    ViewerScale(window::Id, f32),
+    /// No move or resize for a moment: act on the latest. Carries the change it's for.
+    ViewerSettled(u64),
     ViewerStats(Option<legato_engine::ViewerStats>),
     /// The system's light or dark appearance, at startup and whenever it changes.
     SystemTheme(iced::theme::Mode),
@@ -104,7 +112,20 @@ struct Viewer {
     frame: Option<legato_engine::ViewerFrame>,
     stats: Option<legato_engine::ViewerStats>,
     fullscreen: bool,
+    /// Go full screen once open (full screen on a chosen display).
+    full_screen_on_open: bool,
+    /// The window's scale factor, position and size (logical), as last reported.
+    scale: f32,
+    position: Option<iced::Point>,
+    size: Option<Size>,
+    /// Counts moves and resizes, so only the last one in a burst is acted on.
+    changes: u64,
+    /// The display size last asked for.
+    asked: (u32, u32),
 }
+
+/// How long a window must stay put before its new size or place is acted on.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
 struct App {
     engine: Arc<Engine>,
@@ -157,6 +178,8 @@ impl App {
             notice: None,
             autostart: platform::autostart_enabled(),
             viewing: None,
+            display_options: None,
+            display_options_open: false,
         };
         let mut app = Self {
             engine,
@@ -252,6 +275,7 @@ impl App {
                 }
                 if let Some(viewer) = self.viewer.take_if(|v| v.window == id) {
                     self.engine.set_viewer_window(None);
+                    self.engine.set_viewer_area(None);
                     self.engine.stop_extend(viewer.peer);
                     self.model.viewing = None;
                 }
@@ -488,24 +512,81 @@ impl App {
                 if let Some(viewer) = &self.viewer {
                     return window::gain_focus(viewer.window);
                 }
-                if let Err(e) = self.engine.extend(peer) {
-                    self.notify(format!("Couldn't show the display: {e:#}"));
-                    return Task::none();
+                if self.model.config.extend.placement.is_none() {
+                    // First time: ask where and how.
+                    return self.update(Message::DisplayOptions(peer));
                 }
-                let (id, open) = window::open(window::Settings {
-                    size: Size::new(1280.0, 720.0),
-                    min_size: Some(Size::new(480.0, 270.0)),
-                    ..Default::default()
-                });
-                self.viewer = Some(Viewer {
+                return self.start_display(peer);
+            }
+            Message::DisplayOptions(peer) => {
+                self.model.display_options = Some(model::DisplayOptions::from_config(
                     peer,
-                    window: id,
-                    frame: None,
-                    stats: None,
-                    fullscreen: false,
+                    &self.model.config.extend,
+                ));
+                self.model.display_options_open = true;
+            }
+            Message::DisplayOptionsChanged(options) => self.model.display_options = Some(options),
+            Message::DisplayOptionsDone(show) => {
+                self.model.display_options_open = false;
+                let Some(options) = self.model.display_options.clone().filter(|_| show) else {
+                    return Task::none();
+                };
+                options.save_to(&mut self.model.config.extend);
+                self.save_config();
+                // Showing already: start over with the new choices.
+                let restart = self.viewer.take().map(|viewer| {
+                    self.engine.set_viewer_window(None);
+                    self.engine.set_viewer_area(None);
+                    self.engine.stop_extend(viewer.peer);
+                    window::close(viewer.window)
                 });
-                self.model.viewing = Some(peer);
-                return open.map(Message::ViewerOpened);
+                return Task::batch(
+                    restart
+                        .into_iter()
+                        .chain([self.start_display(options.peer)]),
+                );
+            }
+            Message::ViewerChanged(id, position, size) => {
+                let Some(viewer) = self.viewer.as_mut().filter(|v| v.window == id) else {
+                    return Task::none();
+                };
+                viewer.position = position.or(viewer.position);
+                viewer.size = size.or(viewer.size);
+                viewer.changes += 1;
+                let changes = viewer.changes;
+                return Task::perform(on_runtime(tokio::time::sleep(SETTLE)), move |()| {
+                    Message::ViewerSettled(changes)
+                });
+            }
+            Message::ViewerScale(id, scale) => {
+                if let Some(viewer) = self.viewer.as_mut().filter(|v| v.window == id) {
+                    viewer.scale = scale;
+                }
+            }
+            Message::ViewerSettled(changes) => {
+                let Some(viewer) = self.viewer.as_mut().filter(|v| v.changes == changes) else {
+                    return Task::none();
+                };
+                let (Some(position), Some(size)) = (viewer.position, viewer.size) else {
+                    return Task::none();
+                };
+                let s = viewer.scale.max(0.1);
+                let area = legato_proto::Rect::new(
+                    (position.x * s) as f64,
+                    (position.y * s) as f64,
+                    (size.width * s) as f64,
+                    (size.height * s) as f64,
+                );
+                self.engine.set_viewer_area(Some(area));
+                let shown = (area.width as u32, area.height as u32);
+                let wanted = legato_core::extend::usable_size(
+                    self.model.config.extend.size_for(shown).0,
+                    self.model.config.extend.size_for(shown).1,
+                );
+                if wanted != viewer.asked {
+                    viewer.asked = wanted;
+                    self.engine.resize_extend(viewer.peer, wanted.0, wanted.1);
+                }
             }
             Message::StopDisplay => {
                 if let Some(viewer) = &self.viewer {
@@ -513,8 +594,17 @@ impl App {
                 }
             }
             Message::ViewerOpened(id) => {
+                let full_screen = self
+                    .viewer
+                    .as_mut()
+                    .filter(|v| v.window == id && v.full_screen_on_open)
+                    .map(|v| {
+                        v.fullscreen = true;
+                        window::set_mode(id, window::Mode::Fullscreen)
+                    });
+                let scale = window::scale_factor(id).map(move |s| Message::ViewerScale(id, s));
                 // Input over the picture goes to the Mac: the capture needs the window.
-                return window::run(id, |w| {
+                let handle = window::run(id, |w| {
                     #[cfg(windows)]
                     if let Ok(iced::window::raw_window_handle::RawWindowHandle::Win32(h)) =
                         w.window_handle().map(|h| h.as_raw())
@@ -525,6 +615,7 @@ impl App {
                     None
                 })
                 .map(Message::ViewerHandle);
+                return Task::batch([handle, scale].into_iter().chain(full_screen));
             }
             Message::ViewerHandle(handle) => self.engine.set_viewer_window(handle),
             Message::ViewerFrame(frame) => {
@@ -559,6 +650,69 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// Opens the viewer for `peer` as the `[extend]` settings say, and asks for the display.
+    fn start_display(&mut self, peer: EndpointId) -> Task<Message> {
+        use legato_engine::config::Placement;
+        let extend = self.model.config.extend.clone();
+        let displays = self.model.displays();
+        // Window positions are logical: the primary display's scale converts them.
+        let scale = displays
+            .iter()
+            .find(|d| d.primary)
+            .map_or(1.0, |d| d.ui_scale);
+        let target = match extend.placement.unwrap_or(Placement::Window) {
+            Placement::FullScreen => displays
+                .get(extend.display.saturating_sub(1))
+                .or(displays.first())
+                .cloned(),
+            Placement::Window => None,
+        };
+        let size = Size::new(1280.0, 720.0);
+        let shown = match &target {
+            Some(d) => (d.bounds.width as u32, d.bounds.height as u32),
+            None => (
+                (size.width as f64 * scale) as u32,
+                (size.height as f64 * scale) as u32,
+            ),
+        };
+        let (w, h) = extend.size_for(shown);
+        if let Err(e) = self.engine.extend(peer, w, h) {
+            self.notify(format!("Couldn't show the display: {e:#}"));
+            return Task::none();
+        }
+        let position = match &target {
+            Some(d) => {
+                let c = d.bounds.center();
+                window::Position::Specific(iced::Point::new(
+                    (c.x / scale) as f32 - size.width / 2.0,
+                    (c.y / scale) as f32 - size.height / 2.0,
+                ))
+            }
+            None => window::Position::default(),
+        };
+        let (id, open) = window::open(window::Settings {
+            size,
+            min_size: Some(Size::new(480.0, 270.0)),
+            position,
+            ..Default::default()
+        });
+        self.viewer = Some(Viewer {
+            peer,
+            window: id,
+            frame: None,
+            stats: None,
+            fullscreen: false,
+            full_screen_on_open: target.is_some(),
+            scale: scale as f32,
+            position: None,
+            size: None,
+            changes: 0,
+            asked: legato_core::extend::usable_size(w, h),
+        });
+        self.model.viewing = Some(peer);
+        open.map(Message::ViewerOpened)
     }
 
     fn save_config(&mut self) {
@@ -739,6 +893,18 @@ impl App {
             iced::event::listen_with(|event, _, window| match event {
                 iced::Event::Window(window::Event::FileDropped(path)) => {
                     Some(Message::FileDropped(path))
+                }
+                iced::Event::Window(window::Event::Opened { position, size }) => {
+                    Some(Message::ViewerChanged(window, position, Some(size)))
+                }
+                iced::Event::Window(window::Event::Moved(position)) => {
+                    Some(Message::ViewerChanged(window, Some(position), None))
+                }
+                iced::Event::Window(window::Event::Resized(size)) => {
+                    Some(Message::ViewerChanged(window, None, Some(size)))
+                }
+                iced::Event::Window(window::Event::Rescaled(scale)) => {
+                    Some(Message::ViewerScale(window, scale))
                 }
                 iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                     key: iced::keyboard::Key::Named(iced::keyboard::key::Named::F11),

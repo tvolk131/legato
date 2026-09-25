@@ -197,6 +197,14 @@ pub enum Control {
     },
     /// Viewer → Mac: send a keyframe (the viewer started, or lost its place).
     Keyframe,
+    /// Viewer → Mac: change the extra display's size or frame rate (the viewer's window
+    /// was resized, or went full screen).
+    ExtendResize(ExtendRequest),
+    /// Viewer → Mac: move the extra display in the Mac's arrangement, to this top-left
+    /// corner in the Mac's native coordinates, so it matches where it's shown.
+    ExtendArrange {
+        origin: Point,
+    },
 }
 
 /// The extra display a viewer asks for.
@@ -438,6 +446,16 @@ mod tests {
                 reason: "closed".into(),
             },
             Control::Keyframe,
+            Control::ExtendResize(ExtendRequest {
+                width: 2560,
+                height: 1440,
+                hidpi: true,
+                fps: 120,
+                bitrate: 30_000_000,
+            }),
+            Control::ExtendArrange {
+                origin: Point::new(-96.0, -1080.0),
+            },
         ];
         for msg in msgs {
             let frame = encode_frame(&msg);

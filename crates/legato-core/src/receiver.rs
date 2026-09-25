@@ -139,7 +139,9 @@ impl Receiver {
             | Control::ExtendRequest(_)
             | Control::Extended { .. }
             | Control::ExtendStop { .. }
-            | Control::Keyframe => {}
+            | Control::Keyframe
+            | Control::ExtendResize(_)
+            | Control::ExtendArrange { .. } => {}
         }
     }
 

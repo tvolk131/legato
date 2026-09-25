@@ -83,7 +83,12 @@ pub(crate) enum RunCommand {
     StopExtend {
         to: EndpointId,
     },
+    ExtendResize {
+        to: EndpointId,
+        request: ExtendRequest,
+    },
     ViewerWindow(Option<u64>),
+    ViewerArea(Option<legato_proto::Rect>),
 }
 
 fn send_files_in_background(
@@ -251,13 +256,29 @@ pub(crate) async fn run(
                 .flatten();
             p.session.send(Control::Placement { offset });
         }
-        let layout = if may_drive {
-            layout
+        capture.send(CaptureCommand::SetLayout(if may_drive {
+            layout.clone()
         } else {
             Layout::new(local.clone())
-        };
-        capture.send(CaptureCommand::SetLayout(layout));
+        }));
+        layout
     };
+
+    // The shared desk as arranged, even when this machine may not drive the others.
+    let mut layout_now = Layout::new(local.clone());
+    // Asks the Mac to arrange its extra display to match where it's shown here.
+    let arrange =
+        |viewing: &mut Option<Viewing>, layout: &Layout, ids: &HashMap<EndpointId, MachineId>| {
+            let Some(v) = viewing.as_mut() else { return };
+            let Some(&machine) = ids.get(&v.peer) else {
+                return;
+            };
+            if let Some(origin) = v.arrangement(layout, machine)
+                && let Some(s) = by_peer.read().unwrap().get(&v.peer)
+            {
+                s.send(Control::ExtendArrange { origin });
+            }
+        };
 
     loop {
         tokio::select! {
@@ -283,7 +304,7 @@ pub(crate) async fn run(
                     clipboard = start_clipboard(new.clipboard.enabled);
                 }
                 config = new;
-                relayout(&peers, &config, &ctx);
+                layout_now = relayout(&peers, &config, &ctx);
             }
             Some(active) = active_rx.recv() => {
                 let id = active.and_then(|m| peers.get(&m)).map(|p| p.session.peer);
@@ -328,7 +349,7 @@ pub(crate) async fn run(
                             {
                                 s.send(Control::ExtendStop { reason: String::new() });
                             }
-                            viewing = Some(Viewing { peer: to, bounds: None });
+                            viewing = Some(Viewing::new(to));
                             session.send(Control::ExtendRequest(request));
                         }
                         None => ctx.status(Status::ExtendEnded {
@@ -351,6 +372,19 @@ pub(crate) async fn run(
                 RunCommand::ViewerWindow(window) => {
                     viewer_window = window;
                     set_portal(&viewing, viewer_window, &ids);
+                }
+                RunCommand::ExtendResize { to, request } => {
+                    if viewing.is_some_and(|v| v.peer == to)
+                        && let Some(s) = by_peer.read().unwrap().get(&to)
+                    {
+                        s.send(Control::ExtendResize(request));
+                    }
+                }
+                RunCommand::ViewerArea(area) => {
+                    if let Some(v) = viewing.as_mut() {
+                        v.area = area;
+                    }
+                    arrange(&mut viewing, &layout_now, &ids);
                 }
             },
             Some(result) = inbox_done.recv() => match result {
@@ -391,7 +425,7 @@ pub(crate) async fn run(
                             session,
                             placed_us_at: None,
                         });
-                        relayout(&peers, &config, &ctx);
+                        layout_now = relayout(&peers, &config, &ctx);
                     }
                     SessionEvent::Control { peer, msg } => {
                         let Some(&machine) = ids.get(&peer) else { continue };
@@ -402,7 +436,7 @@ pub(crate) async fn run(
                                 if let Some(p) = peers.get_mut(&machine) {
                                     p.screens = screens;
                                 }
-                                relayout(&peers, &config, &ctx);
+                                layout_now = relayout(&peers, &config, &ctx);
                             }
                             Control::Placement { offset } => {
                                 if let Some(p) = peers.get_mut(&machine) {
@@ -412,7 +446,7 @@ pub(crate) async fn run(
                                     p.placed_us_at = offset;
                                 }
                                 ctx.status(Status::PeerPlacedUs { id: peer, offset });
-                                relayout(&peers, &config, &ctx);
+                                layout_now = relayout(&peers, &config, &ctx);
                             }
                             Control::ControlMode(mode) => {
                                 if mode.updated_at > config.control.updated_at {
@@ -455,7 +489,24 @@ pub(crate) async fn run(
                                     v.bounds = Some(bounds);
                                     ctx.status(Status::Extended { id: peer, bounds });
                                     set_portal(&viewing, viewer_window, &ids);
+                                    arrange(&mut viewing, &layout_now, &ids);
                                 }
+                            }
+                            Control::ExtendResize(request) => {
+                                #[cfg(target_os = "macos")]
+                                if let Some(h) = host.as_ref().filter(|h| h.peer == peer) {
+                                    h.reconfigure(request).await;
+                                }
+                                #[cfg(not(target_os = "macos"))]
+                                let _ = request;
+                            }
+                            Control::ExtendArrange { origin } => {
+                                #[cfg(target_os = "macos")]
+                                if let Some(h) = host.as_ref().filter(|h| h.peer == peer) {
+                                    h.arrange(origin).await;
+                                }
+                                #[cfg(not(target_os = "macos"))]
+                                let _ = origin;
                             }
                             Control::ExtendStop { reason } => {
                                 #[cfg(target_os = "macos")]
@@ -531,7 +582,7 @@ pub(crate) async fn run(
                         }
                         capture.send(CaptureCommand::Event(Event::PeerLost(machine)));
                         let _ = inject_tx.send(Input::Disconnected(peer));
-                        relayout(&peers, &config, &ctx);
+                        layout_now = relayout(&peers, &config, &ctx);
                     }
                 }
             }

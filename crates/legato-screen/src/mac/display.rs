@@ -5,9 +5,10 @@
 //! this fails cleanly instead of crashing. The display lasts as long as the object.
 //!
 //! In a process without an AppKit application (a command-line tool, a test), CoreGraphics
-//! stops updating its view of displays created after the first one: it reports no mode or
-//! bounds for them, though other processes see them fine. So such a process can show one
-//! display in its lifetime; the app, which runs `NSApplication`, can show any number.
+//! stops updating its view of displays after the first virtual one is created, or after
+//! the arrangement changes: it reports no mode or bounds for newer displays and keeps
+//! listing removed ones, though other processes see the truth. So such a process can show
+//! one display in its lifetime; the app, which runs `NSApplication`, has no such limit.
 
 use anyhow::{Context, Result, bail, ensure};
 use dispatch2::{DispatchQueue, DispatchRetained};
@@ -18,8 +19,9 @@ use objc2_core_foundation::{CGRect, CGSize};
 use std::time::{Duration, Instant};
 
 use objc2_core_graphics::{
-    CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode, CGDisplayModelNumber,
-    CGDisplayVendorNumber, CGGetActiveDisplayList,
+    CGBeginDisplayConfiguration, CGCancelDisplayConfiguration, CGCompleteDisplayConfiguration,
+    CGConfigureDisplayOrigin, CGConfigureOption, CGDisplayBounds, CGDisplayCopyDisplayMode,
+    CGDisplayMode, CGDisplayModelNumber, CGDisplayVendorNumber, CGGetActiveDisplayList,
 };
 use objc2_foundation::{NSArray, NSObject, NSString};
 
@@ -138,6 +140,30 @@ impl VirtualDisplay {
             mode.height,
             self.pixel_size()
         )
+    }
+
+    /// Moves the display in the Mac's arrangement: its top-left corner goes to `(x, y)`
+    /// in global coordinates. macOS may nudge it so displays touch.
+    pub fn set_origin(&self, x: i32, y: i32) -> Result<()> {
+        // SAFETY: the standard begin/configure/complete sequence; the configuration is
+        // cancelled if a step fails.
+        unsafe {
+            let mut config = std::ptr::null_mut();
+            let err = CGBeginDisplayConfiguration(&mut config);
+            ensure!(err.0 == 0, "couldn't rearrange displays (error {})", err.0);
+            let err = CGConfigureDisplayOrigin(config, self.id, x, y);
+            if err.0 != 0 {
+                CGCancelDisplayConfiguration(config);
+                bail!("couldn't move the display (error {})", err.0);
+            }
+            let err = CGCompleteDisplayConfiguration(config, CGConfigureOption::ForSession);
+            ensure!(
+                err.0 == 0,
+                "couldn't apply the arrangement (error {})",
+                err.0
+            );
+        }
+        Ok(())
     }
 
     /// The display's CoreGraphics id.

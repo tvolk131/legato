@@ -23,15 +23,45 @@ pub struct Config {
     pub extend: Extend,
 }
 
+/// Where a Mac's extra display is shown on this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Placement {
+    /// Full screen on one of this machine's displays (see [`Extend::display`]).
+    FullScreen,
+    /// In a window that can be moved and resized.
+    Window,
+}
+
+/// How big the extra display is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Resolution {
+    /// The size of the screen or window it's shown in, following resizes.
+    #[default]
+    Match,
+    /// Always [`Extend::width`]×[`Extend::height`].
+    Fixed,
+}
+
 /// Virtual monitor mode: the extra display a Mac shows on this machine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Extend {
-    /// Size in pixels. With `hidpi` the Mac treats it as Retina, so it looks like half
-    /// this size (3840×2160 looks like 1920×1080, sharp on a 4K monitor).
+    /// Where it's shown. Unset until chosen: the app asks the first time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<Placement>,
+    /// For full screen: which display, 1-based, left to right as `legato doctor` lists them.
+    pub display: usize,
+    pub resolution: Resolution,
+    /// The fixed size in pixels.
     pub width: u32,
     pub height: u32,
+    /// Run in Retina mode when it's at least 2560×1440, so it looks like half its pixel
+    /// size (3840×2160 looks like 1920×1080, sharp on a 4K monitor).
     pub hidpi: bool,
+    /// Frames per second, as fast as the Mac can encode at the size (see
+    /// [`legato_core::extend::max_fps`]).
     pub fps: u32,
     /// Video quality, in megabits per second.
     pub bitrate_mbps: u32,
@@ -42,6 +72,9 @@ pub struct Extend {
 impl Default for Extend {
     fn default() -> Self {
         Self {
+            placement: None,
+            display: 1,
+            resolution: Resolution::Match,
             width: 3840,
             height: 2160,
             hidpi: true,
@@ -53,14 +86,25 @@ impl Default for Extend {
 }
 
 impl Extend {
-    /// The request sent to the Mac, within what the video pipeline handles.
-    pub fn request(&self) -> legato_proto::ExtendRequest {
+    /// What to ask the Mac for to show a display of about `width`×`height` pixels: a
+    /// size the pipeline takes, and no faster than the Mac can encode at that size.
+    pub fn request_for(&self, width: u32, height: u32) -> legato_proto::ExtendRequest {
+        use legato_core::extend::{max_fps, prefers_hidpi, usable_size};
+        let (width, height) = usable_size(width, height);
         legato_proto::ExtendRequest {
-            width: self.width.clamp(1280, 7680) & !1,
-            height: self.height.clamp(720, 4320) & !1,
-            hidpi: self.hidpi,
-            fps: self.fps.clamp(10, 120),
+            width,
+            height,
+            hidpi: self.hidpi && prefers_hidpi(width, height),
+            fps: self.fps.clamp(1, max_fps(width, height)),
             bitrate: self.bitrate_mbps.clamp(2, 200) * 1_000_000,
+        }
+    }
+
+    /// The size to show at, given the size of the screen or window it's shown in.
+    pub fn size_for(&self, shown: (u32, u32)) -> (u32, u32) {
+        match self.resolution {
+            Resolution::Match => shown,
+            Resolution::Fixed => (self.width, self.height),
         }
     }
 }
@@ -249,5 +293,52 @@ mod tests {
     #[test]
     fn typos_are_errors() {
         assert!(toml::from_str::<Config>("[switching]\npush_distanse = 3").is_err());
+    }
+
+    #[test]
+    fn extra_display_requests_stay_within_what_the_mac_can_encode() {
+        let extend = Extend {
+            fps: 144,
+            ..Extend::default()
+        };
+        let r = extend.request_for(3840, 2160);
+        assert_eq!((r.width, r.height, r.fps, r.hidpi), (3840, 2160, 60, true));
+        let r = extend.request_for(1921, 1081);
+        assert_eq!(
+            (r.width, r.height, r.fps, r.hidpi),
+            (1920, 1080, 144, false)
+        );
+        assert_eq!(r.bitrate, 40_000_000);
+    }
+
+    #[test]
+    fn the_size_follows_the_window_or_stays_fixed() {
+        let mut extend = Extend::default();
+        assert_eq!(extend.size_for((3440, 1440)), (3440, 1440));
+        extend.resolution = Resolution::Fixed;
+        (extend.width, extend.height) = (2560, 1440);
+        assert_eq!(extend.size_for((3440, 1440)), (2560, 1440));
+    }
+
+    #[test]
+    fn extra_display_settings_old_and_new_parse() {
+        // As written by 0.3.0-alpha.1 to .4.
+        let old: Config = toml::from_str(
+            "[extend]\nwidth = 3840\nheight = 2160\nhidpi = true\nfps = 60\nbitrate_mbps = 40\n",
+        )
+        .unwrap();
+        assert_eq!(old.extend.placement, None);
+        assert_eq!(old.extend.resolution, Resolution::Match);
+        let new: Config = toml::from_str(
+            "[extend]\nplacement = \"full-screen\"\ndisplay = 2\nresolution = \"fixed\"\nfps = 120\n",
+        )
+        .unwrap();
+        assert_eq!(new.extend.placement, Some(Placement::FullScreen));
+        assert_eq!(
+            (new.extend.display, new.extend.resolution),
+            (2, Resolution::Fixed)
+        );
+        let text = toml::to_string(&new).unwrap();
+        assert_eq!(toml::from_str::<Config>(&text).unwrap(), new);
     }
 }

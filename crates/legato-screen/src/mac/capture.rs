@@ -199,7 +199,33 @@ fn wait(what: &str, start: impl FnOnce(&block2::DynBlock<dyn Fn(*mut NSError)>))
     }
 }
 
+/// What to capture: NV12 at `width`×`height`, up to `fps` frames a second, no cursor.
+fn configuration(width: u32, height: u32, fps: u32) -> Retained<SCStreamConfiguration> {
+    // SAFETY: plain setters on a fresh configuration.
+    unsafe {
+        let config = SCStreamConfiguration::new();
+        config.setWidth(width as usize);
+        config.setHeight(height as usize);
+        config.setMinimumFrameInterval(CMTime::new(1, fps as i32));
+        config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+        config.setColorMatrix(kCGDisplayStreamYCbCrMatrix_ITU_R_709_2);
+        config.setShowsCursor(false);
+        config.setQueueDepth(5);
+        config
+    }
+}
+
 impl ScreenCapture {
+    /// Changes the captured size and frame rate while running.
+    pub fn reconfigure(&self, width: u32, height: u32, fps: u32) -> Result<()> {
+        let config = configuration(width, height, fps);
+        let stream = &self.stream;
+        // SAFETY: updating a started stream with a valid configuration.
+        wait("changing the capture size", |h| unsafe {
+            stream.updateConfiguration_completionHandler(&config, Some(h))
+        })
+    }
+
     /// Captures display `id` at `width`×`height` pixels, up to `fps` frames a second,
     /// without the cursor. `on_frame` runs on a capture thread.
     pub fn start(
@@ -225,14 +251,7 @@ impl ScreenCapture {
                 &display,
                 &NSArray::new(),
             );
-            let config = SCStreamConfiguration::new();
-            config.setWidth(width as usize);
-            config.setHeight(height as usize);
-            config.setMinimumFrameInterval(CMTime::new(1, fps as i32));
-            config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
-            config.setColorMatrix(kCGDisplayStreamYCbCrMatrix_ITU_R_709_2);
-            config.setShowsCursor(false);
-            config.setQueueDepth(5);
+            let config = configuration(width, height, fps);
             let stream = SCStream::initWithFilter_configuration_delegate(
                 SCStream::alloc(),
                 &filter,
