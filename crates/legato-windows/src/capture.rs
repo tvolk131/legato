@@ -28,15 +28,15 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT,
-    GetAncestor, GetClientRect, GetMessageW, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
-    LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostThreadMessageW,
-    RegisterClassW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetCursorPos,
-    SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_INPUT,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN,
-    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WindowFromPoint, XBUTTON1,
+    GetAncestor, GetClientRect, GetCursorPos, GetMessageW, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT,
+    LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT,
+    PostThreadMessageW, RegisterClassW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor,
+    SetCursorPos, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP,
+    WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint, XBUTTON1,
 };
 use windows::core::w;
 
@@ -259,6 +259,25 @@ impl State {
                     return (verdict, effects);
                 }
             },
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+                if self.can_reenter_portal() =>
+            {
+                // A click on the picture is meant for the peer, even with no motion since
+                // it took its cursor back.
+                let mut effects = self.reenter_portal(pos);
+                let event = match msg {
+                    WM_LBUTTONDOWN => {
+                        self.left_down = true;
+                        button(Button::Left, true)
+                    }
+                    WM_RBUTTONDOWN => button(Button::Right, true),
+                    WM_MBUTTONDOWN => button(Button::Middle, true),
+                    _ => button(x_button, true),
+                };
+                let (verdict, more) = self.handle(event);
+                effects.extend(more);
+                return (verdict, effects);
+            }
             WM_LBUTTONDOWN => {
                 self.left_down = true;
                 button(Button::Left, true)
@@ -298,7 +317,43 @@ impl State {
             return (Verdict::Pass, vec![]);
         };
         let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-        self.handle(Event::Key { usage, down })
+        let mut effects = Vec::new();
+        if down && self.can_reenter_portal() {
+            // Typing with the pointer resting on the picture is meant for the peer too.
+            let mut pos = POINT::default();
+            // SAFETY: writes the cursor position into `pos`.
+            if unsafe { GetCursorPos(&mut pos) }.is_ok() {
+                effects = self.reenter_portal(pos);
+            }
+        }
+        let (verdict, more) = self.handle(Event::Key { usage, down });
+        effects.extend(more);
+        (verdict, effects)
+    }
+
+    /// Whether the pointer is free on this machine while a portal is shown: it may be
+    /// resting on the picture without being in it, because the peer took its cursor back
+    /// (its own keyboard or mouse was used) or because the pointer hasn't moved since the
+    /// viewer appeared under it.
+    fn can_reenter_portal(&self) -> bool {
+        self.pin.is_none()
+            && self.controller.active_peer().is_none()
+            && self.controller.portal().is_some()
+    }
+
+    /// Goes into the portal if `pos` is on its uncovered picture, as if the pointer had
+    /// just moved there, so the input that follows goes to the peer.
+    fn reenter_portal(&mut self, pos: POINT) -> Vec<Effect> {
+        let Some(at) = self.portal_hit(pos) else {
+            return Vec::new();
+        };
+        self.last_pos = Some(pos);
+        self.handle(Event::PortalMotion {
+            at,
+            pos: Point::new(pos.x as f64, pos.y as f64),
+            attempted: Point::default(),
+        })
+        .1
     }
 
     /// Where on the portal's picture `pos` is (0..1 each way), if it's over it and the

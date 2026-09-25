@@ -52,7 +52,7 @@ jobs:
       # These move the runner's cursor, which is why they're opt-in locally.
       - name: hardware tests (Windows)
         if: runner.os == 'Windows'
-        run: cargo test --locked -p legato-windows -- --ignored --test-threads=1
+        run: cargo test --locked -p legato-windows -- --ignored --test-threads=1 --nocapture
       # The app draws with DirectX 12 on Windows (for mailbox presentation). Runners have
       # no GPU, but DX12's software renderer (WARP) runs the same shaders and pipelines.
       - name: GPU rendering (Windows, DirectX 12)
