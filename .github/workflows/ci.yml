@@ -53,6 +53,14 @@ jobs:
       - name: hardware tests (Windows)
         if: runner.os == 'Windows'
         run: cargo test --locked -p legato-windows -- --ignored --test-threads=1
+      # The app draws with DirectX 12 on Windows (for mailbox presentation). Runners have
+      # no GPU, but DX12's software renderer (WARP) runs the same shaders and pipelines.
+      - name: GPU rendering (Windows, DirectX 12)
+        if: runner.os == 'Windows'
+        env:
+          ICED_TEST_BACKEND: wgpu
+          WGPU_BACKEND: dx12
+        run: cargo test --locked -p legato-app gpu_renders -- --ignored --nocapture
       - name: hardware tests (macOS)
         if: runner.os == 'macOS'
         run: cargo test --locked -p legato-macos -- --ignored --test-threads=1

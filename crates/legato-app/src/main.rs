@@ -1040,6 +1040,16 @@ fn main() -> iced::Result {
             .init(),
         None => tracing_subscriber::fmt().with_env_filter(filter).init(),
     }
+    // The Windows app has no console, so a crash would otherwise leave no trace.
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        tracing::error!(
+            "crashed on thread {}: {info}",
+            thread.name().unwrap_or("unnamed")
+        );
+        report(info);
+    }));
     platform::init();
 
     let engine = match runtime().block_on(Engine::start(home, VERSION)) {
