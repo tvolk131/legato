@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
@@ -195,8 +195,11 @@ pub enum Control {
     ExtendStop {
         reason: String,
     },
-    /// Viewer → Mac: send a keyframe (the viewer started, or lost its place).
-    Keyframe,
+    /// Viewer → Mac: send a keyframe on this video track (the viewer started, or lost
+    /// its place).
+    Keyframe {
+        track: u8,
+    },
     /// Viewer → Mac: change the extra display's size or frame rate (the viewer's window
     /// was resized, or went full screen).
     ExtendResize(ExtendRequest),
@@ -218,6 +221,10 @@ pub struct ExtendRequest {
     /// decode and draw, a little softer. `0` for the display's own size.
     pub stream_width: u32,
     pub stream_height: u32,
+    /// Adaptive quality: a smaller size to send while much of the screen is moving
+    /// (dragging, scrolling), on its own video track. `0` for none.
+    pub moving_width: u32,
+    pub moving_height: u32,
     pub fps: u32,
     /// Bits per second.
     pub bitrate: u32,
@@ -238,8 +245,18 @@ pub mod blob {
     pub const CLIPBOARD: u8 = 1;
     /// A file, as a [`super::FileHeader`] frame followed by its bytes.
     pub const FILE: u8 = 2;
-    /// A stream of H.264 frames, each a [`super::VideoFrameHeader`] then its bytes.
+    /// A stream of H.264 frames: a [`super::video_track`] byte, then each frame as a
+    /// [`super::VideoFrameHeader`] and its bytes.
     pub const VIDEO: u8 = 3;
+}
+
+/// The video tracks of an extra display. Each is its own stream and H.264 sequence; the
+/// viewer shows whichever picture is newest.
+pub mod video_track {
+    /// The display at its stream size.
+    pub const SHARP: u8 = 0;
+    /// Adaptive quality: a smaller picture while much of the screen is moving.
+    pub const MOVING: u8 = 1;
 }
 
 /// Precedes each frame on a video stream.
@@ -253,10 +270,13 @@ pub struct VideoFrameHeader {
     /// Pictures the sender skipped (the network backed up) or its encoder dropped since
     /// the previous frame.
     pub skipped: u16,
+    /// When the picture appeared, in microseconds from the start of the stream: the same
+    /// clock on every track, so the newest picture can be told.
+    pub pts_us: u64,
 }
 
 impl VideoFrameHeader {
-    pub const SIZE: usize = 11;
+    pub const SIZE: usize = 19;
     /// Larger frames are refused.
     pub const MAX_LEN: u32 = 32 * 1024 * 1024;
 
@@ -265,7 +285,8 @@ impl VideoFrameHeader {
         out[..4].copy_from_slice(&self.len.to_le_bytes());
         out[4] = u8::from(self.keyframe);
         out[5..9].copy_from_slice(&self.sender_us.to_le_bytes());
-        out[9..].copy_from_slice(&self.skipped.to_le_bytes());
+        out[9..11].copy_from_slice(&self.skipped.to_le_bytes());
+        out[11..].copy_from_slice(&self.pts_us.to_le_bytes());
         out
     }
 
@@ -275,7 +296,8 @@ impl VideoFrameHeader {
             len,
             keyframe: bytes[4] == 1,
             sender_us: u32::from_le_bytes(bytes[5..9].try_into().ok()?),
-            skipped: u16::from_le_bytes(bytes[9..].try_into().ok()?),
+            skipped: u16::from_le_bytes(bytes[9..11].try_into().ok()?),
+            pts_us: u64::from_le_bytes(bytes[11..].try_into().ok()?),
         })
     }
 }
@@ -447,6 +469,8 @@ mod tests {
                 hidpi: true,
                 stream_width: 2560,
                 stream_height: 1440,
+                moving_width: 1920,
+                moving_height: 1080,
                 fps: 60,
                 bitrate: 40_000_000,
             }),
@@ -456,13 +480,15 @@ mod tests {
             Control::ExtendStop {
                 reason: "closed".into(),
             },
-            Control::Keyframe,
+            Control::Keyframe { track: 1 },
             Control::ExtendResize(ExtendRequest {
                 width: 2560,
                 height: 1440,
                 hidpi: true,
                 stream_width: 0,
                 stream_height: 0,
+                moving_width: 0,
+                moving_height: 0,
                 fps: 120,
                 bitrate: 30_000_000,
             }),
@@ -485,6 +511,7 @@ mod tests {
             keyframe: true,
             sender_us: 21_500,
             skipped: 3,
+            pts_us: 5_000_000_123,
         };
         assert_eq!(VideoFrameHeader::decode(header.encode()), Some(header));
         let mut huge = header.encode();

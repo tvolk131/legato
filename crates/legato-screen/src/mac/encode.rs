@@ -33,6 +33,8 @@ pub struct EncodedFrame {
     pub pts: Duration,
     /// When the picture appeared on the display, if the caller said.
     pub shown_at: Option<std::time::Instant>,
+    /// Which track it's for (see [`crate::adaptive`]), if the caller said.
+    pub track: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +318,7 @@ unsafe fn to_annex_b(sample: &CMSampleBuffer) -> Result<EncodedFrame> {
             keyframe,
             pts,
             shown_at: None,
+            track: 0,
         })
     }
 }

@@ -222,7 +222,7 @@ pub(crate) async fn run(
     let frames = ctx.engine.viewer_frames.clone();
     let set_portal =
         |viewing: &Option<Viewing>, window: Option<u64>, ids: &HashMap<EndpointId, MachineId>| {
-            let portal = viewing.and_then(|v| {
+            let portal = viewing.as_ref().and_then(|v| {
                 Some(Portal {
                     peer: *ids.get(&v.peer)?,
                     remote: v.bounds?,
@@ -366,7 +366,7 @@ pub(crate) async fn run(
                     set_portal(&viewing, viewer_window, &ids);
                 }
                 RunCommand::StopExtend { to } => {
-                    if viewing.is_some_and(|v| v.peer == to) {
+                    if viewing.as_ref().is_some_and(|v| v.peer == to) {
                         viewing = None;
                         frames.send_replace(None);
                         if let Some(s) = by_peer.read().unwrap().get(&to) {
@@ -380,7 +380,7 @@ pub(crate) async fn run(
                     set_portal(&viewing, viewer_window, &ids);
                 }
                 RunCommand::ExtendResize { to, request } => {
-                    if viewing.is_some_and(|v| v.peer == to)
+                    if viewing.as_ref().is_some_and(|v| v.peer == to)
                         && let Some(s) = by_peer.read().unwrap().get(&to)
                     {
                         s.send(Control::ExtendResize(request));
@@ -525,18 +525,20 @@ pub(crate) async fn run(
                                 if let Some(h) = host.take_if(|h| h.peer == peer) {
                                     h.stop().await;
                                 }
-                                if viewing.is_some_and(|v| v.peer == peer) {
+                                if viewing.as_ref().is_some_and(|v| v.peer == peer) {
                                     viewing = None;
                                     frames.send_replace(None);
                                     set_portal(&viewing, viewer_window, &ids);
                                     ctx.status(Status::ExtendEnded { id: peer, reason });
                                 }
                             }
-                            Control::Keyframe => {
+                            Control::Keyframe { track } => {
                                 #[cfg(target_os = "macos")]
                                 if let Some(h) = host.as_ref().filter(|h| h.peer == peer) {
-                                    h.request_keyframe();
+                                    h.request_keyframe(track);
                                 }
+                                #[cfg(not(target_os = "macos"))]
+                                let _ = track;
                             }
                             Control::Hello(_) => {}
                             input => {
@@ -558,12 +560,13 @@ pub(crate) async fn run(
                     SessionEvent::File { peer, file } => inbox.receive(peer, file),
                     SessionEvent::Video { peer, video } => {
                         #[cfg(windows)]
-                        if viewing.is_some_and(|v| v.peer == peer)
+                        if let Some(v) = viewing.as_ref().filter(|v| v.peer == peer)
                             && let Some(session) = by_peer.read().unwrap().get(&peer).cloned()
                         {
                             extend::decode(
                                 video,
                                 session,
+                                v.showing.clone(),
                                 frames.clone(),
                                 ctx.engine.viewer_stats.clone(),
                             );
@@ -586,7 +589,7 @@ pub(crate) async fn run(
                         if let Some(h) = host.take_if(|h| h.peer == peer) {
                             h.stop().await;
                         }
-                        if viewing.is_some_and(|v| v.peer == peer) {
+                        if viewing.as_ref().is_some_and(|v| v.peer == peer) {
                             viewing = None;
                             frames.send_replace(None);
                             set_portal(&viewing, viewer_window, &ids);

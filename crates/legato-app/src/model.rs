@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use legato_engine::Config;
-use legato_engine::config::{Placement, Quality, Resolution};
+use legato_engine::config::{MovingSize, Placement, Quality, Resolution};
 use legato_net::{EndpointId, PathKind};
 use legato_proto::{Os, Screens};
 
@@ -86,6 +86,8 @@ pub struct DisplayOptions {
     pub display: usize,
     pub resolution: Resolution,
     pub quality: Quality,
+    /// With adaptive quality, the size while the screen moves.
+    pub while_moving: MovingSize,
     pub fixed: (u32, u32),
     pub fps: u32,
 }
@@ -98,6 +100,7 @@ impl DisplayOptions {
             display: extend.display.max(1),
             resolution: extend.resolution,
             quality: extend.quality,
+            while_moving: extend.while_moving,
             fixed: (extend.width, extend.height),
             fps: extend.fps,
         }
@@ -108,6 +111,7 @@ impl DisplayOptions {
         extend.display = self.display;
         extend.resolution = self.resolution;
         extend.quality = self.quality;
+        extend.while_moving = self.while_moving;
         (extend.width, extend.height) = self.fixed;
         extend.fps = self.fps;
     }

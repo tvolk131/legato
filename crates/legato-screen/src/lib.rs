@@ -5,6 +5,7 @@
 //! captured with ScreenCaptureKit and encoded as H.264 with VideoToolbox. On Windows:
 //! decoded with Media Foundation into NV12 frames for the viewer to draw.
 
+pub mod adaptive;
 pub mod h264;
 #[doc(hidden)]
 pub mod test_pattern;
