@@ -611,3 +611,16 @@ fn gpu_renders_the_dialogs_and_the_viewer() {
         "the picture is drawn in the right colour: {centre:?}"
     );
 }
+
+/// The UI thread isn't in the engine's runtime: timers must still work from it. (Making
+/// a tokio timer there crashed the app when the viewer window opened.)
+#[test]
+fn timers_can_be_started_from_the_ui_thread() {
+    assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "not in a runtime here"
+    );
+    let started = std::time::Instant::now();
+    iced::futures::executor::block_on(crate::after(Duration::from_millis(20)));
+    assert!(started.elapsed() >= Duration::from_millis(20));
+}
