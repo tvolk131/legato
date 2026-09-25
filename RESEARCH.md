@@ -380,7 +380,11 @@ Built in `legato-screen` as planned below, with these choices:
 - **Transport:** one ordered stream for the whole video, below input and above file transfers. Ordered delivery keeps P-frames decodable. When frames back up, the Mac skips new pictures before encoding them.
 - **Viewer:** a wgpu shader widget draws NV12 textures directly (BT.709 limited range, converted on the GPU).
 - **Input:** a *portal*. While the Windows pointer is over the picture, and the viewer isn't covered there, moves go to the Mac as absolute positions on the display, and so do clicks, keys and scrolling. The Windows pointer stays visible and ScreenCaptureKit leaves the Mac's cursor out of the picture, so there is no laggy second cursor.
-- **Arrangement:** the virtual display is left out of the Mac's shared desk, so pushing past an edge never lands on it; it's reached through the viewer.
+- **Arrangement:** the virtual display is left out of the Mac's shared desk, so pushing past an edge never lands on it. It's reached through the viewer.
+- **Options:** "Show as display" chooses full screen on a monitor or a window; a size that matches it (changing after resizes) or stays fixed; and a frame rate within what the Mac can encode at that size (about 2 ns per pixel: 60 fps at 4K, 120 at 1440p, 144 at 1080p).
+- **Desk matching:** the Mac moves its extra display, with `CGConfigureDisplayOrigin`, to the side of the MacBook where the viewer sits on the shared desk.
+- **Dragging between the Mac's screens:** moving between the viewer and the Mac's own screens is one continuous visit to the Mac, with held buttons kept held. Leaving the picture while dragging continues on the MacBook's screen, moving onto the extra display from the MacBook brings the Windows pointer out in the viewer, and a full-screen viewer can be pushed past its screen's edge towards the MacBook.
+- **Stats:** each frame carries the Mac's time on it, from appearing on screen to being sent. The viewer adds network, decode and display time and shows the total.
 
 The original plan:
 
