@@ -13,7 +13,7 @@ legato-core.workspace = true
 legato-proto.workspace = true
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFRunLoop", "CFMachPort", "CFCGTypes", "CFDate", "CFString"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventSource", "CGEventTypes", "CGDirectDisplay", "CGDisplayConfiguration", "CGRemoteOperation", "CGError", "CGWindow", "libc"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSPasteboard"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSPasteboard", "NSRunningApplication", "NSWorkspace"] }
 tracing.workspace = true
 
 [lints]

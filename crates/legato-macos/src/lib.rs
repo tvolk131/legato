@@ -21,6 +21,12 @@ pub use permissions::{Permissions, request_accessibility, request_missing};
 pub const INJECTED_TAG: i64 = 0x4c45_4741_544f; // "LEGATO"
 
 /// The user's key repeat and double-click settings.
+/// The name of the app in front, which gets typing (for the log).
+pub fn frontmost_app() -> Option<String> {
+    let app = objc2_app_kit::NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    Some(app.localizedName()?.to_string())
+}
+
 pub fn receiver_config() -> legato_core::ReceiverConfig {
     use objc2_app_kit::NSEvent;
     use std::time::Duration;

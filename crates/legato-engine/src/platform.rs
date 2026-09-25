@@ -35,7 +35,7 @@ mod imp {
         );
     }
 
-    pub use legato_macos::{clipboard_change_count, receiver_config};
+    pub use legato_macos::{clipboard_change_count, frontmost_app, receiver_config};
 }
 
 #[cfg(windows)]
@@ -63,7 +63,9 @@ mod imp {
         Ok(())
     }
 
-    pub use legato_windows::{clipboard_change_count, receiver_config};
+    pub use legato_windows::{
+        clipboard_change_count, foreground_app as frontmost_app, receiver_config,
+    };
 }
 
 pub fn check_permissions() -> Result<()> {
@@ -76,6 +78,11 @@ pub fn receiver_config() -> ReceiverConfig {
 
 pub fn clipboard_change_count() -> u64 {
     imp::clipboard_change_count()
+}
+
+/// The app (or window) in front, which gets typing, for the log.
+pub fn frontmost_app() -> Option<String> {
+    imp::frontmost_app()
 }
 
 /// Captures this machine's keyboard and mouse. Stops when dropped.

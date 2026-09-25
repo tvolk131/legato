@@ -405,7 +405,15 @@ impl Controller {
             .iter()
             .map(|d| d.bounds)
             .find(|b| b.contains(pos))
-            .or_else(|| nearest_rect(local.screens.displays.iter().map(|d| d.bounds), pos))?;
+            .or_else(|| {
+                // Just past a display: the hook reported where the pointer would have gone
+                // before it was stopped at the edge (Windows does). Further away, it's on a
+                // display this machine doesn't share, like the extra display a Mac shows
+                // on a PC, where nothing is an edge.
+                let nearest = nearest_rect(local.screens.displays.iter().map(|d| d.bounds), pos)?;
+                let overshoot = dist2(clamp_into(nearest, pos, 1.0), pos).sqrt();
+                (overshoot <= attempted.x.abs().max(attempted.y.abs()) + 1.0).then_some(nearest)
+            })?;
         // Which edges of its display is the pointer sitting on, and pushing into?
         let attempted_desk = scale(attempted, local.desk_per_native());
         for dir in [Dir::Left, Dir::Right, Dir::Up, Dir::Down] {

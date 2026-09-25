@@ -171,6 +171,63 @@ fn unclamped_positions_past_the_edge_also_cross() {
 }
 
 #[test]
+fn a_mac_cursor_on_its_extra_display_is_not_at_an_edge() {
+    // The Mac's view: the PC's monitors above the MacBook. Its extra display (shown on
+    // the PC) also sits above the MacBook, but isn't one of the Mac's shared screens.
+    const PC: MachineId = MachineId(2);
+    let mut layout = Layout::new(macbook_16());
+    assert!(layout.place_next_to_local(
+        PC,
+        windows_triple_4k(),
+        0,
+        Side::Above,
+        Align::Center,
+        0.0
+    ));
+    let mut c = Controller::new(
+        ControllerConfig {
+            push_distance: 0.0,
+            ..Default::default()
+        },
+        layout,
+    );
+    let (mut now, mut out) = (Instant::now(), vec![]);
+    // A palm on the trackpad while the cursor is on the extra display, well above the
+    // MacBook: the Mac keeps its cursor rather than taking over the PC.
+    for (y, dy) in [
+        (-400.0, -3.0),
+        (-400.0, 2.0),
+        (-12.0, -4.0),
+        (-1080.0, -6.0),
+    ] {
+        now += Duration::from_millis(8);
+        let v = c.handle(
+            now,
+            Event::LocalMotion {
+                pos: Point::new(700.0, y),
+                attempted: Point::new(1.0, dy),
+            },
+            &mut out,
+        );
+        assert_eq!(v, Verdict::Pass, "at y {y}");
+    }
+    assert_eq!(c.active_peer(), None);
+    assert!(out.is_empty(), "{out:?}");
+    // Pushing up from the MacBook's own top edge still crosses.
+    now += Duration::from_millis(8);
+    let v = c.handle(
+        now,
+        Event::LocalMotion {
+            pos: Point::new(700.0, 0.0),
+            attempted: Point::new(0.0, -6.0),
+        },
+        &mut out,
+    );
+    assert_eq!(v, Verdict::Swallow);
+    assert_eq!(c.active_peer(), Some(PC));
+}
+
+#[test]
 fn captured_motion_moves_the_mac_cursor_in_its_units() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);

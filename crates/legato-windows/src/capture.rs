@@ -28,15 +28,15 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT,
-    GetAncestor, GetClientRect, GetCursorPos, GetMessageW, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT,
-    LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT,
-    PostThreadMessageW, RegisterClassW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor,
-    SetCursorPos, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP,
-    WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint, XBUTTON1,
+    GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageW, HHOOK,
+    HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG,
+    MSLLHOOKSTRUCT, PostThreadMessageW, RegisterClassW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+    SetCursor, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WINDOW_EX_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint, XBUTTON1,
 };
 use windows::core::w;
 
@@ -131,6 +131,19 @@ struct State {
     left_down: bool,
     /// The drop catcher is under the cursor.
     catching: bool,
+    /// Where the pointer was relative to a portal's picture, as last logged.
+    where_: Option<Where>,
+    /// When a key that went here instead of the portal was last logged.
+    key_noted: Option<Instant>,
+}
+
+/// Where the pointer is relative to a portal's picture, for the log.
+#[derive(Debug, Clone, PartialEq)]
+enum Where {
+    Picture,
+    /// Over the picture, but another window is in front of it there.
+    Covered(String),
+    Off,
 }
 
 thread_local! {
@@ -235,7 +248,9 @@ impl State {
                     };
                     self.raw = (0, 0);
                     self.last_pos = Some(pos);
-                    if let Some(at) = self.portal_hit(pos) {
+                    let hit = self.portal_hit(pos);
+                    self.note_where(pos, hit.is_some());
+                    if let Some(at) = hit {
                         return self.handle(Event::PortalMotion {
                             at,
                             pos: Point::new(pos.x as f64, pos.y as f64),
@@ -328,7 +343,77 @@ impl State {
         }
         let (verdict, more) = self.handle(Event::Key { usage, down });
         effects.extend(more);
+        if down && verdict == Verdict::Pass {
+            self.note_key_kept();
+        }
         (verdict, effects)
+    }
+
+    /// Logs when the pointer moves onto, off or behind something over a portal's
+    /// picture: when input goes to the wrong machine, this says why.
+    fn note_where(&mut self, pos: POINT, hit: bool) {
+        if self.controller.portal().is_none() {
+            self.where_ = None;
+            return;
+        }
+        let p = Point::new(pos.x as f64, pos.y as f64);
+        let now = if hit {
+            Where::Picture
+        } else if self.portal_picture().is_some_and(|r| r.contains(p)) {
+            // SAFETY: window queries; a stale handle just fails them.
+            let root = unsafe { GetAncestor(WindowFromPoint(pos), GA_ROOT) };
+            Where::Covered(describe(root))
+        } else {
+            Where::Off
+        };
+        if self.where_.as_ref() == Some(&now) {
+            return;
+        }
+        match &now {
+            Where::Picture => {
+                tracing::info!("The pointer is on the Mac's display: input goes there.")
+            }
+            Where::Covered(by) => tracing::info!(
+                "The Mac's display is covered here by {by}, so input stays on this PC."
+            ),
+            Where::Off if self.where_.is_some() => {
+                tracing::info!("The pointer left the Mac's display.");
+            }
+            Where::Off => {}
+        }
+        self.where_ = Some(now);
+    }
+
+    /// Logs (now and then) when a key stays on this PC while a portal's window has focus,
+    /// which is when typing was probably meant for the peer.
+    fn note_key_kept(&mut self) {
+        let Some(portal) = self.controller.portal().copied() else {
+            return;
+        };
+        let viewer = HWND(portal.window as usize as *mut core::ffi::c_void);
+        // SAFETY: no preconditions.
+        if unsafe { GetForegroundWindow() } != viewer
+            || self
+                .key_noted
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(5))
+        {
+            return;
+        }
+        self.key_noted = Some(Instant::now());
+        let why = if self.controller.layout().machine(portal.peer).is_none() {
+            "this PC may not drive the Mac (see the control mode in Settings)".to_string()
+        } else if self.pin.is_some() {
+            "the pointer is on the Mac's own screens".to_string()
+        } else {
+            match &self.where_ {
+                Some(Where::Covered(by)) => format!("{by} covers the picture where the pointer is"),
+                Some(Where::Picture) => "the pointer is on the picture, but it isn't driving the \
+                                         Mac"
+                .to_string(),
+                _ => "the pointer isn't on the picture".to_string(),
+            }
+        };
+        tracing::info!("A key stayed on this PC although the Mac's display has focus: {why}.");
     }
 
     /// Whether the pointer is free on this machine while a portal is shown: it may be
@@ -423,6 +508,49 @@ impl State {
             }
             Command::Stop => None,
         }
+    }
+}
+
+/// A window, for the log: its class, title and program.
+pub(crate) fn describe(window: HWND) -> String {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetWindowTextW, GetWindowThreadProcessId,
+    };
+    if window.is_invalid() {
+        return "no window".into();
+    }
+    // SAFETY: window and process queries into local buffers; stale handles just fail.
+    unsafe {
+        let mut buffer = [0u16; 128];
+        let len = GetClassNameW(window, &mut buffer) as usize;
+        let class = String::from_utf16_lossy(&buffer[..len]);
+        let len = GetWindowTextW(window, &mut buffer) as usize;
+        let title = String::from_utf16_lossy(&buffer[..len]);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(window, Some(&mut pid));
+        let program = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .ok()
+            .and_then(|process| {
+                let mut path = [0u16; 260];
+                let mut len = path.len() as u32;
+                let ok = QueryFullProcessImageNameW(
+                    process,
+                    PROCESS_NAME_WIN32,
+                    windows::core::PWSTR(path.as_mut_ptr()),
+                    &mut len,
+                )
+                .is_ok();
+                let _ = CloseHandle(process);
+                ok.then(|| String::from_utf16_lossy(&path[..len as usize]))
+            })
+            .map(|path| path.rsplit('\\').next().unwrap_or_default().to_string())
+            .unwrap_or_else(|| "an unknown program".into());
+        format!("\"{title}\" ({class}, {program})")
     }
 }
 
@@ -722,6 +850,8 @@ fn run(
             raw_seen: false,
             left_down: false,
             catching: false,
+            where_: None,
+            key_noted: None,
         });
     });
     if let Err(e) = crate::drop::register(window) {

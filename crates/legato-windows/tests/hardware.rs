@@ -375,23 +375,109 @@ fn click(down: bool) {
     }]);
 }
 
-/// What `WindowFromPoint` finds at `(x, y)`: its class name, and whether its top-level
-/// window is `viewer`.
+/// What `WindowFromPoint` (which the portal goes by) finds at `(x, y)`: `viewer`, or
+/// what else and why.
 fn window_at(x: i32, y: i32, viewer: windows::Win32::Foundation::HWND) -> String {
+    use windows::Win32::Foundation::{CloseHandle, RECT};
+    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GA_ROOT, GetAncestor, GetClassNameW, WindowFromPoint,
+        GA_ROOT, GW_HWNDNEXT, GWL_EXSTYLE, GetAncestor, GetClassNameW, GetForegroundWindow,
+        GetTopWindow, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, IsWindowVisible, WindowFromPoint,
     };
     unsafe {
         let under = WindowFromPoint(POINT { x, y });
         let root = GetAncestor(under, GA_ROOT);
+        if root == viewer {
+            return "the viewer".into();
+        }
         let mut name = [0u16; 128];
         let len = GetClassNameW(root, &mut name) as usize;
+        let mut cloaked = 0u32;
+        let cloak = DwmGetWindowAttribute(
+            root,
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
+            size_of::<u32>() as u32,
+        );
+        let mut r = RECT::default();
+        let _ = GetWindowRect(root, &mut r);
+        // Where it and the viewer come in the z-order, from the top.
+        let (mut at, mut viewer_at, mut i) = (None, None, 0);
+        let mut next = GetTopWindow(None).ok();
+        while let Some(h) = next.filter(|h| !h.is_invalid() && i < 4096) {
+            if h == root {
+                at = Some(i);
+            }
+            if h == viewer {
+                viewer_at = Some(i);
+            }
+            next = GetWindow(h, GW_HWNDNEXT).ok();
+            i += 1;
+        }
+        let mut title = [0u16; 128];
+        let title_len = GetWindowTextW(root, &mut title) as usize;
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(root, Some(&mut pid));
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .ok()
+            .and_then(|p| {
+                let mut path = [0u16; 260];
+                let mut size = path.len() as u32;
+                let ok = QueryFullProcessImageNameW(
+                    p,
+                    PROCESS_NAME_WIN32,
+                    windows::core::PWSTR(path.as_mut_ptr()),
+                    &mut size,
+                )
+                .is_ok();
+                let _ = CloseHandle(p);
+                ok.then(|| String::from_utf16_lossy(&path[..size as usize]))
+            })
+            .unwrap_or_default();
         format!(
-            "{}{}",
+            "{} \"{}\" of {} (foreground {}, visible {}, cloaked {cloaked} {}, extended style \
+             {:#x}, at {},{} to {},{}, z-order {at:?} vs the viewer's {viewer_at:?})",
             String::from_utf16_lossy(&name[..len]),
-            if root == viewer { " (the viewer)" } else { "" }
+            String::from_utf16_lossy(&title[..title_len]),
+            process.rsplit('\\').next().unwrap_or_default(),
+            GetForegroundWindow() == root,
+            IsWindowVisible(root).as_bool(),
+            if cloak.is_ok() {
+                "(read)"
+            } else {
+                "(unreadable)"
+            },
+            GetWindowLongW(root, GWL_EXSTYLE) as u32,
+            r.left,
+            r.top,
+            r.right,
+            r.bottom
         )
     }
+}
+
+fn windows_key(down: bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_EXTENDEDKEY, VK_LWIN};
+    let mut flags = KEYEVENTF_EXTENDEDKEY;
+    if !down {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    send(&[INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_LWIN,
+                wScan: 0x5b,
+                dwFlags: flags,
+                ..Default::default()
+            },
+        },
+    }]);
 }
 
 /// Virtual monitor mode: with the pointer over the viewer's picture, clicks and keys go
@@ -471,11 +557,11 @@ fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
         let under = window_at(cx, cy, viewer.hwnd);
         let case = format!(
             "viewer focused: {has_focus} (asked {focused}), its thread busy {busy_ms} ms per \
-             message, under the pointer: {under}"
+             message, WindowFromPoint says: {under}"
         );
         eprintln!("{case}");
-        if !under.ends_with("(the viewer)") {
-            // Some runner images keep a system window above everything, even topmost ones.
+        if under != "the viewer" {
+            // Some runner images show a window above everything (a sign-in prompt).
             eprintln!("  skipped: something else covers the viewer here");
             continue;
         }
@@ -536,6 +622,103 @@ fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
         capture.send(Command::SetPortal(None));
         let _ = sent();
         drop(viewer);
+    }
+
+    // Full screen, like the user's: off the picture, the Windows key opens Start (and the
+    // taskbar over the viewer); then Start is closed in a few ways, and typing on the
+    // picture should reach the Mac each time.
+    let (fx, fy, fw, fh) = (
+        primary.x as i32,
+        primary.y as i32,
+        primary.width as i32,
+        primary.height as i32,
+    );
+    let (mx, my) = (fx + fw / 2, fy + fh / 3);
+    let taskbar = unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
+        let mut r = windows::Win32::Foundation::RECT::default();
+        FindWindowW(windows::core::w!("Shell_TrayWnd"), None)
+            .ok()
+            .and_then(|t| GetWindowRect(t, &mut r).ok())
+            .map(|()| r)
+    };
+    eprintln!("taskbar at {taskbar:?}");
+    for close in ["Escape", "a click outside Start", "a click on the taskbar"] {
+        let viewer = viewer::Viewer::open(fx, fy, fw, fh, Duration::ZERO);
+        capture.send(Command::SetPortal(Some(Portal {
+            peer: PEER,
+            remote: Rect::new(1512.0, 0.0, 1920.0, 1080.0),
+            window: viewer.hwnd.0 as usize as u64,
+        })));
+        let before = window_at(mx, my, viewer.hwnd);
+        if before != "the viewer" {
+            eprintln!("[{close}] skipped: something else covers the viewer: {before}");
+            capture.send(Command::SetPortal(None));
+            continue;
+        }
+        // Off the picture: onto a taskbar, or anywhere, then back.
+        unsafe { SetCursorPos(fx + fw - 2, fy + 2).unwrap() };
+        std::thread::sleep(Duration::from_millis(50));
+        capture.send(Command::Event(Event::PeerYield(PEER)));
+        let _ = sent();
+        windows_key(true);
+        windows_key(false);
+        std::thread::sleep(Duration::from_millis(1500));
+        eprintln!(
+            "[{close}] with Start open, at the middle: {}",
+            window_at(mx, my, viewer.hwnd)
+        );
+        match close {
+            "Escape" => {
+                key(0x01, true);
+                key(0x01, false);
+            }
+            "a click outside Start" => {
+                unsafe { SetCursorPos(fx + 20, fy + 20).unwrap() };
+                click(true);
+                click(false);
+            }
+            _ => {
+                if let Some(t) = taskbar {
+                    unsafe {
+                        SetCursorPos(t.left + (t.right - t.left) / 4, (t.top + t.bottom) / 2)
+                            .unwrap()
+                    };
+                    click(true);
+                    click(false);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1000));
+        for (name, (px, py)) in [
+            ("the middle", (mx, my)),
+            ("top left", (fx + 40, fy + 40)),
+            ("bottom middle", (fx + fw / 2, fy + fh - 80)),
+        ] {
+            eprintln!(
+                "[{close}] with Start closed, at {name}: {}",
+                window_at(px, py, viewer.hwnd)
+            );
+        }
+        let _ = sent();
+        unsafe { SetCursorPos(mx, my).unwrap() };
+        mouse_move(3, 0);
+        mouse_move(-3, 0);
+        press();
+        let got = sent();
+        let line = format!(
+            "[{close}]   moving onto the picture and typing: entered {}, clicks {}, keys {}",
+            got.0, got.1, got.2
+        );
+        eprintln!("{line}");
+        if got != (1, 0, 2) {
+            failures.push(format!(
+                "after closing Start with {close}: {line}, wanted (1, 0, 2)"
+            ));
+        }
+        capture.send(Command::SetPortal(None));
+        drop(viewer);
+        std::thread::sleep(Duration::from_millis(300));
     }
     drop(capture);
     assert!(failures.is_empty(), "{failures:#?}");
