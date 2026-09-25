@@ -153,23 +153,8 @@ fn bottom_edges_without_a_neighbour_are_walls() {
     assert_eq!(h.c.active_peer(), None);
 }
 
-#[test]
-fn unclamped_positions_past_the_edge_also_cross() {
-    let mut h = Harness::with_config(ControllerConfig {
-        push_distance: 0.0,
-        ..Default::default()
-    });
-    let v = h.step(
-        8,
-        Event::LocalMotion {
-            pos: Point::new(1920.0, 2170.0),
-            attempted: Point::new(0.0, 11.0),
-        },
-    );
-    assert_eq!(v, Verdict::Swallow);
-    assert_eq!(h.c.active_peer(), Some(MAC));
-}
-
+/// Backends report positions on their own displays (Windows clamps its hook's). A position
+/// on none of them is on a display this machine doesn't share: the Mac's extra display.
 #[test]
 fn a_mac_cursor_on_its_extra_display_is_not_at_an_edge() {
     // The Mac's view: the PC's monitors above the MacBook. Its extra display (shown on

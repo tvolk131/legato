@@ -248,16 +248,21 @@ impl State {
                     };
                     self.raw = (0, 0);
                     self.last_pos = Some(pos);
+                    // The hook reports where the pointer would have gone before Windows
+                    // stopped it at the edge of the screens: the controller wants where it
+                    // is, and gets the push from `attempted`.
+                    let on_screen =
+                        clamp_to_displays(&self.controller, Point::new(pos.x as f64, pos.y as f64));
+                    let at = Point::new(on_screen.x as f64, on_screen.y as f64);
                     let hit = self.portal_hit(pos);
                     self.note_where(pos, hit.is_some());
-                    if let Some(at) = hit {
+                    if let Some(picture_at) = hit {
                         return self.handle(Event::PortalMotion {
-                            at,
-                            pos: Point::new(pos.x as f64, pos.y as f64),
+                            at: picture_at,
+                            pos: at,
                             attempted,
                         });
                     }
-                    let at = Point::new(pos.x as f64, pos.y as f64);
                     // Dragging against an edge that leads somewhere: offer to catch files.
                     let catch = self.left_down
                         && !self.controller.is_carrying()
