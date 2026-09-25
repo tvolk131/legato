@@ -167,11 +167,24 @@ impl Engine {
             .map_err(|_| anyhow::anyhow!("sharing isn't running"))
     }
 
-    /// Asks the Mac `to` for an extra display to show here, sized by the `[extend]`
-    /// settings. Frames arrive on [`Engine::viewer_frames`].
-    pub fn extend(&self, to: EndpointId) -> Result<()> {
-        let request = self.config().extend.request();
+    /// Asks the Mac `to` for an extra display of about `width`×`height` pixels to show
+    /// here, at the `[extend]` frame rate and quality. Frames arrive on
+    /// [`Engine::viewer_frames`].
+    pub fn extend(&self, to: EndpointId, width: u32, height: u32) -> Result<()> {
+        let request = self.config().extend.request_for(width, height);
         self.run_command(run::RunCommand::Extend { to, request })
+    }
+
+    /// Changes the size of the extra display from `to` (the window it's in was resized).
+    pub fn resize_extend(&self, to: EndpointId, width: u32, height: u32) {
+        let request = self.config().extend.request_for(width, height);
+        let _ = self.run_command(run::RunCommand::ExtendResize { to, request });
+    }
+
+    /// Where the extra display is shown on this machine (the window or screen, in native
+    /// coordinates), so the Mac can arrange it to match the desk.
+    pub fn set_viewer_area(&self, area: Option<legato_proto::Rect>) {
+        let _ = self.run_command(run::RunCommand::ViewerArea(area));
     }
 
     /// Stops showing the extra display from `to`.

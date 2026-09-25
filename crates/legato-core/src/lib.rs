@@ -7,6 +7,7 @@
 
 pub mod activity;
 pub mod controller;
+pub mod extend;
 pub mod keymap;
 pub mod layout;
 pub mod receiver;

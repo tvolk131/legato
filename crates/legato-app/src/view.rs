@@ -51,6 +51,7 @@ pub fn root(m: &Model) -> Element<'_, Message> {
                 .on_dismiss(Message::DismissNotice)
         }),
     );
+    let main = modal(main, display_options_dialog(m), m.display_options_open);
     iced_m3::focus::scope(modal(main, pairing_dialog(m), m.pairing_open))
 }
 
@@ -188,7 +189,7 @@ fn devices(m: &Model) -> Element<'_, Message> {
                 send
             };
             let display: Option<Element<'_, Message>> = m.can_view(p).then(|| {
-                if m.viewing == Some(p.device.id) {
+                let main: Element<'_, Message> = if m.viewing == Some(p.device.id) {
                     button("Stop display")
                         .variant(ButtonVariant::Tonal)
                         .on_press(Message::StopDisplay)
@@ -198,7 +199,16 @@ fn devices(m: &Model) -> Element<'_, Message> {
                         .variant(ButtonVariant::Tonal)
                         .on_press(Message::ShowDisplay(p.device.id))
                         .into()
-                }
+                };
+                row![
+                    main,
+                    button("Options…")
+                        .variant(ButtonVariant::Text)
+                        .on_press(Message::DisplayOptions(p.device.id)),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .into()
             });
             list_item(p.device.name.clone())
                 .supporting_text(format!("{} · {status}", os_name(p.device.os)))
@@ -432,6 +442,141 @@ fn control_mode(m: &Model) -> Element<'_, Message> {
             _ => Message::ControlMode(None),
         })
         .into()
+}
+
+/// Fixed sizes offered for the Mac's display.
+const FIXED_SIZES: [(u32, u32); 3] = [(3840, 2160), (2560, 1440), (1920, 1080)];
+
+fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
+    use iced_m3::{RadioOption, radio_group};
+    use legato_engine::config::{Placement, Resolution};
+    let Some(o) = m.display_options.clone() else {
+        return dialog(column![]);
+    };
+    let name = m.name_of(&o.peer);
+    let displays = m.displays();
+    let changed = |o: crate::model::DisplayOptions| Message::DisplayOptionsChanged(o);
+
+    let mut places: Vec<RadioOption<(Placement, usize)>> = displays
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            RadioOption::new(
+                (Placement::FullScreen, i + 1),
+                format!(
+                    "Full screen on display {} ({}×{})",
+                    i + 1,
+                    d.bounds.width as u32,
+                    d.bounds.height as u32
+                ),
+            )
+        })
+        .collect();
+    places.push(RadioOption::new((Placement::Window, 0), "In a window"));
+    let place = match o.placement {
+        Placement::FullScreen => (Placement::FullScreen, o.display.min(displays.len()).max(1)),
+        Placement::Window => (Placement::Window, 0),
+    };
+    let where_ = {
+        let o = o.clone();
+        radio_group(places, Some(place)).on_select(move |(placement, display)| {
+            changed(crate::model::DisplayOptions {
+                placement,
+                display: display.max(1),
+                ..o.clone()
+            })
+        })
+    };
+
+    // What "match" means here, for the frame-rate limit.
+    let shown = match o.placement {
+        Placement::FullScreen => displays
+            .get(o.display.saturating_sub(1))
+            .map(|d| (d.bounds.width as u32, d.bounds.height as u32)),
+        Placement::Window => None,
+    };
+    let size = match o.resolution {
+        Resolution::Match => shown,
+        Resolution::Fixed => Some(o.fixed),
+    };
+    let mut sizes = vec![RadioOption::new(
+        (Resolution::Match, (0, 0)),
+        match o.placement {
+            Placement::FullScreen => "Match the screen".to_string(),
+            Placement::Window => "Match the window (changes when you finish resizing)".to_string(),
+        },
+    )];
+    sizes.extend(
+        FIXED_SIZES.iter().map(|&(w, h)| {
+            RadioOption::new((Resolution::Fixed, (w, h)), format!("Always {w}×{h}"))
+        }),
+    );
+    let resolution = match o.resolution {
+        Resolution::Match => (Resolution::Match, (0, 0)),
+        Resolution::Fixed => (Resolution::Fixed, o.fixed),
+    };
+    let size_choice = {
+        let o = o.clone();
+        radio_group(sizes, Some(resolution)).on_select(move |(resolution, fixed)| {
+            changed(crate::model::DisplayOptions {
+                resolution,
+                fixed: if resolution == Resolution::Fixed {
+                    fixed
+                } else {
+                    o.fixed
+                },
+                ..o.clone()
+            })
+        })
+    };
+
+    let max = size.map(|(w, h)| legato_core::extend::max_fps(w, h));
+    let rates = legato_core::extend::FRAME_RATES.map(|fps| {
+        RadioOption::new(fps, format!("{fps} fps")).disabled(max.is_some_and(|max| fps > max))
+    });
+    let fps = max.map_or(o.fps, |max| o.fps.min(max));
+    let rate_choice = {
+        let o = o.clone();
+        radio_group(rates, Some(fps))
+            .on_select(move |fps| changed(crate::model::DisplayOptions { fps, ..o.clone() }))
+    };
+    let rate_note = match (size, max) {
+        (Some((w, h)), Some(max)) => {
+            format!("At {w}×{h} the Mac can keep up with {max} fps. Smaller sizes can go faster.")
+        }
+        _ => "Limited to what the Mac can keep up with at the window's size: 60 fps at 4K, \
+              120 at 2560×1440, 144 at 1920×1080."
+            .to_string(),
+    };
+
+    let content = column![
+        typography(
+            format!("Show \"{name}\" as a display"),
+            TypeScale::HeadlineSmall
+        ),
+        heading("Where"),
+        where_,
+        heading("Size"),
+        size_choice,
+        heading("Frame rate"),
+        rate_choice,
+        body(rate_note),
+    ]
+    .spacing(8);
+    dialog(scrollable(content).height(Length::Shrink))
+        .actions(
+            row![
+                button("Cancel")
+                    .variant(ButtonVariant::Text)
+                    .on_press(Message::DisplayOptionsDone(false)),
+                button("Show")
+                    .variant(ButtonVariant::Text)
+                    .on_press(Message::DisplayOptionsDone(true)),
+            ]
+            .spacing(8)
+            .wrap(),
+        )
+        .on_dismiss(Message::DisplayOptionsDone(false))
 }
 
 fn pairing_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
