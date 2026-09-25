@@ -51,6 +51,7 @@ unsafe_op_in_unsafe_fn = "deny"
 dbg_macro = "warn"
 
 [profile.release]
+# Thin LTO with the default 16 codegen units: much faster to build than one unit, for a
+# difference in speed and size this app doesn't notice.
 lto = "thin"
-codegen-units = 1
 strip = true
