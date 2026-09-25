@@ -60,6 +60,34 @@ pub fn prefer_low_latency_presentation() {
     }
 }
 
+/// Repaints the native window `handle` for each new picture in `pictures`, without an
+/// update of the app, which would redraw all its windows. Windows only: elsewhere new
+/// pictures go through the update loop. The task runs until aborted.
+pub fn repaint_on_new_pictures(
+    handle: u64,
+    mut pictures: crate::viewer::Source,
+) -> Option<tokio::task::AbortHandle> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{RDW_INTERNALPAINT, RedrawWindow};
+        let task = crate::runtime().spawn(async move {
+            while pictures.changed().await.is_ok() {
+                let window = HWND(handle as usize as *mut core::ffi::c_void);
+                // SAFETY: asks for a repaint; a stale handle just fails it. Safe from any
+                // thread: the window's own thread gets the WM_PAINT.
+                let _ = unsafe { RedrawWindow(Some(window), None, None, RDW_INTERNALPAINT) };
+            }
+        });
+        Some(task.abort_handle())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (handle, &mut pictures);
+        None
+    }
+}
+
 fn launcher() -> Result<auto_launch::AutoLaunch> {
     let exe = std::env::current_exe().context("finding this program")?;
     let exe = exe.to_str().context("program path isn't valid UTF-8")?;

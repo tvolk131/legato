@@ -9,6 +9,11 @@ use iced::widget::shader::{self, Viewport};
 use iced::{Rectangle, mouse};
 use legato_engine::ViewerFrame;
 
+/// The Mac's pictures, as they're decoded. The viewer draws the newest one whenever its
+/// window is drawn, so a new picture needs only that window repainted (see
+/// [`crate::platform::repaint_on_new_pictures`]), not an update of the whole app.
+pub type Source = tokio::sync::watch::Receiver<Option<ViewerFrame>>;
+
 /// How long the latest picture took from decoded to uploaded for drawing, and the worst
 /// since [`take_worst_display_latency`], in microseconds.
 static DISPLAY_US: AtomicU64 = AtomicU64::new(0);
@@ -24,20 +29,20 @@ pub fn take_worst_display_latency() -> Duration {
     Duration::from_micros(DISPLAY_MAX_US.swap(0, Ordering::Relaxed))
 }
 
-/// Draws the latest picture, letterboxed into the widget's bounds.
-pub struct Picture(pub ViewerFrame);
+/// Draws the newest picture from its source, letterboxed into the widget's bounds.
+pub struct Picture(pub Source);
 
 impl<Message> shader::Program<Message> for Picture {
     type State = ();
     type Primitive = Primitive;
 
     fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> Primitive {
-        Primitive(self.0.clone())
+        Primitive(self.0.borrow().clone())
     }
 }
 
 #[derive(Debug)]
-pub struct Primitive(ViewerFrame);
+pub struct Primitive(Option<ViewerFrame>);
 
 impl shader::Primitive for Primitive {
     type Pipeline = Pipeline;
@@ -50,7 +55,9 @@ impl shader::Primitive for Primitive {
         bounds: &Rectangle,
         _viewport: &Viewport,
     ) {
-        let picture = &self.0;
+        let Some(picture) = &self.0 else {
+            return;
+        };
         let frame = &picture.nv12;
         let size = (frame.width, frame.height);
         if pipeline.textures.as_ref().is_none_or(|t| t.size != size) {
@@ -87,7 +94,7 @@ impl shader::Primitive for Primitive {
     }
 
     fn draw(&self, pipeline: &Pipeline, pass: &mut wgpu::RenderPass<'_>) -> bool {
-        let Some(textures) = &pipeline.textures else {
+        let Some(textures) = pipeline.textures.as_ref().filter(|_| self.0.is_some()) else {
             return true;
         };
         pass.set_pipeline(&pipeline.pipeline);

@@ -98,7 +98,8 @@ pub enum Message {
     StopDisplay,
     ViewerOpened(window::Id),
     ViewerHandle(Option<u64>),
-    ViewerFrame(Option<legato_engine::ViewerFrame>),
+    /// The viewer has pictures to show (or has stopped having them).
+    ViewerShowing(bool),
     ToggleFullscreen(window::Id),
     Stats(bool),
     ToggleStats(window::Id),
@@ -119,7 +120,11 @@ pub enum Message {
 struct Viewer {
     peer: EndpointId,
     window: window::Id,
-    frame: Option<legato_engine::ViewerFrame>,
+    /// The Mac's pictures, and whether the first has come.
+    pictures: viewer::Source,
+    showing: bool,
+    /// Repaints the window for each new picture, while it's open.
+    repaint: Option<tokio::task::AbortHandle>,
     stats: Option<legato_engine::ViewerStats>,
     /// The worst decoded-to-drawn time over the same stretch as `stats`.
     display_worst: std::time::Duration,
@@ -134,6 +139,14 @@ struct Viewer {
     changes: u64,
     /// The display size last asked for.
     asked: (u32, u32),
+}
+
+impl Drop for Viewer {
+    fn drop(&mut self) {
+        if let Some(repaint) = self.repaint.take() {
+            repaint.abort();
+        }
+    }
 }
 
 /// How long a window must stay put before its new size or place is acted on.
@@ -626,10 +639,16 @@ impl App {
                 .map(Message::ViewerHandle);
                 return Task::batch([handle, scale].into_iter().chain(full_screen));
             }
-            Message::ViewerHandle(handle) => self.engine.set_viewer_window(handle),
-            Message::ViewerFrame(frame) => {
+            Message::ViewerHandle(handle) => {
+                self.engine.set_viewer_window(handle);
+                if let (Some(viewer), Some(handle)) = (&mut self.viewer, handle) {
+                    viewer.repaint =
+                        platform::repaint_on_new_pictures(handle, viewer.pictures.clone());
+                }
+            }
+            Message::ViewerShowing(showing) => {
                 if let Some(viewer) = &mut self.viewer {
-                    viewer.frame = frame;
+                    viewer.showing = showing;
                 }
             }
             Message::Stats(on) => {
@@ -711,7 +730,9 @@ impl App {
         self.viewer = Some(Viewer {
             peer,
             window: id,
-            frame: None,
+            pictures: self.engine.viewer_frames(),
+            showing: false,
+            repaint: None,
             stats: None,
             display_worst: std::time::Duration::ZERO,
             fullscreen: false,
@@ -867,7 +888,7 @@ impl App {
                     .map(|s| view::stats_text(&s, viewer::display_latency(), viewer.display_worst));
                 view::viewer(
                     &self.model.name_of(&viewer.peer),
-                    viewer.frame.clone(),
+                    viewer.showing.then(|| viewer.pictures.clone()),
                     stats,
                 )
             }
@@ -964,15 +985,25 @@ fn status_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
 
 /// The latest pictures of the Mac's extra display. Pictures that arrive while the UI is
 /// busy are skipped.
+/// Tells the viewer when pictures start and stop coming.
+///
+/// Not each picture: every update redraws every window of the app, and the main window's
+/// redraws then crowd out the viewer's. On Windows the main window's, when it's in front,
+/// always went first, so the picture froze. New pictures repaint just the viewer instead
+/// (see [`platform::repaint_on_new_pictures`]); elsewhere they still come through here.
 fn frames_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
     let engine = engine.0.clone();
     iced::stream::channel(1, async move |mut out| {
         let mut frames = engine.viewer_frames();
+        let mut showing = None;
         loop {
-            let frame = frames.borrow_and_update().clone();
-            if out.send(Message::ViewerFrame(frame)).await.is_err() {
+            let now = frames.borrow_and_update().is_some();
+            if (showing != Some(now) || !cfg!(windows))
+                && out.send(Message::ViewerShowing(now)).await.is_err()
+            {
                 return;
             }
+            showing = Some(now);
             if frames.changed().await.is_err() {
                 return;
             }
