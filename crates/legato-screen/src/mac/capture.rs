@@ -4,7 +4,7 @@
 
 use std::sync::Mutex;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use block2::RcBlock;
@@ -17,7 +17,7 @@ use objc2_core_graphics::{
     CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
     kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
 };
-use objc2_core_media::{CMSampleBuffer, CMTime};
+use objc2_core_media::{CMClock, CMSampleBuffer, CMTime};
 use objc2_core_video::{CVPixelBuffer, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange};
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
@@ -30,6 +30,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// A captured picture.
 pub struct Frame {
     pub image: CFRetained<CVPixelBuffer>,
+    /// When the picture appeared on the display.
+    pub shown_at: Instant,
 }
 
 // SAFETY: pixel buffers are reference counted and safe to hand between threads.
@@ -65,8 +67,9 @@ define_class!(
             let Some(image) = (unsafe { sample.image_buffer() }) else {
                 return;
             };
+            let shown_at = shown_at(sample);
             if let Ok(mut on_frame) = self.ivars().on_frame.lock() {
-                on_frame(Frame { image });
+                on_frame(Frame { image, shown_at });
             }
         }
     }
@@ -77,6 +80,22 @@ impl Output {
         let this = Self::alloc().set_ivars(Ivars { on_frame });
         // SAFETY: NSObject's designated initialiser.
         unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// When a captured picture appeared on the display: its timestamp is on the host clock.
+fn shown_at(sample: &CMSampleBuffer) -> Instant {
+    let now = Instant::now();
+    // SAFETY: reading a valid sample buffer's timestamp and the host clock.
+    let age = unsafe {
+        let shown = sample.presentation_time_stamp().seconds();
+        let host = CMClock::host_time_clock().time().seconds();
+        host - shown
+    };
+    if age.is_finite() && (0.0..1.0).contains(&age) {
+        now.checked_sub(Duration::from_secs_f64(age)).unwrap_or(now)
+    } else {
+        now
     }
 }
 

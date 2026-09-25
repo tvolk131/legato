@@ -35,6 +35,8 @@ pub struct Extend {
     pub fps: u32,
     /// Video quality, in megabits per second.
     pub bitrate_mbps: u32,
+    /// Show frame rate, bitrate and delays over the picture.
+    pub stats: bool,
 }
 
 impl Default for Extend {
@@ -45,6 +47,7 @@ impl Default for Extend {
             hidpi: true,
             fps: 60,
             bitrate_mbps: 40,
+            stats: true,
         }
     }
 }

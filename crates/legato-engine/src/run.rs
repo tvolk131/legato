@@ -498,7 +498,12 @@ pub(crate) async fn run(
                         if viewing.is_some_and(|v| v.peer == peer)
                             && let Some(session) = by_peer.read().unwrap().get(&peer).cloned()
                         {
-                            extend::decode(video, session, frames.clone());
+                            extend::decode(
+                                video,
+                                session,
+                                frames.clone(),
+                                ctx.engine.viewer_stats.clone(),
+                            );
                             continue;
                         }
                         let _ = (peer, video);

@@ -25,7 +25,7 @@ mod platform;
 mod run;
 
 pub use config::Config;
-pub use extend::ViewerFrame;
+pub use extend::{Picture, ViewerFrame, ViewerStats};
 pub use legato_net;
 
 const SCREENS_FILE: &str = "screens.json";
@@ -105,6 +105,7 @@ pub struct Engine {
     run_commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<run::RunCommand>>>,
     /// The latest picture of a Mac's extra display shown here, if any.
     viewer_frames: watch::Sender<Option<ViewerFrame>>,
+    viewer_stats: watch::Sender<Option<ViewerStats>>,
 }
 
 impl Engine {
@@ -131,6 +132,7 @@ impl Engine {
             known_screens: Mutex::new(known_screens),
             run_commands: Mutex::new(None),
             viewer_frames: watch::Sender::new(None),
+            viewer_stats: watch::Sender::new(None),
         }))
     }
 
@@ -186,6 +188,11 @@ impl Engine {
     /// Pictures of the extra display shown here: the latest, or `None` when there's none.
     pub fn viewer_frames(&self) -> watch::Receiver<Option<ViewerFrame>> {
         self.viewer_frames.subscribe()
+    }
+
+    /// How the extra display shown here is streaming, updated twice a second.
+    pub fn viewer_stats(&self) -> watch::Receiver<Option<ViewerStats>> {
+        self.viewer_stats.subscribe()
     }
 
     /// Changes settings, saves them, and applies them to a running session.

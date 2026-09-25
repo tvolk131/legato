@@ -5,11 +5,38 @@
 //! the viewer window's picture, the viewer's capture sends input there (a portal).
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use legato_proto::Rect;
 
 /// A picture from the Mac's extra display, ready to draw.
-pub type ViewerFrame = Arc<legato_screen::Nv12>;
+pub type ViewerFrame = Arc<Picture>;
+
+#[derive(Debug)]
+pub struct Picture {
+    pub nv12: legato_screen::Nv12,
+    /// When decoding finished, so the viewer can tell how long it took to show.
+    pub decoded_at: Instant,
+    /// How long it spent on the Mac, on the network and in the decoder.
+    pub mac: Duration,
+    pub network: Duration,
+    pub decode: Duration,
+}
+
+/// How the extra display's stream is doing, averaged over the last half second or so.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewerStats {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+    pub megabits_per_second: f32,
+    /// Capture, encoding and queueing on the Mac.
+    pub mac: Duration,
+    /// Half the round trip.
+    pub network: Duration,
+    pub decode: Duration,
+    pub relayed: bool,
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) use host::Host;
@@ -86,7 +113,8 @@ mod host {
                                 frame = rx.recv() => {
                                     let Some(frame) = frame else { break };
                                     let waiting = queued.fetch_sub(1, Ordering::Relaxed) - 1;
-                                    video.send(&frame.data, frame.keyframe).await?;
+                                    let spent = frame.shown_at.map_or(Duration::ZERO, |t| t.elapsed());
+                                    video.send(&frame.data, frame.keyframe, spent).await?;
                                     stream.set_backlogged(waiting >= BACKLOG);
                                 }
                                 _ = check.tick() => {
@@ -137,23 +165,37 @@ pub(crate) use viewer::decode;
 #[cfg(windows)]
 mod viewer {
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
-    use legato_net::{IncomingVideo, Session};
+    use legato_net::{IncomingVideo, PathKind, Session, VideoFrame};
     use legato_proto::Control;
     use legato_screen::win::Decoder;
     use tokio::sync::{mpsc, watch};
 
-    use super::ViewerFrame;
+    use super::{Picture, ViewerFrame, ViewerStats};
+
+    /// How often the stats are updated.
+    const STATS_EVERY: Duration = Duration::from_millis(500);
+
+    /// Running totals for [`ViewerStats`].
+    #[derive(Default)]
+    struct Totals {
+        frames: u32,
+        bytes: u64,
+        mac: Duration,
+        decode: Duration,
+    }
 
     /// Decodes a video stream from the Mac into `frames` until it ends.
     pub(crate) fn decode(
         video: Arc<IncomingVideo>,
         session: Arc<Session>,
         frames: watch::Sender<Option<ViewerFrame>>,
+        stats: watch::Sender<Option<ViewerStats>>,
     ) {
         // Bounded, so a slow decoder slows the stream down (and the Mac skips pictures)
         // rather than falling ever further behind.
-        let (tx, mut rx) = mpsc::channel::<(Vec<u8>, bool)>(4);
+        let (tx, mut rx) = mpsc::channel::<VideoFrame>(4);
         tokio::spawn(async move {
             loop {
                 match video.next().await {
@@ -184,15 +226,34 @@ mod viewer {
                 };
                 // Pictures only make sense from a keyframe on.
                 let mut synced = false;
-                while let Some((data, keyframe)) = rx.blocking_recv() {
-                    if !synced && !keyframe {
+                let mut totals = Totals::default();
+                let mut since = Instant::now();
+                let mut size = (0, 0);
+                while let Some(frame) = rx.blocking_recv() {
+                    if !synced && !frame.keyframe {
                         continue;
                     }
                     synced = true;
-                    match decoder.decode(&data) {
+                    let path = session.path();
+                    let network = path.map_or(Duration::ZERO, |(_, rtt)| rtt / 2);
+                    let started = Instant::now();
+                    match decoder.decode(&frame.data) {
                         Ok(pictures) => {
-                            if let Some(picture) = pictures.into_iter().last() {
-                                frames.send_replace(Some(Arc::new(picture)));
+                            let decoded_at = Instant::now();
+                            let decode = decoded_at - started;
+                            totals.frames += 1;
+                            totals.bytes += frame.data.len() as u64;
+                            totals.mac += frame.sender_time;
+                            totals.decode += decode;
+                            if let Some(nv12) = pictures.into_iter().last() {
+                                size = (nv12.width, nv12.height);
+                                frames.send_replace(Some(Arc::new(Picture {
+                                    nv12,
+                                    decoded_at,
+                                    mac: frame.sender_time,
+                                    network,
+                                    decode,
+                                })));
                             }
                         }
                         Err(e) => {
@@ -204,7 +265,24 @@ mod viewer {
                             }
                         }
                     }
+                    let elapsed = since.elapsed();
+                    if elapsed >= STATS_EVERY && totals.frames > 0 {
+                        let secs = elapsed.as_secs_f32();
+                        stats.send_replace(Some(ViewerStats {
+                            width: size.0,
+                            height: size.1,
+                            fps: totals.frames as f32 / secs,
+                            megabits_per_second: totals.bytes as f32 * 8.0 / secs / 1e6,
+                            mac: totals.mac / totals.frames,
+                            network,
+                            decode: totals.decode / totals.frames,
+                            relayed: matches!(path, Some((PathKind::Relay, _))),
+                        }));
+                        totals = Totals::default();
+                        since = Instant::now();
+                    }
                 }
+                stats.send_replace(None);
             });
         if let Err(e) = spawned {
             tracing::warn!("couldn't start decoding: {e}");

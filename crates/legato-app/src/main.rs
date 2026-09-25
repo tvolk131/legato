@@ -90,6 +90,9 @@ pub enum Message {
     ViewerHandle(Option<u64>),
     ViewerFrame(Option<legato_engine::ViewerFrame>),
     ToggleFullscreen(window::Id),
+    Stats(bool),
+    ToggleStats(window::Id),
+    ViewerStats(Option<legato_engine::ViewerStats>),
     /// The system's light or dark appearance, at startup and whenever it changes.
     SystemTheme(iced::theme::Mode),
 }
@@ -99,6 +102,7 @@ struct Viewer {
     peer: EndpointId,
     window: window::Id,
     frame: Option<legato_engine::ViewerFrame>,
+    stats: Option<legato_engine::ViewerStats>,
     fullscreen: bool,
 }
 
@@ -497,6 +501,7 @@ impl App {
                     peer,
                     window: id,
                     frame: None,
+                    stats: None,
                     fullscreen: false,
                 });
                 self.model.viewing = Some(peer);
@@ -525,6 +530,20 @@ impl App {
             Message::ViewerFrame(frame) => {
                 if let Some(viewer) = &mut self.viewer {
                     viewer.frame = frame;
+                }
+            }
+            Message::Stats(on) => {
+                self.model.config.extend.stats = on;
+                self.save_config();
+            }
+            Message::ToggleStats(id) => {
+                if self.viewer.as_ref().is_some_and(|v| v.window == id) {
+                    return self.update(Message::Stats(!self.model.config.extend.stats));
+                }
+            }
+            Message::ViewerStats(stats) => {
+                if let Some(viewer) = &mut self.viewer {
+                    viewer.stats = stats;
                 }
             }
             Message::ToggleFullscreen(id) => {
@@ -677,7 +696,15 @@ impl App {
     fn view(&self, window: window::Id) -> Element<'_, Message> {
         match &self.viewer {
             Some(viewer) if viewer.window == window => {
-                view::viewer(&self.model.name_of(&viewer.peer), viewer.frame.clone())
+                let stats = viewer
+                    .stats
+                    .filter(|_| self.model.config.extend.stats)
+                    .map(|s| view::stats_text(&s, viewer::display_latency()));
+                view::viewer(
+                    &self.model.name_of(&viewer.peer),
+                    viewer.frame.clone(),
+                    stats,
+                )
             }
             _ => view::root(&self.model),
         }
@@ -701,7 +728,10 @@ impl App {
             Subscription::run(tray::events).map(Message::Tray),
             iced::system::theme_changes().map(Message::SystemTheme),
             if self.viewer.is_some() {
-                Subscription::run_with(engine, frames_stream)
+                Subscription::batch([
+                    Subscription::run_with(engine.clone(), frames_stream),
+                    Subscription::run_with(engine, stats_stream),
+                ])
             } else {
                 Subscription::none()
             },
@@ -714,6 +744,10 @@ impl App {
                     key: iced::keyboard::Key::Named(iced::keyboard::key::Named::F11),
                     ..
                 }) => Some(Message::ToggleFullscreen(window)),
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::F10),
+                    ..
+                }) => Some(Message::ToggleStats(window)),
                 _ => None,
             }),
         ])
@@ -767,6 +801,22 @@ fn frames_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
     })
 }
 
+fn stats_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
+    let engine = engine.0.clone();
+    iced::stream::channel(1, async move |mut out| {
+        let mut stats = engine.viewer_stats();
+        loop {
+            let latest = *stats.borrow_and_update();
+            if out.send(Message::ViewerStats(latest)).await.is_err() {
+                return;
+            }
+            if stats.changed().await.is_err() {
+                return;
+            }
+        }
+    })
+}
+
 fn nearby_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
     let engine = engine.0.clone();
     iced::stream::channel(16, async move |mut out| {
@@ -800,6 +850,7 @@ fn theme(app: &App, _window: window::Id) -> Theme {
 }
 
 fn main() -> iced::Result {
+    platform::prefer_low_latency_presentation();
     let filter = tracing_subscriber::EnvFilter::try_from_env("LEGATO_LOG").unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(
             "error,legato=info,legato_app=info,legato_engine=info,legato_net=info",

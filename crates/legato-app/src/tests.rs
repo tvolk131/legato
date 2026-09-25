@@ -381,10 +381,52 @@ fn a_connected_mac_can_be_shown_as_a_display_on_windows() {
 
 #[test]
 fn the_viewer_waits_for_the_first_picture() {
-    let mut ui = simulator(crate::view::viewer("Tommy's MacBook Pro", None));
+    let mut ui = simulator(crate::view::viewer("Tommy's MacBook Pro", None, None));
     snapshot(&mut ui, "viewer-waiting");
     assert!(
         ui.find("Waiting for \"Tommy's MacBook Pro\" to add its display…")
             .is_ok()
     );
+}
+
+fn sample_stats() -> legato_engine::ViewerStats {
+    legato_engine::ViewerStats {
+        width: 3840,
+        height: 2160,
+        fps: 59.6,
+        megabits_per_second: 24.13,
+        mac: Duration::from_millis(18),
+        network: Duration::from_micros(1200),
+        decode: Duration::from_millis(7),
+        relayed: false,
+    }
+}
+
+#[test]
+fn stats_add_up_the_delay_stage_by_stage() {
+    assert_eq!(
+        crate::view::stats_text(&sample_stats(), Duration::from_millis(3)),
+        [
+            "3840×2160 · 60 fps · 24.1 Mbit/s · direct",
+            "29 ms behind: Mac 18 · network 1 · decode 7 · display 3",
+        ]
+    );
+}
+
+#[test]
+fn the_stats_panel_sits_in_the_corner() {
+    let lines = crate::view::stats_text(&sample_stats(), Duration::from_millis(3));
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        (900.0, 200.0),
+        iced::widget::container(crate::view::stats_panel(lines))
+            .width(iced::Length::Fill)
+            .height(iced::Length::Fill)
+            .style(|_| iced::widget::container::Style {
+                background: Some(iced::Color::from_rgb(0.2, 0.3, 0.5).into()),
+                ..Default::default()
+            }),
+    );
+    snapshot(&mut ui, "viewer-stats");
+    assert!(ui.find("3840×2160 · 60 fps · 24.1 Mbit/s · direct").is_ok());
 }

@@ -81,6 +81,15 @@ impl IncomingFile {
     }
 }
 
+/// One frame from a video stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoFrame {
+    pub data: Vec<u8>,
+    pub keyframe: bool,
+    /// How long the sender spent on it before sending (see [`VideoFrameHeader`]).
+    pub sender_time: Duration,
+}
+
 /// A video stream arriving from a peer.
 #[derive(Debug)]
 pub struct IncomingVideo {
@@ -88,8 +97,8 @@ pub struct IncomingVideo {
 }
 
 impl IncomingVideo {
-    /// The next frame and whether it's a keyframe, or `None` once the stream ends.
-    pub async fn next(&self) -> Result<Option<(Vec<u8>, bool)>> {
+    /// The next frame, or `None` once the stream ends.
+    pub async fn next(&self) -> Result<Option<VideoFrame>> {
         let mut recv = self.recv.lock().await;
         let mut header = [0u8; VideoFrameHeader::SIZE];
         match recv.read_exact(&mut header).await {
@@ -100,7 +109,11 @@ impl IncomingVideo {
         let header = VideoFrameHeader::decode(header).context("bad video frame header")?;
         let mut data = vec![0u8; header.len as usize];
         recv.read_exact(&mut data).await?;
-        Ok(Some((data, header.keyframe)))
+        Ok(Some(VideoFrame {
+            data,
+            keyframe: header.keyframe,
+            sender_time: Duration::from_micros(header.sender_us.into()),
+        }))
     }
 }
 
@@ -112,10 +125,17 @@ pub struct VideoSender {
 
 impl VideoSender {
     /// Resolves once the frame is handed to the connection (not when it arrives).
-    pub async fn send(&mut self, frame: &[u8], keyframe: bool) -> Result<()> {
+    /// `sender_time` is how long this machine has spent on the frame so far.
+    pub async fn send(
+        &mut self,
+        frame: &[u8],
+        keyframe: bool,
+        sender_time: Duration,
+    ) -> Result<()> {
         let header = VideoFrameHeader {
             len: frame.len().try_into().context("frame too large")?,
             keyframe,
+            sender_us: sender_time.as_micros().min(u32::MAX.into()) as u32,
         };
         self.send.write_all(&header.encode()).await?;
         self.send.write_all(frame).await?;
