@@ -529,3 +529,85 @@ fn display_options_are_saved_to_the_settings() {
         options
     );
 }
+
+#[test]
+fn display_options_fit_the_default_window() {
+    use legato_engine::config::Placement;
+    let m = with_display_options(Placement::FullScreen);
+    // The main window's default size, where the dialog has to scroll.
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        (920.0, 640.0),
+        crate::view::root(&m),
+    );
+    let theme = Theme::from_accent(iced::Color::from_rgb8(0x3d, 0x5a, 0xfe), false);
+    ui.snapshot(&theme).unwrap();
+    assert!(ui.find("Show").is_ok());
+}
+
+/// Renders what the GPU draws, with whatever backend `ICED_TEST_BACKEND` and
+/// `WGPU_BACKEND` pick (CI runs it on Windows with DirectX 12), and checks the pixels
+/// come out: the dialogs, and the viewer's NV12 shader drawing a known colour.
+#[test]
+#[ignore = "needs a GPU backend: ICED_TEST_BACKEND=wgpu"]
+fn gpu_renders_the_dialogs_and_the_viewer() {
+    use legato_engine::config::Placement;
+    let theme = Theme::from_accent(iced::Color::from_rgb8(0x3d, 0x5a, 0xfe), false);
+    let render = |element: crate::Element<'_, Message>, size: (f32, f32), name: &str| {
+        let mut ui = iced_test::Simulator::with_size(iced::Settings::default(), size, element);
+        let dir = std::env::temp_dir().join(format!("legato-gpu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        ui.snapshot(&theme)
+            .unwrap()
+            .matches_image(dir.join(name))
+            .unwrap();
+        let file = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        eprintln!("rendered {}", file.display());
+        let image = read_png(&file).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        image
+    };
+    let m = with_display_options(Placement::FullScreen);
+    render(crate::view::root(&m), (920.0, 640.0), "dialog");
+    render(
+        crate::view::root(&model(Page::Arrangement)),
+        (920.0, 640.0),
+        "arrangement",
+    );
+
+    // A solid colour through the viewer's shader: BT.709 limited-range Y 102, Cb 81,
+    // Cr 215 is orange, about (255, 64, 0) in RGB.
+    let (w, h) = (64u32, 36u32);
+    let mut data = vec![102u8; (w * h) as usize];
+    data.extend(std::iter::repeat_n([81u8, 215u8], (w * h / 4) as usize).flatten());
+    let frame = std::sync::Arc::new(legato_engine::Picture {
+        nv12: legato_screen::Nv12 {
+            width: w,
+            height: h,
+            stride: w,
+            data,
+        },
+        decoded_at: std::time::Instant::now(),
+        mac: Duration::ZERO,
+        network: Duration::ZERO,
+        decode: Duration::ZERO,
+    });
+    let (width, height, rgba) = render(
+        crate::view::viewer("Tommy's MacBook Pro", Some(frame), None),
+        (320.0, 180.0),
+        "viewer",
+    );
+    let i = ((height / 2 * width + width / 2) * 4) as usize;
+    let centre = &rgba[i..i + 3];
+    eprintln!("centre pixel: {centre:?}");
+    let close = |got: u8, want: u8| got.abs_diff(want) <= 12;
+    assert!(
+        close(centre[0], 255) && close(centre[1], 64) && close(centre[2], 0),
+        "the picture is drawn in the right colour: {centre:?}"
+    );
+}

@@ -63,7 +63,8 @@ fn control_mode(config: &Config) -> ControlMode {
 enum Input {
     Control(EndpointId, Control),
     Datagram(Datagram),
-    LocalActivity,
+    /// Someone used this machine's own keyboard or mouse: what it was, for the log.
+    LocalActivity(&'static str),
     Disconnected(EndpointId),
     InvertWheel(bool),
     Stop,
@@ -185,7 +186,11 @@ pub(crate) async fn run(
             },
             move |input| {
                 if filter.feed(Instant::now(), input) {
-                    let _ = inject_tx.lock().unwrap().send(Input::LocalActivity);
+                    let what = match input {
+                        legato_core::LocalInput::Motion { .. } => "the pointer moved",
+                        legato_core::LocalInput::Other => "a key, button or scroll",
+                    };
+                    let _ = inject_tx.lock().unwrap().send(Input::LocalActivity(what));
                 }
             },
         )?
@@ -431,7 +436,13 @@ pub(crate) async fn run(
                     SessionEvent::Control { peer, msg } => {
                         let Some(&machine) = ids.get(&peer) else { continue };
                         match msg {
-                            Control::Yield => capture.send(CaptureCommand::Event(Event::PeerYield(machine))),
+                            Control::Yield => {
+                                tracing::info!(
+                                    "\"{}\" was used directly, so it took back control",
+                                    peers.get(&machine).map_or("the other machine", |p| p.session.remote.name.as_str())
+                                );
+                                capture.send(CaptureCommand::Event(Event::PeerYield(machine)));
+                            }
                             Control::Screens(screens) => {
                                 ctx.status(Status::PeerScreens { id: peer, screens: screens.clone() });
                                 if let Some(p) = peers.get_mut(&machine) {
@@ -645,8 +656,14 @@ fn inject_loop(
                 receiver.datagram(msg, &mut out);
                 false
             }
-            Ok(Input::LocalActivity) => {
+            Ok(Input::LocalActivity(what)) => {
                 receiver.local_activity(&mut out);
+                if out.iter().any(|i| matches!(i, Inject::SendYield)) {
+                    // Worth knowing when input from the other machine seems to stop.
+                    tracing::info!(
+                        "this machine's own keyboard or mouse was used ({what}): taking back control"
+                    );
+                }
                 false
             }
             Ok(Input::Disconnected(peer)) => {

@@ -33,6 +33,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 
 [dev-dependencies]
 iced_test.workspace = true
+legato-screen.workspace = true
 iroh.workspace = true
 png = "0.18.1"
 
