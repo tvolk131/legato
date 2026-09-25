@@ -468,12 +468,17 @@ fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
     for (focused, busy_ms) in [(false, 0), (true, 0), (false, 40), (true, 40)] {
         let viewer = viewer::Viewer::open(x, y, w, h, Duration::from_millis(busy_ms));
         let has_focus = focused && viewer.focus();
+        let under = window_at(cx, cy, viewer.hwnd);
         let case = format!(
             "viewer focused: {has_focus} (asked {focused}), its thread busy {busy_ms} ms per \
-             message, under the pointer: {}",
-            window_at(cx, cy, viewer.hwnd)
+             message, under the pointer: {under}"
         );
         eprintln!("{case}");
+        if !under.ends_with("(the viewer)") {
+            // Some runner images keep a system window above everything, even topmost ones.
+            eprintln!("  skipped: something else covers the viewer here");
+            continue;
+        }
         let mut check = |what: &str, got: (usize, usize, usize), want: (usize, usize, usize)| {
             let line = format!(
                 "  {what}: entered {}, clicks {}, keys {}",
