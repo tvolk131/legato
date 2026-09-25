@@ -88,6 +88,8 @@ pub struct VideoFrame {
     pub keyframe: bool,
     /// How long the sender spent on it before sending (see [`VideoFrameHeader`]).
     pub sender_time: Duration,
+    /// Pictures the sender skipped or dropped just before this one.
+    pub skipped: u16,
 }
 
 /// A video stream arriving from a peer.
@@ -113,6 +115,7 @@ impl IncomingVideo {
             data,
             keyframe: header.keyframe,
             sender_time: Duration::from_micros(header.sender_us.into()),
+            skipped: header.skipped,
         }))
     }
 }
@@ -125,17 +128,20 @@ pub struct VideoSender {
 
 impl VideoSender {
     /// Resolves once the frame is handed to the connection (not when it arrives).
-    /// `sender_time` is how long this machine has spent on the frame so far.
+    /// `sender_time` is how long this machine has spent on the frame so far, and `skipped`
+    /// how many pictures it skipped or dropped just before it.
     pub async fn send(
         &mut self,
         frame: &[u8],
         keyframe: bool,
         sender_time: Duration,
+        skipped: u16,
     ) -> Result<()> {
         let header = VideoFrameHeader {
             len: frame.len().try_into().context("frame too large")?,
             keyframe,
             sender_us: sender_time.as_micros().min(u32::MAX.into()) as u32,
+            skipped,
         };
         self.send.write_all(&header.encode()).await?;
         self.send.write_all(frame).await?;

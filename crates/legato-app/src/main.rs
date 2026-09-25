@@ -121,6 +121,8 @@ struct Viewer {
     window: window::Id,
     frame: Option<legato_engine::ViewerFrame>,
     stats: Option<legato_engine::ViewerStats>,
+    /// The worst decoded-to-drawn time over the same stretch as `stats`.
+    display_worst: std::time::Duration,
     fullscreen: bool,
     /// Go full screen once open (full screen on a chosen display).
     full_screen_on_open: bool,
@@ -642,6 +644,7 @@ impl App {
             Message::ViewerStats(stats) => {
                 if let Some(viewer) = &mut self.viewer {
                     viewer.stats = stats;
+                    viewer.display_worst = viewer::take_worst_display_latency();
                 }
             }
             Message::ToggleFullscreen(id) => {
@@ -710,6 +713,7 @@ impl App {
             window: id,
             frame: None,
             stats: None,
+            display_worst: std::time::Duration::ZERO,
             fullscreen: false,
             full_screen_on_open: target.is_some(),
             scale: scale as f32,
@@ -860,7 +864,7 @@ impl App {
                 let stats = viewer
                     .stats
                     .filter(|_| self.model.config.extend.stats)
-                    .map(|s| view::stats_text(&s, viewer::display_latency()));
+                    .map(|s| view::stats_text(&s, viewer::display_latency(), viewer.display_worst));
                 view::viewer(
                     &self.model.name_of(&viewer.peer),
                     viewer.frame.clone(),

@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
@@ -214,6 +214,10 @@ pub struct ExtendRequest {
     pub height: u32,
     /// Retina: the display looks like half its pixel size.
     pub hidpi: bool,
+    /// The size to capture and send it at, if smaller than the display: faster to encode,
+    /// decode and draw, a little softer. `0` for the display's own size.
+    pub stream_width: u32,
+    pub stream_height: u32,
     pub fps: u32,
     /// Bits per second.
     pub bitrate: u32,
@@ -246,10 +250,13 @@ pub struct VideoFrameHeader {
     /// How long the sender spent on the frame, in microseconds: from the picture appearing
     /// on its display to the frame being sent (capture, encoding, queueing).
     pub sender_us: u32,
+    /// Pictures the sender skipped (the network backed up) or its encoder dropped since
+    /// the previous frame.
+    pub skipped: u16,
 }
 
 impl VideoFrameHeader {
-    pub const SIZE: usize = 9;
+    pub const SIZE: usize = 11;
     /// Larger frames are refused.
     pub const MAX_LEN: u32 = 32 * 1024 * 1024;
 
@@ -257,7 +264,8 @@ impl VideoFrameHeader {
         let mut out = [0u8; Self::SIZE];
         out[..4].copy_from_slice(&self.len.to_le_bytes());
         out[4] = u8::from(self.keyframe);
-        out[5..].copy_from_slice(&self.sender_us.to_le_bytes());
+        out[5..9].copy_from_slice(&self.sender_us.to_le_bytes());
+        out[9..].copy_from_slice(&self.skipped.to_le_bytes());
         out
     }
 
@@ -266,7 +274,8 @@ impl VideoFrameHeader {
         (len <= Self::MAX_LEN && bytes[4] <= 1).then_some(Self {
             len,
             keyframe: bytes[4] == 1,
-            sender_us: u32::from_le_bytes(bytes[5..].try_into().ok()?),
+            sender_us: u32::from_le_bytes(bytes[5..9].try_into().ok()?),
+            skipped: u16::from_le_bytes(bytes[9..].try_into().ok()?),
         })
     }
 }
@@ -436,6 +445,8 @@ mod tests {
                 width: 3840,
                 height: 2160,
                 hidpi: true,
+                stream_width: 2560,
+                stream_height: 1440,
                 fps: 60,
                 bitrate: 40_000_000,
             }),
@@ -450,6 +461,8 @@ mod tests {
                 width: 2560,
                 height: 1440,
                 hidpi: true,
+                stream_width: 0,
+                stream_height: 0,
                 fps: 120,
                 bitrate: 30_000_000,
             }),
@@ -471,6 +484,7 @@ mod tests {
             len: 123_456,
             keyframe: true,
             sender_us: 21_500,
+            skipped: 3,
         };
         assert_eq!(VideoFrameHeader::decode(header.encode()), Some(header));
         let mut huge = header.encode();

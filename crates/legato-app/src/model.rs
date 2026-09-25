@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use legato_engine::Config;
-use legato_engine::config::{Placement, Resolution};
+use legato_engine::config::{Placement, Quality, Resolution};
 use legato_net::{EndpointId, PathKind};
 use legato_proto::{Os, Screens};
 
@@ -85,6 +85,7 @@ pub struct DisplayOptions {
     /// For full screen: which of this machine's displays, 1-based, left to right.
     pub display: usize,
     pub resolution: Resolution,
+    pub quality: Quality,
     pub fixed: (u32, u32),
     pub fps: u32,
 }
@@ -96,6 +97,7 @@ impl DisplayOptions {
             placement: extend.placement.unwrap_or(Placement::FullScreen),
             display: extend.display.max(1),
             resolution: extend.resolution,
+            quality: extend.quality,
             fixed: (extend.width, extend.height),
             fps: extend.fps,
         }
@@ -105,6 +107,7 @@ impl DisplayOptions {
         extend.placement = Some(self.placement);
         extend.display = self.display;
         extend.resolution = self.resolution;
+        extend.quality = self.quality;
         (extend.width, extend.height) = self.fixed;
         extend.fps = self.fps;
     }

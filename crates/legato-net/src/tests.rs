@@ -294,6 +294,7 @@ async fn video_frames_arrive_in_order() {
             data: vec![i as u8; 1000 + i as usize * 5000],
             keyframe: i % 10 == 0,
             sender_time: Duration::from_micros(15_000 + u64::from(i) * 10),
+            skipped: (i % 3) as u16,
         })
         .collect();
     let sender = {
@@ -302,7 +303,7 @@ async fn video_frames_arrive_in_order() {
             let mut video = a_session.open_video().await.unwrap();
             for f in &frames {
                 video
-                    .send(&f.data, f.keyframe, f.sender_time)
+                    .send(&f.data, f.keyframe, f.sender_time, f.skipped)
                     .await
                     .unwrap();
             }
