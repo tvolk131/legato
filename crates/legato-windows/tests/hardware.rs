@@ -375,8 +375,28 @@ fn click(down: bool) {
     }]);
 }
 
+/// What `WindowFromPoint` finds at `(x, y)`: its class name, and whether its top-level
+/// window is `viewer`.
+fn window_at(x: i32, y: i32, viewer: windows::Win32::Foundation::HWND) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GA_ROOT, GetAncestor, GetClassNameW, WindowFromPoint,
+    };
+    unsafe {
+        let under = WindowFromPoint(POINT { x, y });
+        let root = GetAncestor(under, GA_ROOT);
+        let mut name = [0u16; 128];
+        let len = GetClassNameW(root, &mut name) as usize;
+        format!(
+            "{}{}",
+            String::from_utf16_lossy(&name[..len]),
+            if root == viewer { " (the viewer)" } else { "" }
+        )
+    }
+}
+
 /// Virtual monitor mode: with the pointer over the viewer's picture, clicks and keys go
-/// to the Mac whether or not the viewer window has focus, and however busy its thread is.
+/// to the Mac whether or not the viewer window has focus, however busy its thread is, and
+/// even with no motion since the viewer appeared or since the Mac took its cursor back.
 #[test]
 #[ignore = "moves the cursor and shows a window"]
 fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
@@ -423,50 +443,93 @@ fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
         primary.center().x as i32 - w / 2,
         primary.center().y as i32 - h / 2,
     );
-    let mut failures = Vec::new();
-    for (focused, busy_ms) in [(false, 0), (true, 0), (false, 40), (true, 40)] {
-        let viewer = viewer::Viewer::open(x, y, w, h, Duration::from_millis(busy_ms));
-        let has_focus = focused && viewer.focus();
-        capture.send(Command::SetPortal(Some(Portal {
-            peer: PEER,
-            remote: Rect::new(1512.0, 0.0, 1920.0, 1080.0),
-            window: viewer.hwnd.0 as usize as u64,
-        })));
-        std::thread::sleep(Duration::from_millis(100));
-        unsafe { SetCursorPos(x + w / 2, y + h / 2).unwrap() };
-        mouse_move(3, 0);
-        mouse_move(-3, 0);
-        click(true);
-        click(false);
-        for _ in 0..3 {
-            key(0x64, true); // F13
-            key(0x64, false);
-        }
+    let (cx, cy) = (x + w / 2, y + h / 2);
+    // What went to the peer since the last call: (entered, clicks, keys).
+    let sent = || {
         std::thread::sleep(Duration::from_millis(100));
         let actions: Vec<Action> = rx.try_iter().collect();
-        let sent = |m: &dyn Fn(&Control) -> bool| {
+        let count = |m: &dyn Fn(&Control) -> bool| {
             actions
                 .iter()
                 .filter(|a| matches!(a, Action::Send { to: PEER, msg } if m(msg)))
                 .count()
         };
-        let entered = sent(&|m| matches!(m, Control::Enter { .. }));
-        let clicks = sent(&|m| matches!(m, Control::Button { .. }));
-        let keys = sent(&|m| matches!(m, Control::Key { usage: 0x68, .. }));
+        (
+            count(&|m| matches!(m, Control::Enter { .. })),
+            count(&|m| matches!(m, Control::Button { .. })),
+            count(&|m| matches!(m, Control::Key { usage: 0x68, .. })),
+        )
+    };
+    let press = || {
+        key(0x64, true); // F13
+        key(0x64, false);
+    };
+    let mut failures = Vec::new();
+    for (focused, busy_ms) in [(false, 0), (true, 0), (false, 40), (true, 40)] {
+        let viewer = viewer::Viewer::open(x, y, w, h, Duration::from_millis(busy_ms));
+        let has_focus = focused && viewer.focus();
         let case = format!(
             "viewer focused: {has_focus} (asked {focused}), its thread busy {busy_ms} ms per \
-             message: entered {entered}, clicks {clicks}/2, keys {keys}/6"
+             message, under the pointer: {}",
+            window_at(cx, cy, viewer.hwnd)
         );
         eprintln!("{case}");
-        if entered == 0 || clicks != 2 || keys != 6 {
-            failures.push(case);
-        }
+        let mut check = |what: &str, got: (usize, usize, usize), want: (usize, usize, usize)| {
+            let line = format!(
+                "  {what}: entered {}, clicks {}, keys {}",
+                got.0, got.1, got.2
+            );
+            eprintln!("{line}");
+            if got != want {
+                failures.push(format!("{case}\n{line}, wanted {want:?}"));
+            }
+        };
+
+        // The viewer appears under a resting pointer.
+        unsafe { SetCursorPos(cx, cy).unwrap() };
+        std::thread::sleep(Duration::from_millis(50));
+        capture.send(Command::SetPortal(Some(Portal {
+            peer: PEER,
+            remote: Rect::new(1512.0, 0.0, 1920.0, 1080.0),
+            window: viewer.hwnd.0 as usize as u64,
+        })));
+        let _ = sent();
+        press();
+        check("typing before any motion", sent(), (1, 0, 2));
+
+        mouse_move(3, 0);
+        mouse_move(-3, 0);
+        click(true);
+        click(false);
+        press();
+        check("moving, clicking and typing", sent(), (0, 2, 2));
+
+        // The Mac's own trackpad or keyboard was used, so it took its cursor back.
+        capture.send(Command::Event(Event::PeerYield(PEER)));
+        let _ = sent();
+        click(true);
+        click(false);
+        press();
+        check(
+            "clicking after the Mac took over, without moving",
+            sent(),
+            (1, 2, 2),
+        );
+
+        capture.send(Command::Event(Event::PeerYield(PEER)));
+        let _ = sent();
+        press();
+        check(
+            "typing after the Mac took over, without moving",
+            sent(),
+            (1, 0, 2),
+        );
+
         // Off the picture before the next case.
         unsafe { SetCursorPos(x - 50, y - 50).unwrap() };
         mouse_move(-3, 0);
         capture.send(Command::SetPortal(None));
-        std::thread::sleep(Duration::from_millis(100));
-        let _ = rx.try_iter().count();
+        let _ = sent();
         drop(viewer);
     }
     drop(capture);
