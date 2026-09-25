@@ -1,11 +1,18 @@
 # Publishes a GitHub prerelease with downloadable binaries when a version tag is pushed,
 # e.g. `git tag v0.1.0-alpha.1 && git push origin v0.1.0-alpha.1`. Release notes come from
 # docs/releases/<tag>.md if it exists.
+#
+# Pushes to main run the same builds but only to fill the cache: a tag's run can restore
+# caches made on main (not ones from other tags), so a release then only rebuilds
+# Legato's own crates instead of every dependency.
 name: release
 
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    # Docs don't change the build. (Path filters never apply to tags.)
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   workflow_dispatch:
     inputs:
       tag:
@@ -14,6 +21,12 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  # A newer push to main supersedes a cache warm-up that's still running; releases always
+  # run to the end.
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,17 +56,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # Real-time scanning of every file the compiler writes slows Windows builds a lot.
+      - name: keep Defender out of the build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+          "Defender real-time protection was on: $($status.RealTimeProtectionEnabled)"
+          $cargo = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$env:USERPROFILE\.cargo" }
+          $rustup = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { "$env:USERPROFILE\.rustup" }
+          Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, $cargo, $rustup -ErrorAction SilentlyContinue
       - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache per target, shared by main's warm-ups and the tags' releases.
+          shared-key: release-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: build
         shell: bash
         run: |
-          cargo build --locked --release -p legato-cli --target ${{ matrix.target }}
-          # The app arrived after the first alpha; build it when the tag has it.
-          if [ -d crates/legato-app ]; then
-            cargo build --locked --release -p legato-app --target ${{ matrix.target }}
-          fi
+          # One cargo run for both, so shared dependencies are built once with one set of
+          # features. (The app arrived after the first alpha: build it when it's there.)
+          packages="-p legato-cli"
+          if [ -d crates/legato-app ]; then packages="$packages -p legato-app"; fi
+          cargo build --locked --release $packages --target ${{ matrix.target }}
       - name: package (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.ref != 'refs/heads/main'
         shell: pwsh
         run: |
           $dir = "legato-$env:TAG-${{ matrix.name }}"
@@ -71,7 +98,7 @@ jobs:
           Copy-Item README.md, LICENSE $dir/
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
       - name: package (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.ref != 'refs/heads/main'
         run: |
           dir="legato-$TAG-${{ matrix.name }}"
           out="target/${{ matrix.target }}/release"
@@ -87,6 +114,7 @@ jobs:
           fi
           tar czf "$dir.tar.gz" "$dir"
       - uses: actions/upload-artifact@v7
+        if: github.ref != 'refs/heads/main'
         with:
           name: ${{ matrix.name }}
           path: |
@@ -96,6 +124,7 @@ jobs:
 
   publish:
     needs: build
+    if: github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
