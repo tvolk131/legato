@@ -21,14 +21,18 @@ mod imp {
     }
 
     pub fn check_permissions() -> anyhow::Result<()> {
-        if !legato_macos::Permissions::check().all_granted() {
-            legato_macos::request_accessibility();
-            anyhow::bail!(
-                "Legato needs Accessibility access. Allow it in System Settings → Privacy & \
-                 Security → Accessibility, then start sharing again."
-            );
+        let permissions = legato_macos::Permissions::check();
+        if permissions.all_granted() {
+            return Ok(());
         }
-        Ok(())
+        legato_macos::request_missing(&permissions);
+        let missing = permissions.missing().join(" and ");
+        anyhow::bail!(
+            "Legato needs {missing} access. Allow it in System Settings → Privacy & Security \
+             → {missing}, then start sharing again. If Legato is already listed there and \
+             switched on, it's for an earlier version: remove it with − and add Legato again \
+             with +."
+        );
     }
 
     pub use legato_macos::{clipboard_change_count, receiver_config};

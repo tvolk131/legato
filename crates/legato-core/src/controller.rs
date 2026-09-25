@@ -67,9 +67,13 @@ pub enum Event {
     /// cursor may cross with the button held; releasing it on a peer drops them there.
     Carrying(Option<Vec<std::path::PathBuf>>),
     /// The pointer moved over the picture in the [`Portal`] window, to `at` (0..1 across
-    /// and down the picture). Sent instead of `LocalMotion` while it's there.
+    /// and down the picture). Sent instead of `LocalMotion` while it's there, with the
+    /// same `pos` and `attempted` (a full-screen portal can be pushed past its screen's
+    /// edge).
     PortalMotion {
         at: Point,
+        pos: Point,
+        attempted: Point,
     },
 }
 
@@ -133,6 +137,9 @@ pub enum Action {
     Capture,
     /// Stop capturing and show the local cursor at `warp` (local native coordinates).
     Release { warp: Point },
+    /// Stop capturing and show the local cursor over the portal's picture, at `at` (0..1
+    /// across and down it): the peer's cursor moved onto the display the portal shows.
+    EnterPortal { at: Point },
     /// The user let go of dragged files over a peer: send them there.
     Drop {
         to: MachineId,
@@ -336,7 +343,9 @@ impl Controller {
                 self.carrying = files;
                 Verdict::Pass
             }
-            Event::PortalMotion { at } => self.portal_motion(at, out),
+            Event::PortalMotion { at, pos, attempted } => {
+                self.portal_motion(now, at, pos, attempted, out)
+            }
             Event::PeerYield(peer) | Event::PeerLost(peer) => {
                 let yielded = matches!(event, Event::PeerYield(_));
                 if self.active_peer() == Some(peer) {
@@ -355,7 +364,16 @@ impl Controller {
         attempted: Point,
         out: &mut Vec<Action>,
     ) -> Verdict {
-        if let State::Portal { peer, .. } = self.state {
+        if let State::Portal { peer, pos: at } = self.state {
+            if self.holding_on(peer) {
+                // Dragging something off the portal's picture: carry on on the peer's own
+                // displays rather than letting go at the edge.
+                let dir = self
+                    .portal
+                    .map_or(Dir::Left, |p| nearest_edge(p.remote, at));
+                self.portal_to_remote(peer, dir, pos, out);
+                return Verdict::Swallow;
+            }
             // Off the portal's picture: back to this machine.
             self.leave_portal(peer, out);
         }
@@ -363,41 +381,7 @@ impl Controller {
             // Shouldn't happen while captured; don't let it move the shared cursor.
             return Verdict::Swallow;
         }
-        let layout = &self.layout;
-        let local = layout.local();
-        let Some(display) = local
-            .screens
-            .displays
-            .iter()
-            .map(|d| d.bounds)
-            .find(|b| b.contains(pos))
-            .or_else(|| nearest_rect(local.screens.displays.iter().map(|d| d.bounds), pos))
-        else {
-            return Verdict::Pass;
-        };
-
-        // Which edges of its display is the pointer sitting on, and pushing into?
-        let attempted_desk = scale(attempted, local.desk_per_native());
-        let mut candidate = None;
-        for dir in [Dir::Left, Dir::Right, Dir::Up, Dir::Down] {
-            let pushing = dir.component(attempted_desk);
-            if pushing <= 0.0 || !at_native_edge(display, pos, dir) {
-                continue;
-            }
-            // Probe just beyond the edge on the desk.
-            let edge = edge_point_native(display, pos, dir);
-            let beyond = add(local.to_desk(edge), scale(dir.unit(), 0.5));
-            match layout.display_at(beyond) {
-                // Another local display: the OS moves the cursor there itself.
-                Some((MachineId::LOCAL, _)) | None => {}
-                Some((target, _)) => {
-                    candidate = Some((target, dir, pushing, beyond));
-                    break;
-                }
-            }
-        }
-
-        let Some((target, dir, pushing, entry)) = candidate else {
+        let Some((target, dir, pushing, entry)) = self.edge_crossing(pos, attempted) else {
             self.push = None;
             return Verdict::Pass;
         };
@@ -409,7 +393,78 @@ impl Controller {
         Verdict::Swallow
     }
 
-    fn portal_motion(&mut self, at: Point, out: &mut Vec<Action>) -> Verdict {
+    /// The peer beyond the edge of this machine's displays that the pointer at `pos` is
+    /// pushing into, with the direction, how far it pushed (desk units), and where it
+    /// would enter (desk).
+    fn edge_crossing(&self, pos: Point, attempted: Point) -> Option<(MachineId, Dir, f64, Point)> {
+        let layout = &self.layout;
+        let local = layout.local();
+        let display = local
+            .screens
+            .displays
+            .iter()
+            .map(|d| d.bounds)
+            .find(|b| b.contains(pos))
+            .or_else(|| nearest_rect(local.screens.displays.iter().map(|d| d.bounds), pos))?;
+        // Which edges of its display is the pointer sitting on, and pushing into?
+        let attempted_desk = scale(attempted, local.desk_per_native());
+        for dir in [Dir::Left, Dir::Right, Dir::Up, Dir::Down] {
+            let pushing = dir.component(attempted_desk);
+            if pushing <= 0.0 || !at_native_edge(display, pos, dir) {
+                continue;
+            }
+            // Probe just beyond the edge on the desk.
+            let edge = edge_point_native(display, pos, dir);
+            let beyond = add(local.to_desk(edge), scale(dir.unit(), 0.5));
+            match layout.display_at(beyond) {
+                // Another local display: the OS moves the cursor there itself.
+                Some((MachineId::LOCAL, _)) | None => {}
+                Some((target, _)) => return Some((target, dir, pushing, beyond)),
+            }
+        }
+        None
+    }
+
+    /// Whether a mouse button pressed on `peer` is still held (e.g. dragging a window).
+    fn holding_on(&self, peer: MachineId) -> bool {
+        self.buttons.values().any(|&r| r == Route::Peer(peer))
+    }
+
+    /// Moves from the portal onto the peer's own displays, next to the portal's display
+    /// in direction `dir`, keeping everything held: it's the same machine.
+    fn portal_to_remote(
+        &mut self,
+        peer: MachineId,
+        dir: Dir,
+        return_to: Point,
+        out: &mut Vec<Action>,
+    ) {
+        let State::Portal { pos, .. } = self.state else {
+            return;
+        };
+        let Some(machine) = self.layout.machine(peer) else {
+            return;
+        };
+        let beyond = add(pos, scale(dir.unit(), 2.0));
+        let cursor = self.clamp_to_machine(peer, machine.to_desk(beyond));
+        self.state = State::Remote {
+            peer,
+            cursor,
+            return_to,
+        };
+        self.push = None;
+        out.push(Action::Capture);
+        self.send_motion(peer, cursor, out);
+    }
+
+    fn portal_motion(
+        &mut self,
+        now: Instant,
+        at: Point,
+        local: Point,
+        attempted: Point,
+        out: &mut Vec<Action>,
+    ) -> Verdict {
         let Some(portal) = self.portal else {
             return Verdict::Pass;
         };
@@ -443,7 +498,48 @@ impl Controller {
             peer: portal.peer,
             pos,
         };
+        // A full-screen portal has no local screen around it to leave onto: pushing past
+        // its screen's edge towards the same peer carries on on the peer's displays.
+        match self.edge_crossing(local, attempted) {
+            Some((target, dir, pushing, _)) if target == portal.peer => {
+                if self.accumulate_push(now, target, dir, pushing) {
+                    self.portal_to_remote(portal.peer, dir, local, out);
+                    return Verdict::Swallow;
+                }
+            }
+            _ => self.push = None,
+        }
         Verdict::Pass
+    }
+
+    /// If `wanted` (desk) is on the display the portal shows, moves there: the local
+    /// cursor reappears over the picture, and everything held stays held.
+    fn remote_to_portal(&mut self, peer: MachineId, wanted: Point, out: &mut Vec<Action>) -> bool {
+        let Some(portal) = self.portal.filter(|p| p.peer == peer) else {
+            return false;
+        };
+        let Some(machine) = self.layout.machine(peer) else {
+            return false;
+        };
+        let native = machine.to_native(wanted);
+        let r = portal.remote;
+        if !r.contains(native) {
+            return false;
+        }
+        self.state = State::Portal { peer, pos: native };
+        self.push = None;
+        self.seq = self.seq.wrapping_add(1);
+        out.push(Action::Datagram {
+            to: peer,
+            msg: Datagram::Motion {
+                seq: self.seq,
+                pos: native,
+            },
+        });
+        out.push(Action::EnterPortal {
+            at: Point::new((native.x - r.x) / r.width, (native.y - r.y) / r.height),
+        });
+        true
     }
 
     fn leave_portal(&mut self, peer: MachineId, out: &mut Vec<Action>) {
@@ -456,6 +552,9 @@ impl Controller {
             return;
         };
         let wanted = add(cursor, scale(delta, self.layout.local().desk_per_native()));
+        if self.remote_to_portal(peer, wanted, out) {
+            return;
+        }
         let clamped = self.clamp_to_machine(peer, wanted);
         let overshoot = sub(wanted, clamped);
 
@@ -743,6 +842,19 @@ impl Controller {
         }
         best.map_or(p, |(_, c)| c)
     }
+}
+
+/// The edge of `r` nearest to `p`.
+fn nearest_edge(r: Rect, p: Point) -> Dir {
+    [
+        (Dir::Left, p.x - r.left()),
+        (Dir::Right, r.right() - p.x),
+        (Dir::Up, p.y - r.top()),
+        (Dir::Down, r.bottom() - p.y),
+    ]
+    .into_iter()
+    .min_by(|a, b| a.1.total_cmp(&b.1))
+    .map_or(Dir::Left, |(d, _)| d)
 }
 
 fn clamp_into(r: Rect, p: Point, eps: f64) -> Point {

@@ -376,6 +376,14 @@ fn permissions_report() {
             }
         );
         println!(
+            "  Input Monitoring: {}",
+            if p.listen_events {
+                "granted"
+            } else {
+                "MISSING (System Settings → Privacy & Security → Input Monitoring)"
+            }
+        );
+        println!(
             "  Screen Recording: {}",
             if p.screen_recording {
                 "granted"

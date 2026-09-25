@@ -174,7 +174,8 @@ pub(crate) async fn run(
                     Action::Release { .. } => {
                         let _ = active_tx.send(None);
                     }
-                    Action::Capture => {}
+                    // Still on the same peer, just shown in the portal window again.
+                    Action::Capture | Action::EnterPortal { .. } => {}
                     Action::Drop { to, files } => {
                         if let Some(s) = sessions.get(&to) {
                             let _ = dropped_tx.send((s.clone(), files));

@@ -154,7 +154,7 @@ impl State {
 
     fn drain(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
-        for action in self.out.drain(..) {
+        for action in std::mem::take(&mut self.out) {
             match action {
                 Action::Capture => {
                     let pin = pin_point(&self.controller);
@@ -169,6 +169,20 @@ impl State {
                     self.last_pos = Some(to);
                     effects.push(Effect::Unpin(to));
                     (self.sink)(Action::Release { warp });
+                }
+                Action::EnterPortal { at } => {
+                    // Back over the portal's picture, where the peer's cursor now is.
+                    self.pin = None;
+                    let to = self.portal_picture().map_or_else(
+                        || pin_point(&self.controller),
+                        |p| POINT {
+                            x: (p.x + at.x * p.width) as i32,
+                            y: (p.y + at.y * p.height) as i32,
+                        },
+                    );
+                    self.last_pos = Some(to);
+                    effects.push(Effect::Unpin(to));
+                    (self.sink)(Action::EnterPortal { at });
                 }
                 other => (self.sink)(other),
             }
@@ -222,7 +236,11 @@ impl State {
                     self.raw = (0, 0);
                     self.last_pos = Some(pos);
                     if let Some(at) = self.portal_hit(pos) {
-                        return self.handle(Event::PortalMotion { at });
+                        return self.handle(Event::PortalMotion {
+                            at,
+                            pos: Point::new(pos.x as f64, pos.y as f64),
+                            attempted,
+                        });
                     }
                     let at = Point::new(pos.x as f64, pos.y as f64);
                     // Dragging against an edge that leads somewhere: offer to catch files.
@@ -288,12 +306,28 @@ impl State {
     fn portal_hit(&self, pos: POINT) -> Option<Point> {
         let portal = self.controller.portal()?;
         let window = HWND(portal.window as usize as *mut core::ffi::c_void);
+        // SAFETY: a window query; a stale handle just fails it.
+        let under = unsafe { WindowFromPoint(pos) };
+        // SAFETY: as above.
+        if under.is_invalid() || unsafe { GetAncestor(under, GA_ROOT) } != window {
+            return None;
+        }
+        let picture = self.portal_picture()?;
+        let p = Point::new(pos.x as f64, pos.y as f64);
+        picture.contains(p).then(|| {
+            Point::new(
+                (p.x - picture.x) / picture.width,
+                (p.y - picture.y) / picture.height,
+            )
+        })
+    }
+
+    /// Where the portal window draws the peer's display, in screen coordinates.
+    fn portal_picture(&self) -> Option<Rect> {
+        let portal = self.controller.portal()?;
+        let window = HWND(portal.window as usize as *mut core::ffi::c_void);
         // SAFETY: window queries; a stale handle just fails them.
         unsafe {
-            let under = WindowFromPoint(pos);
-            if under.is_invalid() || GetAncestor(under, GA_ROOT) != window {
-                return None;
-            }
             let mut client = RECT::default();
             GetClientRect(window, &mut client).ok()?;
             let mut origin = POINT::default();
@@ -306,17 +340,10 @@ impl State {
                 (client.right - client.left) as f64,
                 (client.bottom - client.top) as f64,
             );
-            let picture = legato_core::controller::fit_picture(
+            Some(legato_core::controller::fit_picture(
                 (portal.remote.width, portal.remote.height),
                 area,
-            );
-            let p = Point::new(pos.x as f64, pos.y as f64);
-            picture.contains(p).then(|| {
-                Point::new(
-                    (p.x - picture.x) / picture.width,
-                    (p.y - picture.y) / picture.height,
-                )
-            })
+            ))
         }
     }
 
