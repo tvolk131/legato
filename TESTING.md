@@ -145,15 +145,18 @@ The Mac encodes and Windows decodes, so the two ends are tested against each oth
 - **Decoder (Windows, every PR):** Media Foundation decodes `crates/legato-screen/tests/fixtures/pattern.frames`, which the encoder test wrote, and checks the colours of every frame. It also checks that low-latency mode gives one picture per frame. Regenerate the fixture on a Mac with `LEGATO_WRITE_FIXTURES=1 cargo test -p legato-screen --test mac_encoder`.
 - **Virtual display (macOS, ignored):** the display appears with the requested point and pixel size and Legato's vendor and product ids. It switches to 144 Hz and to other sizes while shown (in about 0.2–0.3 s), and goes away when dropped. A process without an AppKit application can only show one virtual display in its lifetime (CoreGraphics stops reporting modes for later ones in that process), so each display test is in its own test binary.
 - **Encode latency (macOS, ignored benchmark):** `cargo test -p legato-screen --release --test mac_encoder -- --ignored --nocapture`. On Apple silicon, each frame takes about 16 ms at 4K and 8 ms at 1440p when forced out right away. Left to itself, VideoToolbox keeps about five frames in flight (about 80 ms at 60 fps), so the stream waits for each frame.
-- **Capture (macOS, ignored; needs Screen Recording):** a virtual display streams a keyframe first, and a keyframe on request even while nothing on it changes.
+- **Scaling (macOS, every PR):** a picture scaled down on the GPU for adaptive quality keeps its colours and encodes. `scaling_latency` (ignored benchmark) times 4K scaled to 1080p and 1440p: about 3 ms either way.
+- **Adaptive quality (pure):** small changes stay on the sharp track, and so does a single big one; sustained movement switches to the moving track at once and back after 150 ms of stillness, with one touch-up later. The sharp track keeps to its frame rate without losing the last picture, keyframes go to the track asked for, and a picture held up by the network is sent once it clears. The viewer shows the newest picture of either track and merges both tracks' stats.
+- **Capture (macOS, ignored; needs Screen Recording):** a virtual display streams a keyframe first on each track it uses, both tracks share one clock, and a keyframe comes on request even while nothing on it changes, with adaptive quality and without.
 - **Portal (pure core):** motion over the picture places the Mac cursor absolutely, and input over it goes to the Mac. Leaving (without a button held), closing, yielding and losing the Mac each end it. Dragging off the picture continues on the MacBook's screen, moving onto the extra display from the MacBook enters the portal, and pushing past a full-screen portal's edge towards the Mac crosses over, all without telling the Mac the cursor left.
 - **Placement and budgets (pure core):** frame-rate limits by size; the extra display goes above the MacBook for the monitor above it, beside it for a window beside it, and on the dominant side for a diagonal monitor.
-- **Video stream (in-process network):** frames arrive intact and in order, and the stream ends cleanly.
+- **Video stream (in-process network):** frames arrive intact and in order on their track, and the stream ends cleanly.
 
 Lab checklist:
 - text is sharp at 100% zoom in full screen on a 4K monitor
 - the Windows pointer lines up with where the Mac clicks, including at the picture's edges and in letterboxed windows
 - latency feels close to a local display when dragging windows on it
+- with adaptive quality: dragging and scrolling switch to the smaller picture (the stats say "while moving"), typing and a single tab switch stay sharp, and the picture sharpens a moment after things stop
 - moving windows onto the display from the Mac's own screen, and back
 - rearranging displays in System Settings while it's shown
 - closing the viewer, stopping from the Mac, quitting either app, and pulling the network cable all remove the display

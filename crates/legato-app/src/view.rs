@@ -66,9 +66,10 @@ pub fn stats_text(
     let total = stats.mac + stats.network + stats.decode + display;
     [
         format!(
-            "{}×{} · {:.0} fps · {:.1} Mbit/s · {}",
+            "{}×{}{} · {:.0} fps · {:.1} Mbit/s · {}",
             stats.width,
             stats.height,
+            if stats.moving { " while moving" } else { "" },
             stats.fps,
             stats.megabits_per_second,
             if stats.relayed { "via relay" } else { "direct" }
@@ -463,7 +464,7 @@ const FIXED_SIZES: [(u32, u32); 3] = [(3840, 2160), (2560, 1440), (1920, 1080)];
 
 fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
     use iced_m3::{RadioOption, radio_group};
-    use legato_engine::config::{Placement, Quality, Resolution};
+    use legato_engine::config::{MovingSize, Placement, Quality, Resolution};
     let Some(o) = m.display_options.clone() else {
         return dialog(column![]);
     };
@@ -545,6 +546,10 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
     };
 
     let qualities = [
+        (
+            Quality::Adaptive,
+            "Adaptive: full resolution, smaller while things move",
+        ),
         (Quality::Sharpest, "Sharpest: full resolution"),
         (
             Quality::Balanced,
@@ -562,9 +567,37 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
             })
         })
     };
-    // Encoding sets the pace, at the size it's sent at.
-    let sent = size.map(|size| o.quality.stream_size(size));
-    let max = sent.map(|(w, h)| legato_core::extend::max_fps(w, h));
+    let moving_sizes = [
+        (MovingSize::Hd, "Up to 1920×1080: the quickest"),
+        (MovingSize::Qhd, "Up to 2560×1440: sharper, a little slower"),
+    ]
+    .map(|(size, label)| RadioOption::new(size, label));
+    let moving_choice = {
+        let o = o.clone();
+        radio_group(moving_sizes, Some(o.while_moving)).on_select(move |while_moving| {
+            changed(crate::model::DisplayOptions {
+                while_moving,
+                ..o.clone()
+            })
+        })
+    };
+    // What the Mac would be asked for at the fastest rate: encoding sets the pace.
+    let fastest = *legato_core::extend::FRAME_RATES.last().unwrap_or(&60);
+    let request = size.map(|(w, h)| {
+        let mut extend = m.config.extend.clone();
+        o.save_to(&mut extend);
+        extend.fps = fastest;
+        extend.request_for(w, h)
+    });
+    let max = match (request, o.quality) {
+        (Some(r), _) => Some(r.fps),
+        // In a window of any size, moving pictures are at most this big.
+        (None, Quality::Adaptive) => {
+            let (w, h) = o.while_moving.cap();
+            Some(legato_core::extend::max_fps(w, h))
+        }
+        (None, _) => None,
+    };
     let rates = legato_core::extend::FRAME_RATES.map(|fps| {
         RadioOption::new(fps, format!("{fps} fps")).disabled(max.is_some_and(|max| fps > max))
     });
@@ -574,11 +607,24 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
         radio_group(rates, Some(fps))
             .on_select(move |fps| changed(crate::model::DisplayOptions { fps, ..o.clone() }))
     };
-    let rate_note = match (sent, max) {
-        (Some((w, h)), Some(max)) => format!(
-            "Sent at {w}×{h}, the Mac can keep up with {max} fps. Smaller sizes can go faster."
+    let rate_note = match request {
+        Some(r) if r.moving_width > 0 => format!(
+            "Sent at {}×{} while things move, the Mac can keep up with {} fps. When still, \
+             it's sent at the full {}×{}.",
+            r.moving_width, r.moving_height, r.fps, r.stream_width, r.stream_height
         ),
-        _ => "Limited to what the Mac can keep up with at the window's size: 60 fps at 4K, \
+        Some(r) => format!(
+            "Sent at {}×{}, the Mac can keep up with {} fps. Smaller sizes can go faster.",
+            r.stream_width, r.stream_height, r.fps
+        ),
+        None if o.quality == Quality::Adaptive => {
+            let (w, h) = o.while_moving.cap();
+            format!(
+                "Sent at up to {w}×{h} while things move, so up to {} fps.",
+                max.unwrap_or(fastest)
+            )
+        }
+        None => "Limited to what the Mac can keep up with at the window's size: 60 fps at 4K, \
               120 at 2560×1440, 144 at 1920×1080."
             .to_string(),
     };
@@ -594,11 +640,17 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
         size_choice,
         heading("Stream quality"),
         quality_choice,
-        heading("Frame rate"),
-        rate_choice,
-        body(rate_note),
     ]
     .spacing(8);
+    let content = if o.quality == Quality::Adaptive {
+        content.push(heading("While moving")).push(moving_choice)
+    } else {
+        content
+    };
+    let content = content
+        .push(heading("Frame rate"))
+        .push(rate_choice)
+        .push(body(rate_note));
     dialog(scrollable(content).height(Length::Shrink))
         .actions(
             row![

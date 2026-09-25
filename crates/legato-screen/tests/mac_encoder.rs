@@ -66,9 +66,96 @@ fn encoder_produces_a_decodable_stream() {
 
 fn pixel_buffer(nv12: &[u8]) -> objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer> {
     use legato_screen::test_pattern::{HEIGHT, WIDTH};
+    nv12_buffer(WIDTH as usize, HEIGHT as usize, nv12)
+}
+
+/// Adaptive quality's smaller picture: scaled on the GPU, then encoded.
+#[test]
+fn pictures_scale_down_for_the_moving_track() {
+    use legato_screen::mac::scale::Scaler;
+    use legato_screen::mac::{Encoder, EncoderConfig};
+    use legato_screen::test_pattern::colors;
+    use objc2_core_video::*;
+    use std::sync::{Arc, Mutex};
+
+    let (w, h) = (1280, 720);
+    let [left, right] = colors(3);
+    let mut nv12 = vec![0u8; w * h * 3 / 2];
+    for y in 0..h {
+        for x in 0..w {
+            nv12[y * w + x] = if x < w / 2 { left.0 } else { right.0 };
+        }
+    }
+    for i in (w * h..nv12.len()).step_by(2) {
+        let x = (i - w * h) % w;
+        let (u, v) = if x < w / 2 {
+            (left.1, left.2)
+        } else {
+            (right.1, right.2)
+        };
+        nv12[i] = u;
+        nv12[i + 1] = v;
+    }
+    let big = nv12_buffer(w, h, &nv12);
+    let scaler = Scaler::new(640, 360).unwrap();
+    let small = scaler.scale(&big).unwrap();
+    assert_eq!(
+        (
+            CVPixelBufferGetWidth(&small),
+            CVPixelBufferGetHeight(&small)
+        ),
+        (640, 360)
+    );
+    assert_eq!(
+        CVPixelBufferGetPixelFormatType(&small),
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    );
+    // SAFETY: reading the luma plane of a locked 640x360 buffer.
+    let (l, r) = unsafe {
+        CVPixelBufferLockBaseAddress(&small, CVPixelBufferLockFlags::ReadOnly);
+        let base = CVPixelBufferGetBaseAddressOfPlane(&small, 0) as *const u8;
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(&small, 0);
+        let at = |x: usize, y: usize| *base.add(y * stride + x);
+        let sample = (at(160, 180), at(480, 180));
+        CVPixelBufferUnlockBaseAddress(&small, CVPixelBufferLockFlags::ReadOnly);
+        sample
+    };
+    assert!(
+        l.abs_diff(left.0) <= 2 && r.abs_diff(right.0) <= 2,
+        "{l} {r}"
+    );
+
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let encoder = {
+        let frames = frames.clone();
+        Encoder::new(
+            EncoderConfig {
+                width: 640,
+                height: 360,
+                fps: 60,
+                bitrate: 4_000_000,
+            },
+            move |f| frames.lock().unwrap().push(f.unwrap()),
+        )
+        .unwrap()
+    };
+    encoder.encode_now(&small, Duration::ZERO, true).unwrap();
+    let again = scaler.scale(&big).unwrap();
+    encoder
+        .encode_now(&again, Duration::from_millis(16), false)
+        .unwrap();
+    let frames = frames.lock().unwrap();
+    assert_eq!(frames.len(), 2);
+    assert!(frames[0].keyframe && !frames[1].keyframe);
+}
+
+fn nv12_buffer(
+    w: usize,
+    h: usize,
+    nv12: &[u8],
+) -> objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer> {
     use objc2_core_video::*;
     use std::ptr::NonNull;
-    let (w, h) = (WIDTH as usize, HEIGHT as usize);
     // SAFETY: creates and fills an NV12 buffer of the right size.
     unsafe {
         let mut out = std::ptr::null_mut();
@@ -163,6 +250,31 @@ fn encoder_latency() {
         eprintln!(
             "{width}x{height}@{fps}: {} of {frames} frames, encode latency p50 {:.1} ms, p95 {:.1} ms",
             done.len(),
+            ms[ms.len() / 2],
+            ms[ms.len() * 95 / 100]
+        );
+    }
+}
+
+/// How long scaling a 4K picture down for adaptive quality's moving track takes.
+#[test]
+#[ignore = "benchmark"]
+fn scaling_latency() {
+    use legato_screen::mac::scale::Scaler;
+    for (w, h) in [(1920u32, 1080u32), (2560, 1440)] {
+        let scaler = Scaler::new(w, h).unwrap();
+        let buffers: Vec<_> = (0..4).map(|n| sized_buffer(3840, 2160, n)).collect();
+        let mut ms: Vec<f64> = (0..60)
+            .map(|i| {
+                let started = Instant::now();
+                let _scaled = scaler.scale(&buffers[i % 4]).unwrap();
+                started.elapsed().as_secs_f64() * 1000.0
+            })
+            .skip(5)
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        eprintln!(
+            "3840x2160 -> {w}x{h}: p50 {:.2} ms, p95 {:.2} ms",
             ms[ms.len() / 2],
             ms[ms.len() * 95 / 100]
         );

@@ -48,8 +48,12 @@ pub enum Resolution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Quality {
-    /// Full resolution.
+    /// Full resolution while the screen is still or changing a little (reading,
+    /// typing), [`Extend::while_moving`] while much of it moves (dragging, scrolling):
+    /// sharp to read and quick to move.
     #[default]
+    Adaptive,
+    /// Full resolution.
     Sharpest,
     /// At most 2560×1440: about half the work of 4K, a little softer.
     Balanced,
@@ -61,7 +65,7 @@ impl Quality {
     /// The largest stream size, if limited.
     pub fn cap(self) -> Option<(u32, u32)> {
         match self {
-            Quality::Sharpest => None,
+            Quality::Adaptive | Quality::Sharpest => None,
             Quality::Balanced => Some((2560, 1440)),
             Quality::Fastest => Some((1920, 1080)),
         }
@@ -71,6 +75,27 @@ impl Quality {
     pub fn stream_size(self, display: (u32, u32)) -> (u32, u32) {
         self.cap()
             .map_or(display, |cap| legato_core::extend::fit_within(display, cap))
+    }
+}
+
+/// Adaptive quality's size while much of the screen moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MovingSize {
+    /// At most 1920×1080: the quickest.
+    #[default]
+    #[serde(rename = "1080p")]
+    Hd,
+    /// At most 2560×1440: sharper while moving, a little slower.
+    #[serde(rename = "1440p")]
+    Qhd,
+}
+
+impl MovingSize {
+    pub fn cap(self) -> (u32, u32) {
+        match self {
+            MovingSize::Hd => (1920, 1080),
+            MovingSize::Qhd => (2560, 1440),
+        }
     }
 }
 
@@ -86,6 +111,8 @@ pub struct Extend {
     pub resolution: Resolution,
     /// How sharp the picture is sent, against how fast.
     pub quality: Quality,
+    /// With adaptive quality, the size sent while much of the screen moves.
+    pub while_moving: MovingSize,
     /// The fixed size in pixels.
     pub width: u32,
     pub height: u32,
@@ -107,7 +134,8 @@ impl Default for Extend {
             placement: None,
             display: 1,
             resolution: Resolution::Match,
-            quality: Quality::Sharpest,
+            quality: Quality::Adaptive,
+            while_moving: MovingSize::Hd,
             width: 3840,
             height: 2160,
             hidpi: true,
@@ -122,17 +150,27 @@ impl Extend {
     /// What to ask the Mac for to show a display of about `width`×`height` pixels: a
     /// size the pipeline takes, and no faster than the Mac can encode at that size.
     pub fn request_for(&self, width: u32, height: u32) -> legato_proto::ExtendRequest {
-        use legato_core::extend::{max_fps, prefers_hidpi, usable_size};
+        use legato_core::extend::{fit_within, max_fps, prefers_hidpi, usable_size};
         let (width, height) = usable_size(width, height);
-        let (stream_width, stream_height) = self.quality.stream_size((width, height));
+        let stream = self.quality.stream_size((width, height));
+        let moving = match self.quality {
+            Quality::Adaptive => {
+                Some(fit_within(stream, self.while_moving.cap())).filter(|&moving| moving != stream)
+            }
+            _ => None,
+        };
+        // Encoding sets the pace, at the size sent while things move.
+        let pace = moving.unwrap_or(stream);
+        let (moving_width, moving_height) = moving.unwrap_or((0, 0));
         legato_proto::ExtendRequest {
             width,
             height,
             hidpi: self.hidpi && prefers_hidpi(width, height),
-            stream_width,
-            stream_height,
-            // Encoding sets the pace, and it works at the stream's size.
-            fps: self.fps.clamp(1, max_fps(stream_width, stream_height)),
+            stream_width: stream.0,
+            stream_height: stream.1,
+            moving_width,
+            moving_height,
+            fps: self.fps.clamp(1, max_fps(pace.0, pace.1)),
             bitrate: self.bitrate_mbps.clamp(2, 200) * 1_000_000,
         }
     }
@@ -336,6 +374,7 @@ mod tests {
     fn extra_display_requests_stay_within_what_the_mac_can_encode() {
         let extend = Extend {
             fps: 144,
+            quality: Quality::Sharpest,
             ..Extend::default()
         };
         let r = extend.request_for(3840, 2160);
@@ -363,6 +402,35 @@ mod tests {
             "still a 4K display"
         );
         assert_eq!((r.stream_width, r.stream_height, r.fps), (2560, 1440, 120));
+        assert_eq!((r.moving_width, r.moving_height), (0, 0), "one size only");
+    }
+
+    #[test]
+    fn adaptive_quality_sends_full_size_when_still_and_smaller_while_moving() {
+        let mut extend = Extend {
+            fps: 144,
+            ..Extend::default()
+        };
+        assert_eq!(extend.quality, Quality::Adaptive, "the default");
+        let r = extend.request_for(3840, 2160);
+        assert_eq!((r.stream_width, r.stream_height), (3840, 2160));
+        assert_eq!((r.moving_width, r.moving_height), (1920, 1080));
+        assert_eq!(r.fps, 144, "moving is what needs the frame rate");
+        extend.while_moving = MovingSize::Qhd;
+        let r = extend.request_for(2560, 1440);
+        assert_eq!(
+            (r.moving_width, r.moving_height),
+            (0, 0),
+            "already small enough"
+        );
+        let r = extend.request_for(3440, 1440);
+        assert_eq!(
+            (r.moving_width, r.moving_height),
+            (2560, 1072),
+            "same shape"
+        );
+        let r = extend.request_for(5120, 2880);
+        assert_eq!((r.moving_width, r.moving_height, r.fps), (2560, 1440, 120));
     }
 
     #[test]
@@ -384,9 +452,11 @@ mod tests {
         assert_eq!(old.extend.placement, None);
         assert_eq!(old.extend.resolution, Resolution::Match);
         let new: Config = toml::from_str(
-            "[extend]\nplacement = \"full-screen\"\ndisplay = 2\nresolution = \"fixed\"\nfps = 120\n",
+            "[extend]\nplacement = \"full-screen\"\ndisplay = 2\nresolution = \"fixed\"\nfps = 120\n\
+             quality = \"adaptive\"\nwhile_moving = \"1440p\"\n",
         )
         .unwrap();
+        assert_eq!(new.extend.while_moving, MovingSize::Qhd);
         assert_eq!(new.extend.placement, Some(Placement::FullScreen));
         assert_eq!(
             (new.extend.display, new.extend.resolution),

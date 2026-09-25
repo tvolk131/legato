@@ -295,17 +295,18 @@ async fn video_frames_arrive_in_order() {
             keyframe: i % 10 == 0,
             sender_time: Duration::from_micros(15_000 + u64::from(i) * 10),
             skipped: (i % 3) as u16,
+            pts: Duration::from_micros(u64::from(i) * 16_667),
         })
         .collect();
     let sender = {
         let frames = frames.clone();
         tokio::spawn(async move {
-            let mut video = a_session.open_video().await.unwrap();
+            let mut video = a_session
+                .open_video(legato_proto::video_track::MOVING)
+                .await
+                .unwrap();
             for f in &frames {
-                video
-                    .send(&f.data, f.keyframe, f.sender_time, f.skipped)
-                    .await
-                    .unwrap();
+                video.send(f).await.unwrap();
             }
             video.finish();
         })
@@ -317,6 +318,7 @@ async fn video_frames_arrive_in_order() {
     {
         SessionEvent::Video { peer, video } => {
             assert_eq!(peer, a.id());
+            assert_eq!(video.track, legato_proto::video_track::MOVING);
             video
         }
         other => panic!("unexpected {other:?}"),

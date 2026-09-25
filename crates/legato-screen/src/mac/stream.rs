@@ -1,6 +1,10 @@
 //! A virtual display, captured and encoded: everything the Mac runs while its extra
 //! display is shown on another machine.
+//!
+//! Pictures go on one or two tracks (see [`crate::adaptive`]): the stream size, and with
+//! adaptive quality a smaller size while much of the screen moves, scaled on the GPU.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,7 +13,9 @@ use anyhow::Result;
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 
+use super::scale::Scaler;
 use super::{EncodedFrame, Encoder, EncoderConfig, Mode, ScreenCapture, VirtualDisplay};
+use crate::adaptive::{Decision, MOVING, Policy, SHARP};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamConfig {
@@ -20,7 +26,13 @@ pub struct StreamConfig {
     /// The size it's captured and encoded at: the display's own, or smaller to be faster.
     pub stream_width: u32,
     pub stream_height: u32,
+    /// Adaptive quality: the smaller size sent while much of the screen moves.
+    pub moving: Option<(u32, u32)>,
+    /// The display's refresh rate, and the most frames sent a second.
     pub fps: u32,
+    /// With `moving`: the most frames a second at the stream size (it's slower to
+    /// encode than the display runs).
+    pub sharp_fps: u32,
     pub bitrate: u32,
 }
 
@@ -33,115 +45,158 @@ impl StreamConfig {
             refresh: self.fps as f64,
         }
     }
-
-    fn frame_interval(&self) -> Duration {
-        Duration::from_secs_f64(1.0 / self.fps.max(1) as f64)
-    }
 }
 
 /// Where encoded frames go, whichever encoder made them.
 type Sink = Arc<Mutex<Box<dyn FnMut(EncodedFrame) + Send>>>;
-
-/// When each picture handed to the encoder appeared on the display, by timestamp: with
-/// frames overlapping, the one coming out isn't the one just handed in.
-type ShownAt = Arc<Mutex<std::collections::VecDeque<(Duration, Instant)>>>;
-
-/// The encoder, the picture size it was made for, and how it's being fed.
-struct Encoding {
-    encoder: Encoder,
-    size: (usize, usize),
-    interval: Duration,
-    /// Each frame is left in flight while the next is encoded (see
-    /// [`Encoder::encode_overlapped`]), because frames take most of their time budget.
-    overlapped: bool,
-    /// Frames in a row that took most of their time budget, while not overlapped.
-    slow: u32,
-    /// The last frame sent to the encoder, and whether it may still be in flight.
-    last_pts: Option<Duration>,
-    in_flight: bool,
-    last_encode: Instant,
-    /// The encoder's dropped-frame count already reported.
-    dropped_seen: u32,
-}
 
 /// Overlap frames when they're expected to take more than this share of their budget
 /// (about 2 ns per pixel on Apple silicon: 4K at 60 fps, 1440p at 120).
 const OVERLAP_ABOVE: f64 = 0.6;
 /// Or when this many in a row actually took more than 90% of it.
 const SLOW_FRAMES: u32 = 3;
+/// Frames following the last within this many intervals count as a continuous run, worth
+/// overlapping; a lone picture (a keystroke) is sent straight away.
+const CONTINUOUS: f64 = 1.5;
+/// A frame left in flight is sent after this many intervals with nothing following it.
+const FLUSH_AFTER: f64 = 1.25;
+/// How often waiting pictures and frames in flight are looked at.
+const TICK: Duration = Duration::from_millis(4);
+/// Scaling a picture on the GPU takes about this long, whatever the sizes (measured on
+/// an M-series Mac: mostly the round trip).
+const SCALE_COST: Duration = Duration::from_millis(3);
+
+/// One track's encoder, the picture size it was made for, and how it's being fed.
+struct Encoding {
+    encoder: Encoder,
+    size: (usize, usize),
+    interval: Duration,
+    /// Whether frames may be left in flight while the next is encoded (see
+    /// [`Encoder::encode_overlapped`]), because they take most of their time budget.
+    overlap: bool,
+    /// Never overlap (the sharp track, while adaptive: it sends lone pictures).
+    never_overlap: bool,
+    /// Frames in a row that took most of their time budget, while not overlapped.
+    slow: u32,
+    /// The last frame sent to the encoder, and whether it may still be in flight.
+    last_pts: Option<Duration>,
+    in_flight: bool,
+    last_encode: Option<Instant>,
+    /// The encoder's dropped-frame count already reported.
+    dropped_seen: u32,
+    /// When each picture handed to the encoder appeared on the display, by timestamp:
+    /// with frames overlapping, the one coming out isn't the one just handed in.
+    shown_at: Arc<Mutex<VecDeque<(Duration, Instant)>>>,
+}
 
 impl Encoding {
-    fn new(config: StreamConfig, sink: &Sink, shown_at: &ShownAt) -> Result<Self> {
-        let (sink, shown_at) = (sink.clone(), shown_at.clone());
-        let encoder = Encoder::new(
-            EncoderConfig {
-                width: config.stream_width,
-                height: config.stream_height,
-                fps: config.fps,
-                bitrate: config.bitrate,
-            },
-            move |frame| match frame {
-                Ok(mut frame) => {
-                    let mut shown = shown_at.lock().unwrap();
-                    while let Some(&(pts, at)) = shown.front() {
-                        if pts > frame.pts {
-                            break;
+    /// `extra` is time spent on each picture before it's encoded (scaling it).
+    fn new(
+        track: u8,
+        (width, height): (u32, u32),
+        fps: u32,
+        bitrate: u32,
+        never_overlap: bool,
+        extra: Duration,
+        sink: &Sink,
+    ) -> Result<Self> {
+        let shown_at: Arc<Mutex<VecDeque<(Duration, Instant)>>> = Arc::default();
+        let encoder = {
+            let (sink, shown_at) = (sink.clone(), shown_at.clone());
+            Encoder::new(
+                EncoderConfig {
+                    width,
+                    height,
+                    fps,
+                    bitrate,
+                },
+                move |frame| match frame {
+                    Ok(mut frame) => {
+                        let mut shown = shown_at.lock().unwrap();
+                        while let Some(&(pts, at)) = shown.front() {
+                            if pts > frame.pts {
+                                break;
+                            }
+                            shown.pop_front();
+                            if pts == frame.pts {
+                                frame.shown_at = Some(at);
+                            }
                         }
-                        shown.pop_front();
-                        if pts == frame.pts {
-                            frame.shown_at = Some(at);
-                        }
+                        drop(shown);
+                        frame.track = track;
+                        (sink.lock().unwrap())(frame);
                     }
-                    drop(shown);
-                    (sink.lock().unwrap())(frame);
-                }
-                Err(e) => tracing::debug!("{e:#}"),
-            },
-        )?;
-        let interval = config.frame_interval();
-        let megapixels = config.stream_width as f64 * config.stream_height as f64 / 1e6;
-        let expected = Duration::from_secs_f64(megapixels * 1.95e-3);
+                    Err(e) => tracing::debug!("{e:#}"),
+                },
+            )?
+        };
+        let interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
+        let megapixels = width as f64 * height as f64 / 1e6;
+        let expected = Duration::from_secs_f64(megapixels * 1.95e-3) + extra;
         Ok(Self {
             encoder,
-            size: (config.stream_width as usize, config.stream_height as usize),
+            size: (width as usize, height as usize),
             interval,
-            overlapped: expected.as_secs_f64() > interval.as_secs_f64() * OVERLAP_ABOVE,
+            overlap: !never_overlap
+                && expected.as_secs_f64() > interval.as_secs_f64() * OVERLAP_ABOVE,
+            never_overlap,
             slow: 0,
             last_pts: None,
             in_flight: false,
-            last_encode: Instant::now(),
+            last_encode: None,
             dropped_seen: 0,
+            shown_at,
         })
     }
 
-    fn encode(&mut self, image: &CVPixelBuffer, pts: Duration, keyframe: bool) -> Result<()> {
-        let started = Instant::now();
-        if self.overlapped {
+    /// `started`: when work on the picture began (before scaling it).
+    fn encode(
+        &mut self,
+        image: &CVPixelBuffer,
+        pts: Duration,
+        keyframe: bool,
+        shown_at: Instant,
+        started: Instant,
+    ) -> Result<()> {
+        self.shown_at.lock().unwrap().push_back((pts, shown_at));
+        let continuous = self.last_encode.is_some_and(|t| {
+            started.saturating_duration_since(t) < self.interval.mul_f64(CONTINUOUS)
+        });
+        if self.overlap && continuous {
             self.encoder
                 .encode_overlapped(image, pts, keyframe, self.last_pts)?;
             self.in_flight = true;
         } else {
+            // Also sends a frame left in flight before this one.
             self.encoder.encode_now(image, pts, keyframe)?;
+            self.in_flight = false;
             // Falling behind at this size: overlap from now on.
-            if started.elapsed() > self.interval.mul_f64(0.9) {
-                self.slow += 1;
-                if self.slow >= SLOW_FRAMES {
-                    tracing::info!("encoding takes most of each frame's time: overlapping frames");
-                    self.overlapped = true;
+            if !self.never_overlap && !self.overlap {
+                if started.elapsed() > self.interval.mul_f64(0.9) {
+                    self.slow += 1;
+                    if self.slow >= SLOW_FRAMES {
+                        tracing::info!(
+                            "encoding takes most of each frame's time: overlapping frames"
+                        );
+                        self.overlap = true;
+                    }
+                } else {
+                    self.slow = 0;
                 }
-            } else {
-                self.slow = 0;
             }
         }
         self.last_pts = Some(pts);
-        self.last_encode = Instant::now();
+        self.last_encode = Some(Instant::now());
         Ok(())
     }
 
-    /// Sends the frame left in flight if no other has followed it for a while (the
-    /// screen went still), so the viewer isn't left a frame behind.
+    /// Sends the frame left in flight if no other has followed it (the screen went
+    /// still), so the viewer isn't left a frame behind.
     fn flush_if_idle(&mut self) {
-        if self.in_flight && self.last_encode.elapsed() > self.interval * 2 {
+        let idle = self
+            .last_encode
+            .is_none_or(|t| t.elapsed() > self.interval.mul_f64(FLUSH_AFTER));
+        if self.in_flight && idle {
             self.encoder.flush();
             self.in_flight = false;
         }
@@ -156,44 +211,186 @@ impl Encoding {
     }
 }
 
-struct Shared {
-    /// Locked around each `encode` so timestamps reach the encoder in order, and while
-    /// the encoder is replaced for a new size.
-    encoding: Mutex<Encoding>,
-    start: Instant,
-    /// The latest picture, re-encoded when a keyframe is wanted and nothing has changed.
-    last: Mutex<Option<LastImage>>,
-    keyframe: AtomicBool,
-    /// Set while the network can't keep up: new pictures are skipped, not queued.
-    backlogged: AtomicBool,
-    /// Pictures skipped (or dropped by the encoder) since the viewer last heard.
-    missed: AtomicU32,
-    shown_at: ShownAt,
-    stop: AtomicBool,
+/// The smaller track while moving: its encoder, and the scaler feeding it.
+struct Moving {
+    encoding: Encoding,
+    scaler: Scaler,
 }
 
-struct LastImage(CFRetained<CVPixelBuffer>);
+#[derive(Clone)]
+struct LastImage {
+    image: CFRetained<CVPixelBuffer>,
+    shown_at: Instant,
+}
 // SAFETY: pixel buffers are reference counted and safe to hand between threads.
 unsafe impl Send for LastImage {}
 
+/// Everything touched per picture, behind one lock so pictures, ticks and keyframe
+/// requests are handled one at a time, in order.
+struct Pipeline {
+    sharp: Encoding,
+    moving: Option<Moving>,
+    policy: Policy,
+    /// The latest picture: re-encoded when the screen is still (sharpening, keyframes).
+    last: Option<LastImage>,
+    /// The last timestamp given out: every track shares the clock, and no two frames get
+    /// the same time.
+    last_pts: Option<Duration>,
+}
+
+impl Pipeline {
+    fn new(config: StreamConfig, sink: &Sink) -> Result<Self> {
+        let stream_size = (config.stream_width, config.stream_height);
+        let (sharp, moving, policy) = match config.moving {
+            Some(size) => {
+                let sharp_fps = config.sharp_fps.clamp(1, config.fps.max(1));
+                let sharp = Encoding::new(
+                    SHARP,
+                    stream_size,
+                    sharp_fps,
+                    config.bitrate,
+                    true,
+                    Duration::ZERO,
+                    sink,
+                )?;
+                let moving = Moving {
+                    encoding: Encoding::new(
+                        MOVING,
+                        size,
+                        config.fps,
+                        config.bitrate,
+                        false,
+                        SCALE_COST,
+                        sink,
+                    )?,
+                    scaler: Scaler::new(size.0, size.1)?,
+                };
+                (sharp, Some(moving), Policy::adaptive(sharp_fps))
+            }
+            None => {
+                let sharp = Encoding::new(
+                    SHARP,
+                    stream_size,
+                    config.fps,
+                    config.bitrate,
+                    false,
+                    Duration::ZERO,
+                    sink,
+                )?;
+                (sharp, None, Policy::fixed())
+            }
+        };
+        Ok(Self {
+            sharp,
+            moving,
+            policy,
+            last: None,
+            last_pts: None,
+        })
+    }
+
+    /// Whole microseconds from `start`, as the encoder hands timestamps back.
+    fn next_pts(&mut self, start: Instant) -> Duration {
+        let mut pts = Duration::from_micros(start.elapsed().as_micros() as u64);
+        if let Some(last) = self.last_pts
+            && pts <= last
+        {
+            pts = last + Duration::from_micros(1);
+        }
+        self.last_pts = Some(pts);
+        pts
+    }
+}
+
+struct Shared {
+    pipeline: Mutex<Pipeline>,
+    start: Instant,
+    /// Per track: set while the network can't keep up, so new pictures are skipped
+    /// rather than queued.
+    backlogged: [AtomicBool; 2],
+    /// Pictures skipped (or dropped by an encoder) since the viewer last heard.
+    missed: AtomicU32,
+    stop: AtomicBool,
+}
+
 impl Shared {
-    fn encode(&self, image: &CVPixelBuffer, shown_at: Instant) {
-        let mut encoding = self.encoding.lock().unwrap();
-        // While the size changes, capture can still deliver a few old-size pictures.
-        let size = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
-        if size != encoding.size {
+    /// Carries out `decision` for `picture`. `fresh`: a new picture, not one re-sent.
+    fn run(&self, p: &mut Pipeline, decision: Decision, picture: &LastImage, fresh: bool) {
+        let (track, keyframe, shown_at) = match decision {
+            Decision::Wait => return,
+            Decision::Encode { track, keyframe } => (track, keyframe, picture.shown_at),
+            Decision::Sharpen { keyframe } => (SHARP, keyframe, Instant::now()),
+        };
+        let backlogged = self
+            .backlogged
+            .get(track as usize)
+            .is_some_and(|b| b.load(Ordering::Relaxed));
+        if backlogged && !keyframe {
+            if fresh {
+                self.missed.fetch_add(1, Ordering::Relaxed);
+            }
+            p.policy.deferred(decision);
             return;
         }
-        // Whole microseconds, as the encoder hands timestamps back.
-        let pts = Duration::from_micros(self.start.elapsed().as_micros() as u64);
-        self.shown_at.lock().unwrap().push_back((pts, shown_at));
-        let keyframe = self.keyframe.swap(false, Ordering::Relaxed);
-        if let Err(e) = encoding.encode(image, pts, keyframe) {
+        let pts = p.next_pts(self.start);
+        let started = Instant::now();
+        let result = if track == MOVING {
+            match p.moving.as_mut() {
+                Some(m) => m.scaler.scale(&picture.image).and_then(|scaled| {
+                    m.encoding.encode(&scaled, pts, keyframe, shown_at, started)
+                }),
+                None => Ok(()),
+            }
+        } else {
+            p.sharp
+                .encode(&picture.image, pts, keyframe, shown_at, started)
+        };
+        if let Err(e) = result {
             tracing::debug!("{e:#}");
         }
-        let dropped = encoding.newly_dropped();
+        let dropped =
+            p.sharp.newly_dropped() + p.moving.as_mut().map_or(0, |m| m.encoding.newly_dropped());
         if dropped > 0 {
             self.missed.fetch_add(dropped, Ordering::Relaxed);
+        }
+    }
+
+    fn on_picture(&self, image: CFRetained<CVPixelBuffer>, shown_at: Instant, changed: f64) {
+        let mut p = self.pipeline.lock().unwrap();
+        // While the size changes, capture can still deliver a few old-size pictures.
+        let size = (
+            CVPixelBufferGetWidth(&image),
+            CVPixelBufferGetHeight(&image),
+        );
+        if size != p.sharp.size {
+            return;
+        }
+        let picture = LastImage { image, shown_at };
+        p.last = Some(picture.clone());
+        let was_moving = p.policy.is_moving();
+        let decision = p.policy.on_frame(Instant::now(), changed);
+        if p.policy.is_moving() && !was_moving {
+            tracing::debug!(
+                "moving ({:.1}% changed): sending the smaller picture",
+                changed * 100.0
+            );
+        }
+        self.run(&mut p, decision, &picture, true);
+    }
+
+    fn on_tick(&self) {
+        let mut p = self.pipeline.lock().unwrap();
+        p.sharp.flush_if_idle();
+        if let Some(m) = p.moving.as_mut() {
+            m.encoding.flush_if_idle();
+        }
+        if let Some(decision) = p.policy.on_tick(Instant::now())
+            && let Some(picture) = p.last.clone()
+        {
+            if let Decision::Sharpen { .. } = decision {
+                tracing::debug!("still: sharpening the picture");
+            }
+            self.run(&mut p, decision, &picture, false);
         }
     }
 }
@@ -202,7 +399,7 @@ impl Shared {
 pub struct DisplayStream {
     // Field order is drop order: stop capturing, then encoding, then remove the display.
     capture: ScreenCapture,
-    flusher: Option<std::thread::JoinHandle<()>>,
+    ticker: Option<std::thread::JoinHandle<()>>,
     shared: Arc<Shared>,
     display: VirtualDisplay,
     sink: Sink,
@@ -217,17 +414,13 @@ impl DisplayStream {
         config: StreamConfig,
         on_frame: impl FnMut(EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
-        let shown_at: ShownAt = Arc::default();
         let sink: Sink = Arc::new(Mutex::new(Box::new(on_frame)));
         let display = VirtualDisplay::create(name, config.mode())?;
         let shared = Arc::new(Shared {
-            encoding: Mutex::new(Encoding::new(config, &sink, &shown_at)?),
+            pipeline: Mutex::new(Pipeline::new(config, &sink)?),
             start: Instant::now(),
-            last: Mutex::new(None),
-            keyframe: AtomicBool::new(true),
-            backlogged: AtomicBool::new(false),
+            backlogged: [AtomicBool::new(false), AtomicBool::new(false)],
             missed: AtomicU32::new(0),
-            shown_at,
             stop: AtomicBool::new(false),
         });
         let capture = {
@@ -237,32 +430,23 @@ impl DisplayStream {
                 config.stream_width,
                 config.stream_height,
                 config.fps,
-                move |frame| {
-                    let mut last = shared.last.lock().unwrap();
-                    *last = Some(LastImage(frame.image.clone()));
-                    let wants_keyframe = shared.keyframe.load(Ordering::Relaxed);
-                    if wants_keyframe || !shared.backlogged.load(Ordering::Relaxed) {
-                        shared.encode(&frame.image, frame.shown_at);
-                    } else {
-                        shared.missed.fetch_add(1, Ordering::Relaxed);
-                    }
-                },
+                move |frame| shared.on_picture(frame.image, frame.shown_at, frame.changed),
             )?
         };
-        let flusher = {
+        let ticker = {
             let shared = shared.clone();
             std::thread::Builder::new()
-                .name("legato-encode-flush".into())
+                .name("legato-encode-tick".into())
                 .spawn(move || {
                     while !shared.stop.load(Ordering::Relaxed) {
-                        std::thread::sleep(Duration::from_millis(10));
-                        shared.encoding.lock().unwrap().flush_if_idle();
+                        std::thread::sleep(TICK);
+                        shared.on_tick();
                     }
                 })?
         };
         Ok(Self {
             capture,
-            flusher: Some(flusher),
+            ticker: Some(ticker),
             shared,
             display,
             sink,
@@ -278,8 +462,8 @@ impl DisplayStream {
         *self.config.lock().unwrap()
     }
 
-    /// Changes the display's size, Retina mode, stream size or frame rate while
-    /// streaming. The next frame is a keyframe at the new size.
+    /// Changes the display's size, Retina mode, stream sizes or frame rate while
+    /// streaming. Every track starts again with a keyframe at its new size.
     pub fn reconfigure(&self, config: StreamConfig) -> Result<()> {
         let mut current = self.config.lock().unwrap();
         if *current == config {
@@ -289,12 +473,10 @@ impl DisplayStream {
             self.display.set_mode(config.mode())?;
         }
         {
-            // Same lock order as the capture callback: the last picture, then the encoder.
-            let mut last = self.shared.last.lock().unwrap();
-            let mut encoding = self.shared.encoding.lock().unwrap();
-            *encoding = Encoding::new(config, &self.sink, &self.shared.shown_at)?;
-            *last = None;
-            self.shared.keyframe.store(true, Ordering::Relaxed);
+            let mut p = self.shared.pipeline.lock().unwrap();
+            let last_pts = p.last_pts;
+            *p = Pipeline::new(config, &self.sink)?;
+            p.last_pts = last_pts;
         }
         self.capture
             .reconfigure(config.stream_width, config.stream_height, config.fps)?;
@@ -302,20 +484,25 @@ impl DisplayStream {
         Ok(())
     }
 
-    /// Sends a keyframe as soon as possible (a viewer joined or lost frames).
-    pub fn request_keyframe(&self) {
-        self.shared.keyframe.store(true, Ordering::Relaxed);
-        // If the screen is still, no new picture is coming: re-send the last one.
-        let last = self.shared.last.lock().unwrap();
-        if let Some(LastImage(image)) = &*last {
-            // Still on screen, so it's current as of now.
-            self.shared.encode(image, Instant::now());
+    /// Sends a keyframe on `track` as soon as possible (a viewer joined or lost frames).
+    pub fn request_keyframe(&self, track: u8) {
+        let mut p = self.shared.pipeline.lock().unwrap();
+        // If the screen is still, no new picture is coming: re-send the last one, which
+        // is still on screen and so current as of now.
+        if let Some(decision) = p.policy.keyframe_now(track)
+            && let Some(mut picture) = p.last.clone()
+        {
+            picture.shown_at = Instant::now();
+            self.shared.run(&mut p, decision, &picture, false);
         }
     }
 
-    /// While the network is backlogged, new pictures are skipped rather than queued.
-    pub fn set_backlogged(&self, backlogged: bool) {
-        self.shared.backlogged.store(backlogged, Ordering::Relaxed);
+    /// While a track's frames back up on the network, its new pictures are skipped
+    /// rather than queued.
+    pub fn set_backlogged(&self, track: u8, backlogged: bool) {
+        if let Some(b) = self.shared.backlogged.get(track as usize) {
+            b.store(backlogged, Ordering::Relaxed);
+        }
     }
 
     /// Pictures skipped or dropped since the last call, for the viewer's stats.
@@ -327,8 +514,8 @@ impl DisplayStream {
 impl Drop for DisplayStream {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        if let Some(flusher) = self.flusher.take() {
-            let _ = flusher.join();
+        if let Some(ticker) = self.ticker.take() {
+            let _ = ticker.join();
         }
     }
 }

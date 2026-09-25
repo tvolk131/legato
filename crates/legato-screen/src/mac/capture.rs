@@ -10,19 +10,23 @@ use anyhow::{Context, Result, bail};
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
+use objc2_core_foundation::{CFArray, CGRect};
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString};
 use objc2_core_graphics::{
-    CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
-    kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
+    CGPreflightScreenCaptureAccess, CGRectMakeWithDictionaryRepresentation,
+    CGRequestScreenCaptureAccess, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
 };
 use objc2_core_media::{CMClock, CMSampleBuffer, CMTime};
-use objc2_core_video::{CVPixelBuffer, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange};
-use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
+use objc2_core_video::{
+    CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSObject, NSObjectProtocol, NSValue};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCFrameStatus, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType,
+    SCStreamFrameInfoDirtyRects, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -32,6 +36,8 @@ pub struct Frame {
     pub image: CFRetained<CVPixelBuffer>,
     /// When the picture appeared on the display.
     pub shown_at: Instant,
+    /// How much of it changed since the last picture, from 0 to 1 (1 if unknown).
+    pub changed: f64,
 }
 
 // SAFETY: pixel buffers are reference counted and safe to hand between threads.
@@ -60,16 +66,32 @@ define_class!(
             sample: &CMSampleBuffer,
             kind: SCStreamOutputType,
         ) {
-            if kind != SCStreamOutputType::Screen || !is_complete(sample) {
+            if kind != SCStreamOutputType::Screen {
                 return;
             }
             // SAFETY: a valid sample buffer for the call's duration.
+            let Some(info) = (unsafe { frame_info(sample) }) else {
+                return;
+            };
+            if !is_complete(info) {
+                return;
+            }
+            // SAFETY: as above.
             let Some(image) = (unsafe { sample.image_buffer() }) else {
                 return;
             };
+            let size = (
+                CVPixelBufferGetWidth(&image),
+                CVPixelBufferGetHeight(&image),
+            );
+            let changed = changed_share(info, size).unwrap_or(1.0);
             let shown_at = shown_at(sample);
             if let Ok(mut on_frame) = self.ivars().on_frame.lock() {
-                on_frame(Frame { image, shown_at });
+                on_frame(Frame {
+                    image,
+                    shown_at,
+                    changed,
+                });
             }
         }
     }
@@ -99,25 +121,97 @@ fn shown_at(sample: &CMSampleBuffer) -> Instant {
     }
 }
 
-/// Whether ScreenCaptureKit marked the frame as a new picture (not "nothing changed").
-fn is_complete(sample: &CMSampleBuffer) -> bool {
-    // SAFETY: reading the first attachment dictionary of a valid sample buffer.
+/// What ScreenCaptureKit says about a captured frame. Lives as long as `sample`.
+///
+/// # Safety
+///
+/// `sample` must be a valid sample buffer from ScreenCaptureKit.
+unsafe fn frame_info(sample: &CMSampleBuffer) -> Option<&CFDictionary> {
+    // SAFETY: the first attachment dictionary of a valid sample buffer.
     unsafe {
-        let Some(attachments) = sample.sample_attachments_array(false) else {
-            return false;
-        };
+        let attachments = sample.sample_attachments_array(false)?;
         if attachments.count() == 0 {
-            return false;
+            return None;
         }
-        let Some(dict) = (attachments.value_at_index(0) as *const CFDictionary).as_ref() else {
-            return false;
-        };
+        (attachments.value_at_index(0) as *const CFDictionary).as_ref()
+    }
+}
+
+/// Whether ScreenCaptureKit marked the frame as a new picture (not "nothing changed").
+fn is_complete(info: &CFDictionary) -> bool {
+    // SAFETY: a lookup in a valid dictionary, whose status value is a number.
+    unsafe {
         let key: *const CFString = &**SCStreamFrameInfoStatus as *const _ as *const CFString;
-        let Some(status) = (dict.value(key.cast()) as *const CFNumber).as_ref() else {
+        let Some(status) = (info.value(key.cast()) as *const CFNumber).as_ref() else {
             return false;
         };
         status.as_i64() == Some(SCFrameStatus::Complete.0 as i64)
     }
+}
+
+/// How much of a `size` picture its dirty rectangles (redrawn or moved areas, in pixels)
+/// cover, from 0 to 1. `None` if ScreenCaptureKit didn't say.
+fn changed_share(info: &CFDictionary, size: (usize, usize)) -> Option<f64> {
+    let area = size.0 as f64 * size.1 as f64;
+    if area <= 0.0 {
+        return None;
+    }
+    // SAFETY: a lookup in a valid dictionary; each element is checked before use.
+    let rects: Vec<CGRect> = unsafe {
+        let key: *const CFString = &**SCStreamFrameInfoDirtyRects as *const _ as *const CFString;
+        let rects = (info.value(key.cast()) as *const CFArray).as_ref()?;
+        (0..rects.count())
+            .filter_map(|i| {
+                let item = (rects.value_at_index(i) as *const AnyObject).as_ref()?;
+                // Documented as NSValues; CGRect dictionaries in practice.
+                if let Some(value) = item.downcast_ref::<NSValue>() {
+                    return Some(value.rectValue());
+                }
+                item.downcast_ref::<NSDictionary>()?;
+                let mut rect = CGRect::default();
+                let dict = item as *const AnyObject as *const CFDictionary;
+                CGRectMakeWithDictionaryRepresentation(dict.as_ref(), &mut rect).then_some(rect)
+            })
+            .collect()
+    };
+    Some(covered(&rects, size) / area)
+}
+
+/// The area `rects` cover within `size`, counting overlaps once.
+fn covered(rects: &[CGRect], size: (usize, usize)) -> f64 {
+    let (w, h) = (size.0 as f64, size.1 as f64);
+    let clip = |r: &CGRect| {
+        let (x0, y0) = (r.origin.x.max(0.0), r.origin.y.max(0.0));
+        let (x1, y1) = (
+            (r.origin.x + r.size.width).min(w),
+            (r.origin.y + r.size.height).min(h),
+        );
+        (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
+    };
+    let rects: Vec<_> = rects.iter().filter_map(clip).collect();
+    // Sweep across x: in each band between rectangle edges, add up the covered height.
+    let mut xs: Vec<f64> = rects.iter().flat_map(|r| [r.0, r.2]).collect();
+    xs.sort_by(f64::total_cmp);
+    xs.dedup();
+    let mut total = 0.0;
+    for band in xs.windows(2) {
+        let (left, right) = (band[0], band[1]);
+        let mut spans: Vec<(f64, f64)> = rects
+            .iter()
+            .filter(|r| r.0 <= left && r.2 >= right)
+            .map(|r| (r.1, r.3))
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (mut height, mut reach) = (0.0, f64::MIN);
+        for (top, bottom) in spans {
+            if bottom > reach {
+                height += bottom - top.max(reach);
+                reach = bottom;
+            }
+        }
+        total += height * (right - left);
+    }
+    total
 }
 
 /// Whether this process may record the screen. Asks (once) if it hasn't been decided.
@@ -289,5 +383,33 @@ impl Drop for ScreenCapture {
         if let Err(e) = result {
             tracing::debug!("{e:#}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_core_foundation::{CGPoint, CGSize};
+
+    use super::*;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+    }
+
+    #[test]
+    fn covered_area_counts_overlaps_once_and_stays_on_the_picture() {
+        let size = (100, 100);
+        assert_eq!(covered(&[], size), 0.0);
+        assert_eq!(covered(&[rect(10.0, 10.0, 20.0, 10.0)], size), 200.0);
+        // Two overlapping squares: 2 × 400 - 100.
+        let overlapping = [rect(0.0, 0.0, 20.0, 20.0), rect(10.0, 10.0, 20.0, 20.0)];
+        assert_eq!(covered(&overlapping, size), 700.0);
+        // One inside another.
+        let nested = [rect(0.0, 0.0, 50.0, 50.0), rect(10.0, 10.0, 5.0, 5.0)];
+        assert_eq!(covered(&nested, size), 2500.0);
+        // Hanging off the edge, or off the picture entirely.
+        assert_eq!(covered(&[rect(90.0, 90.0, 20.0, 20.0)], size), 100.0);
+        assert_eq!(covered(&[rect(200.0, 0.0, 20.0, 20.0)], size), 0.0);
+        assert_eq!(covered(&[rect(-50.0, -50.0, 500.0, 500.0)], size), 10_000.0);
     }
 }

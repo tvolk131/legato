@@ -26,8 +26,11 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
 /// Stream priorities: input (the control stream, 0) beats video, which beats bulk data.
-const VIDEO_PRIORITY: i32 = -1;
-const BULK_PRIORITY: i32 = -2;
+/// Adaptive quality's moving picture goes ahead of the sharp one, so a big sharpening
+/// frame never holds up the next moving one.
+const MOVING_VIDEO_PRIORITY: i32 = -1;
+const VIDEO_PRIORITY: i32 = -2;
+const BULK_PRIORITY: i32 = -3;
 
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -90,11 +93,16 @@ pub struct VideoFrame {
     pub sender_time: Duration,
     /// Pictures the sender skipped or dropped just before this one.
     pub skipped: u16,
+    /// When the picture appeared, from the start of the stream (the same clock on every
+    /// track).
+    pub pts: Duration,
 }
 
 /// A video stream arriving from a peer.
 #[derive(Debug)]
 pub struct IncomingVideo {
+    /// Which [`legato_proto::video_track`] it carries.
+    pub track: u8,
     recv: tokio::sync::Mutex<RecvStream>,
 }
 
@@ -116,6 +124,7 @@ impl IncomingVideo {
             keyframe: header.keyframe,
             sender_time: Duration::from_micros(header.sender_us.into()),
             skipped: header.skipped,
+            pts: Duration::from_micros(header.pts_us),
         }))
     }
 }
@@ -128,23 +137,17 @@ pub struct VideoSender {
 
 impl VideoSender {
     /// Resolves once the frame is handed to the connection (not when it arrives).
-    /// `sender_time` is how long this machine has spent on the frame so far, and `skipped`
-    /// how many pictures it skipped or dropped just before it.
-    pub async fn send(
-        &mut self,
-        frame: &[u8],
-        keyframe: bool,
-        sender_time: Duration,
-        skipped: u16,
-    ) -> Result<()> {
+    /// `frame.sender_time` is how long this machine has spent on it so far.
+    pub async fn send(&mut self, frame: &VideoFrame) -> Result<()> {
         let header = VideoFrameHeader {
-            len: frame.len().try_into().context("frame too large")?,
-            keyframe,
-            sender_us: sender_time.as_micros().min(u32::MAX.into()) as u32,
-            skipped,
+            len: frame.data.len().try_into().context("frame too large")?,
+            keyframe: frame.keyframe,
+            sender_us: frame.sender_time.as_micros().min(u32::MAX.into()) as u32,
+            skipped: frame.skipped,
+            pts_us: frame.pts.as_micros() as u64,
         };
         self.send.write_all(&header.encode()).await?;
-        self.send.write_all(frame).await?;
+        self.send.write_all(&frame.data).await?;
         Ok(())
     }
 
@@ -241,11 +244,15 @@ impl Session {
         Ok(())
     }
 
-    /// Opens a video stream to the peer.
-    pub async fn open_video(&self) -> Result<VideoSender> {
+    /// Opens a stream to the peer for one [`legato_proto::video_track`].
+    pub async fn open_video(&self, track: u8) -> Result<VideoSender> {
         let mut send = self.conn.open_uni().await?;
-        send.set_priority(VIDEO_PRIORITY)?;
-        send.write_all(&[legato_proto::blob::VIDEO]).await?;
+        send.set_priority(if track == legato_proto::video_track::MOVING {
+            MOVING_VIDEO_PRIORITY
+        } else {
+            VIDEO_PRIORITY
+        })?;
+        send.write_all(&[legato_proto::blob::VIDEO, track]).await?;
         Ok(VideoSender { send })
     }
 }
@@ -502,7 +509,10 @@ async fn receive_blob(
         return Ok(());
     }
     if tag[0] == legato_proto::blob::VIDEO {
+        let mut track = [0u8; 1];
+        recv.read_exact(&mut track).await?;
         let video = Arc::new(IncomingVideo {
+            track: track[0],
             recv: tokio::sync::Mutex::new(recv),
         });
         let _ = events.send(SessionEvent::Video { peer, video });

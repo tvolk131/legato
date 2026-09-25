@@ -405,6 +405,7 @@ fn sample_stats() -> legato_engine::ViewerStats {
         decode_max: Duration::from_millis(12),
         longest_gap: Duration::from_millis(48),
         skipped: 2,
+        moving: false,
     }
 }
 
@@ -421,6 +422,16 @@ fn stats_add_up_the_delay_stage_by_stage() {
             "29 ms behind: Mac 18 · network 1 · decode 7 · display 3",
             "Worst: Mac 31 · decode 12 · display 6 · longest gap 48 ms · 2 skipped",
         ]
+    );
+    let moving = legato_engine::ViewerStats {
+        width: 1920,
+        height: 1080,
+        moving: true,
+        ..sample_stats()
+    };
+    assert_eq!(
+        crate::view::stats_text(&moving, Duration::ZERO, Duration::ZERO)[0],
+        "1920×1080 while moving · 60 fps · 24.1 Mbit/s · direct"
     );
 }
 
@@ -460,15 +471,51 @@ fn with_display_options(placement: legato_engine::config::Placement) -> Model {
 
 #[test]
 fn display_options_offer_each_screen_and_limit_the_frame_rate() {
-    use legato_engine::config::{Placement, Resolution};
+    use legato_engine::config::{MovingSize, Placement, Quality, Resolution};
+    // Adaptive quality, the default: full size when still, 1920×1080 while moving.
     let m = with_display_options(Placement::FullScreen);
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        (1024.0, 1800.0),
+        crate::view::root(&m),
+    );
+    snapshot(&mut ui, "display-options");
+    assert!(ui.find("Full screen on display 2 (3840×2160)").is_ok());
+    assert!(
+        ui.find(
+            "Sent at 1920×1080 while things move, the Mac can keep up with 144 fps. When \
+             still, it's sent at the full 3840×2160."
+        )
+        .is_ok()
+    );
+    ui.click("Up to 2560×1440: sharper, a little slower")
+        .unwrap();
+    ui.click("144 fps").unwrap();
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        Message::DisplayOptionsChanged(o) if o.while_moving == MovingSize::Qhd
+    )));
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::DisplayOptionsChanged(o) if o.fps == 144))
+    );
+
+    // Always full size: 60 fps at 4K.
+    let mut m = with_display_options(Placement::FullScreen);
+    if let Some(o) = &mut m.display_options {
+        o.quality = Quality::Sharpest;
+    }
     let mut ui = iced_test::Simulator::with_size(
         iced::Settings::default(),
         (1024.0, 1600.0),
         crate::view::root(&m),
     );
-    snapshot(&mut ui, "display-options");
-    assert!(ui.find("Full screen on display 2 (3840×2160)").is_ok());
+    assert!(
+        ui.find("Up to 1920×1080: the quickest").is_err(),
+        "adaptive only"
+    );
     assert!(
         ui.find("Sent at 3840×2160, the Mac can keep up with 60 fps. Smaller sizes can go faster.")
             .is_ok()
@@ -551,6 +598,7 @@ fn display_options_are_saved_to_the_settings() {
         display: 3,
         resolution: Resolution::Fixed,
         quality: legato_engine::config::Quality::Balanced,
+        while_moving: legato_engine::config::MovingSize::Qhd,
         fixed: (1920, 1080),
         fps: 144,
     };
