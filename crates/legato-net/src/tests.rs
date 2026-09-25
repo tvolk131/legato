@@ -289,15 +289,22 @@ async fn video_frames_arrive_in_order() {
     let a_session = next_connected(&mut a_events).await;
     let _b_session = next_connected(&mut b_events).await;
 
-    let frames: Vec<(Vec<u8>, bool)> = (0..20u32)
-        .map(|i| (vec![i as u8; 1000 + i as usize * 5000], i % 10 == 0))
+    let frames: Vec<VideoFrame> = (0..20u32)
+        .map(|i| VideoFrame {
+            data: vec![i as u8; 1000 + i as usize * 5000],
+            keyframe: i % 10 == 0,
+            sender_time: Duration::from_micros(15_000 + u64::from(i) * 10),
+        })
         .collect();
     let sender = {
         let frames = frames.clone();
         tokio::spawn(async move {
             let mut video = a_session.open_video().await.unwrap();
-            for (data, keyframe) in &frames {
-                video.send(data, *keyframe).await.unwrap();
+            for f in &frames {
+                video
+                    .send(&f.data, f.keyframe, f.sender_time)
+                    .await
+                    .unwrap();
             }
             video.finish();
         })

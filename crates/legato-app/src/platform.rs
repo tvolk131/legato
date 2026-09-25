@@ -32,6 +32,34 @@ pub fn show_in_dock(visible: bool) {
     let _ = visible;
 }
 
+/// Shows each new frame at the next screen refresh, replacing any frame still waiting
+/// ("mailbox"), instead of queueing behind it as vsync does. It never tears. DirectX 12
+/// supports it on every Windows 10+ GPU, so it's used when there's a DX12 adapter;
+/// otherwise iced keeps its vsync default. Must run before any other thread starts.
+pub fn prefer_low_latency_presentation() {
+    #[cfg(windows)]
+    {
+        use iced::wgpu;
+        if std::env::var_os("ICED_PRESENT_MODE").is_some()
+            || std::env::var_os("WGPU_BACKEND").is_some()
+        {
+            return;
+        }
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::DX12,
+            ..Default::default()
+        });
+        if instance.enumerate_adapters(wgpu::Backends::DX12).is_empty() {
+            return;
+        }
+        // SAFETY: called first thing in `main`, before any other thread exists.
+        unsafe {
+            std::env::set_var("WGPU_BACKEND", "dx12");
+            std::env::set_var("ICED_PRESENT_MODE", "mailbox");
+        }
+    }
+}
+
 fn launcher() -> Result<auto_launch::AutoLaunch> {
     let exe = std::env::current_exe().context("finding this program")?;
     let exe = exe.to_str().context("program path isn't valid UTF-8")?;

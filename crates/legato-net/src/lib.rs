@@ -35,7 +35,9 @@ pub mod store;
 
 pub use iroh::EndpointId;
 pub use pairing::{PairAttempt, PairOutcome, PeerInfo};
-pub use session::{IncomingFile, IncomingVideo, PathKind, Session, SessionEvent, VideoSender};
+pub use session::{
+    IncomingFile, IncomingVideo, PathKind, Session, SessionEvent, VideoFrame, VideoSender,
+};
 pub use store::{PairedPeer, Store};
 
 /// mDNS service name; only Legato instances see each other.

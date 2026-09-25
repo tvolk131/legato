@@ -31,6 +31,8 @@ pub struct EncodedFrame {
     pub keyframe: bool,
     /// Presentation time, from the start of the stream.
     pub pts: Duration,
+    /// When the picture appeared on the display, if the caller said.
+    pub shown_at: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +275,7 @@ unsafe fn to_annex_b(sample: &CMSampleBuffer) -> Result<EncodedFrame> {
             data: out,
             keyframe,
             pts,
+            shown_at: None,
         })
     }
 }

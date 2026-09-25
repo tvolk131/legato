@@ -54,13 +54,46 @@ pub fn root(m: &Model) -> Element<'_, Message> {
     iced_m3::focus::scope(modal(main, pairing_dialog(m), m.pairing_open))
 }
 
-/// The window showing a Mac's extra display.
-pub fn viewer(name: &str, frame: Option<legato_engine::ViewerFrame>) -> Element<'static, Message> {
+/// The stats shown over the Mac's display: what's streaming, and how far behind it is.
+pub fn stats_text(stats: &legato_engine::ViewerStats, display: std::time::Duration) -> [String; 2] {
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    let total = stats.mac + stats.network + stats.decode + display;
+    [
+        format!(
+            "{}×{} · {:.0} fps · {:.1} Mbit/s · {}",
+            stats.width,
+            stats.height,
+            stats.fps,
+            stats.megabits_per_second,
+            if stats.relayed { "via relay" } else { "direct" }
+        ),
+        format!(
+            "{:.0} ms behind: Mac {:.0} · network {:.0} · decode {:.0} · display {:.0}",
+            ms(total),
+            ms(stats.mac),
+            ms(stats.network),
+            ms(stats.decode),
+            ms(display)
+        ),
+    ]
+}
+
+/// The window showing a Mac's extra display, with `stats` over it if they're shown.
+pub fn viewer(
+    name: &str,
+    frame: Option<legato_engine::ViewerFrame>,
+    stats: Option<[String; 2]>,
+) -> Element<'static, Message> {
     let content: Element<'static, Message> = match frame {
-        Some(frame) => iced::widget::shader(crate::viewer::Picture(frame))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
+        Some(frame) => {
+            let picture = iced::widget::shader(crate::viewer::Picture(frame))
+                .width(Length::Fill)
+                .height(Length::Fill);
+            match stats {
+                Some(lines) => iced::widget::stack![picture, stats_panel(lines)].into(),
+                None => picture.into(),
+            }
+        }
         None => container(
             column![
                 container(loading_indicator()).width(48).height(48),
@@ -84,6 +117,28 @@ pub fn viewer(name: &str, frame: Option<legato_engine::ViewerFrame>) -> Element<
             ..Default::default()
         })
         .into()
+}
+
+pub(crate) fn stats_panel([line1, line2]: [String; 2]) -> Element<'static, Message> {
+    container(
+        container(
+            column![
+                typography(line1, TypeScale::LabelMedium),
+                typography(line2, TypeScale::LabelMedium),
+            ]
+            .spacing(2),
+        )
+        .padding([6, 10])
+        .style(|_| container::Style {
+            background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.6).into()),
+            text_color: Some(iced::Color::WHITE),
+            border: iced::border::rounded(8),
+            ..Default::default()
+        }),
+    )
+    .align_right(Length::Fill)
+    .padding(12)
+    .into()
 }
 
 fn heading(text: &str) -> Element<'_, Message> {
@@ -326,9 +381,17 @@ fn settings(m: &Model) -> Element<'_, Message> {
         switch(m.config.clipboard.enabled)
             .label("Share copied text, images and files with paired devices")
             .on_toggle(Message::Clipboard),
-        heading("General"),
     ]
     .spacing(8);
+    if m.this.os == Some(legato_proto::Os::Windows) {
+        col = col.push(heading("Mac display"));
+        col = col.push(
+            switch(m.config.extend.stats)
+                .label("Show frame rate and delays over the picture (F10)")
+                .on_toggle(Message::Stats),
+        );
+    }
+    col = col.push(heading("General"));
     col = col.push(match m.autostart {
         Some(on) => switch(on)
             .label("Open Legato when you log in")

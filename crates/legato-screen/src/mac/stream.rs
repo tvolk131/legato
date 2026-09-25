@@ -30,6 +30,8 @@ struct Shared {
     keyframe: AtomicBool,
     /// Set while the network can't keep up: new pictures are skipped, not queued.
     backlogged: AtomicBool,
+    /// When the picture being encoded appeared on the display.
+    shown_at: Arc<Mutex<Option<Instant>>>,
 }
 
 struct LastImage(CFRetained<CVPixelBuffer>);
@@ -37,8 +39,10 @@ struct LastImage(CFRetained<CVPixelBuffer>);
 unsafe impl Send for LastImage {}
 
 impl Shared {
-    fn encode(&self, image: &CVPixelBuffer) {
+    fn encode(&self, image: &CVPixelBuffer, shown_at: Instant) {
         let encoder = self.encoder.lock().unwrap();
+        // Read by the encoder's output callback, which runs before `encode_now` returns.
+        *self.shown_at.lock().unwrap() = Some(shown_at);
         let keyframe = self.keyframe.swap(false, Ordering::Relaxed);
         if let Err(e) = encoder.encode_now(image, self.start.elapsed(), keyframe) {
             tracing::debug!("{e:#}");
@@ -63,6 +67,7 @@ impl DisplayStream {
         config: StreamConfig,
         on_frame: impl FnMut(EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
+        let shown_at: Arc<Mutex<Option<Instant>>> = Arc::default();
         let display = VirtualDisplay::create(
             name,
             super::Mode {
@@ -80,9 +85,15 @@ impl DisplayStream {
                 fps: config.fps,
                 bitrate: config.bitrate,
             },
-            move |frame| match frame {
-                Ok(frame) => on_frame(frame),
-                Err(e) => tracing::debug!("{e:#}"),
+            {
+                let shown_at = shown_at.clone();
+                move |frame| match frame {
+                    Ok(mut frame) => {
+                        frame.shown_at = *shown_at.lock().unwrap();
+                        on_frame(frame);
+                    }
+                    Err(e) => tracing::debug!("{e:#}"),
+                }
             },
         )?;
         let shared = Arc::new(Shared {
@@ -91,6 +102,7 @@ impl DisplayStream {
             last: Mutex::new(None),
             keyframe: AtomicBool::new(true),
             backlogged: AtomicBool::new(false),
+            shown_at,
         });
         let capture = {
             let shared = shared.clone();
@@ -104,7 +116,7 @@ impl DisplayStream {
                     *last = Some(LastImage(frame.image.clone()));
                     let wants_keyframe = shared.keyframe.load(Ordering::Relaxed);
                     if wants_keyframe || !shared.backlogged.load(Ordering::Relaxed) {
-                        shared.encode(&frame.image);
+                        shared.encode(&frame.image, frame.shown_at);
                     }
                 },
             )?
@@ -126,7 +138,8 @@ impl DisplayStream {
         // If the screen is still, no new picture is coming: re-send the last one.
         let last = self.shared.last.lock().unwrap();
         if let Some(LastImage(image)) = &*last {
-            self.shared.encode(image);
+            // Still on screen, so it's current as of now.
+            self.shared.encode(image, Instant::now());
         }
     }
 

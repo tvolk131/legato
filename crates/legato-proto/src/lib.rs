@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
@@ -235,10 +235,13 @@ pub mod blob {
 pub struct VideoFrameHeader {
     pub len: u32,
     pub keyframe: bool,
+    /// How long the sender spent on the frame, in microseconds: from the picture appearing
+    /// on its display to the frame being sent (capture, encoding, queueing).
+    pub sender_us: u32,
 }
 
 impl VideoFrameHeader {
-    pub const SIZE: usize = 5;
+    pub const SIZE: usize = 9;
     /// Larger frames are refused.
     pub const MAX_LEN: u32 = 32 * 1024 * 1024;
 
@@ -246,6 +249,7 @@ impl VideoFrameHeader {
         let mut out = [0u8; Self::SIZE];
         out[..4].copy_from_slice(&self.len.to_le_bytes());
         out[4] = u8::from(self.keyframe);
+        out[5..].copy_from_slice(&self.sender_us.to_le_bytes());
         out
     }
 
@@ -254,6 +258,7 @@ impl VideoFrameHeader {
         (len <= Self::MAX_LEN && bytes[4] <= 1).then_some(Self {
             len,
             keyframe: bytes[4] == 1,
+            sender_us: u32::from_le_bytes(bytes[5..].try_into().ok()?),
         })
     }
 }
@@ -447,6 +452,7 @@ mod tests {
         let header = VideoFrameHeader {
             len: 123_456,
             keyframe: true,
+            sender_us: 21_500,
         };
         assert_eq!(VideoFrameHeader::decode(header.encode()), Some(header));
         let mut huge = header.encode();

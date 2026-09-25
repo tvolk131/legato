@@ -1,10 +1,21 @@
 //! The window showing a Mac's extra display (virtual monitor mode): the decoded NV12
 //! pictures are uploaded as two textures and converted to RGB on the GPU.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
 use iced::wgpu;
 use iced::widget::shader::{self, Viewport};
 use iced::{Rectangle, mouse};
 use legato_engine::ViewerFrame;
+
+/// How long the latest picture took from decoded to uploaded for drawing, in microseconds.
+static DISPLAY_US: AtomicU64 = AtomicU64::new(0);
+
+/// How long the latest picture took from being decoded to being drawn.
+pub fn display_latency() -> Duration {
+    Duration::from_micros(DISPLAY_US.load(Ordering::Relaxed))
+}
 
 /// Draws the latest picture, letterboxed into the widget's bounds.
 pub struct Picture(pub ViewerFrame);
@@ -32,7 +43,8 @@ impl shader::Primitive for Primitive {
         bounds: &Rectangle,
         _viewport: &Viewport,
     ) {
-        let frame = &self.0;
+        let picture = &self.0;
+        let frame = &picture.nv12;
         let size = (frame.width, frame.height);
         if pipeline.textures.as_ref().is_none_or(|t| t.size != size) {
             pipeline.textures = Some(Textures::new(device, pipeline, size));
@@ -41,13 +53,17 @@ impl shader::Primitive for Primitive {
         if !pipeline
             .uploaded
             .as_ref()
-            .is_some_and(|last| std::sync::Arc::ptr_eq(last, frame))
+            .is_some_and(|last| std::sync::Arc::ptr_eq(last, picture))
         {
             let (w, h) = size;
             upload(queue, &textures.y, frame.y(), frame.stride, w, h);
             upload(queue, &textures.uv, frame.uv(), frame.stride, w / 2, h / 2);
             // Holding the frame also keeps its address from being reused by a new one.
-            pipeline.uploaded = Some(frame.clone());
+            pipeline.uploaded = Some(picture.clone());
+            DISPLAY_US.store(
+                picture.decoded_at.elapsed().as_micros() as u64,
+                Ordering::Relaxed,
+            );
         }
         // Letterbox: the render pass's viewport is the widget's bounds, so scale the quad.
         let picture = legato_core::controller::fit_picture(
