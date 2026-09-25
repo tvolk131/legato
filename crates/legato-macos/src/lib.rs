@@ -14,7 +14,7 @@ pub use activity::ActivityMonitor;
 pub use capture::Capture;
 pub use displays::{cursor_position, screens};
 pub use inject::Injector;
-pub use permissions::{Permissions, request_accessibility};
+pub use permissions::{Permissions, request_accessibility, request_missing};
 
 /// Written into the source-user-data field of every event we post, so our own event taps
 /// can tell injected input from the user's.
