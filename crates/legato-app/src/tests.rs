@@ -401,26 +401,39 @@ fn sample_stats() -> legato_engine::ViewerStats {
         network: Duration::from_micros(1200),
         decode: Duration::from_millis(7),
         relayed: false,
+        mac_max: Duration::from_millis(31),
+        decode_max: Duration::from_millis(12),
+        longest_gap: Duration::from_millis(48),
+        skipped: 2,
     }
 }
 
 #[test]
 fn stats_add_up_the_delay_stage_by_stage() {
     assert_eq!(
-        crate::view::stats_text(&sample_stats(), Duration::from_millis(3)),
+        crate::view::stats_text(
+            &sample_stats(),
+            Duration::from_millis(3),
+            Duration::from_millis(6)
+        ),
         [
             "3840×2160 · 60 fps · 24.1 Mbit/s · direct",
             "29 ms behind: Mac 18 · network 1 · decode 7 · display 3",
+            "Worst: Mac 31 · decode 12 · display 6 · longest gap 48 ms · 2 skipped",
         ]
     );
 }
 
 #[test]
 fn the_stats_panel_sits_in_the_corner() {
-    let lines = crate::view::stats_text(&sample_stats(), Duration::from_millis(3));
+    let lines = crate::view::stats_text(
+        &sample_stats(),
+        Duration::from_millis(3),
+        Duration::from_millis(6),
+    );
     let mut ui = iced_test::Simulator::with_size(
         iced::Settings::default(),
-        (900.0, 200.0),
+        (1000.0, 220.0),
         iced::widget::container(crate::view::stats_panel(lines))
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
@@ -451,13 +464,13 @@ fn display_options_offer_each_screen_and_limit_the_frame_rate() {
     let m = with_display_options(Placement::FullScreen);
     let mut ui = iced_test::Simulator::with_size(
         iced::Settings::default(),
-        (1024.0, 1300.0),
+        (1024.0, 1600.0),
         crate::view::root(&m),
     );
     snapshot(&mut ui, "display-options");
     assert!(ui.find("Full screen on display 2 (3840×2160)").is_ok());
     assert!(
-        ui.find("At 3840×2160 the Mac can keep up with 60 fps. Smaller sizes can go faster.")
+        ui.find("Sent at 3840×2160, the Mac can keep up with 60 fps. Smaller sizes can go faster.")
             .is_ok()
     );
     // 120 fps is more than the Mac can encode at 4K: choosing it does nothing.
@@ -480,6 +493,28 @@ fn display_options_offer_each_screen_and_limit_the_frame_rate() {
         Message::DisplayOptionsChanged(o) if o.placement == Placement::Window
     )));
 
+    // A 4K display sent at 2560×1440 can go at 120 fps.
+    let mut m = with_display_options(Placement::FullScreen);
+    if let Some(o) = &mut m.display_options {
+        o.quality = legato_engine::config::Quality::Balanced;
+    }
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        (1024.0, 1600.0),
+        crate::view::root(&m),
+    );
+    assert!(
+        ui.find(
+            "Sent at 2560×1440, the Mac can keep up with 120 fps. Smaller sizes can go faster."
+        )
+        .is_ok()
+    );
+    ui.click("120 fps").unwrap();
+    assert!(
+        ui.into_messages()
+            .any(|m| matches!(m, Message::DisplayOptionsChanged(o) if o.fps == 120))
+    );
+
     // At 2560×1440, 120 fps is fine.
     let mut m = with_display_options(Placement::FullScreen);
     if let Some(o) = &mut m.display_options {
@@ -488,7 +523,7 @@ fn display_options_offer_each_screen_and_limit_the_frame_rate() {
     }
     let mut ui = iced_test::Simulator::with_size(
         iced::Settings::default(),
-        (1024.0, 1300.0),
+        (1024.0, 1600.0),
         crate::view::root(&m),
     );
     ui.click("120 fps").unwrap();
@@ -515,6 +550,7 @@ fn display_options_are_saved_to_the_settings() {
         placement: Placement::FullScreen,
         display: 3,
         resolution: Resolution::Fixed,
+        quality: legato_engine::config::Quality::Balanced,
         fixed: (1920, 1080),
         fps: 144,
     };

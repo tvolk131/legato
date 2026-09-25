@@ -9,12 +9,19 @@ use iced::widget::shader::{self, Viewport};
 use iced::{Rectangle, mouse};
 use legato_engine::ViewerFrame;
 
-/// How long the latest picture took from decoded to uploaded for drawing, in microseconds.
+/// How long the latest picture took from decoded to uploaded for drawing, and the worst
+/// since [`take_worst_display_latency`], in microseconds.
 static DISPLAY_US: AtomicU64 = AtomicU64::new(0);
+static DISPLAY_MAX_US: AtomicU64 = AtomicU64::new(0);
 
 /// How long the latest picture took from being decoded to being drawn.
 pub fn display_latency() -> Duration {
     Duration::from_micros(DISPLAY_US.load(Ordering::Relaxed))
+}
+
+/// The worst of that since the last call.
+pub fn take_worst_display_latency() -> Duration {
+    Duration::from_micros(DISPLAY_MAX_US.swap(0, Ordering::Relaxed))
 }
 
 /// Draws the latest picture, letterboxed into the widget's bounds.
@@ -60,10 +67,9 @@ impl shader::Primitive for Primitive {
             upload(queue, &textures.uv, frame.uv(), frame.stride, w / 2, h / 2);
             // Holding the frame also keeps its address from being reused by a new one.
             pipeline.uploaded = Some(picture.clone());
-            DISPLAY_US.store(
-                picture.decoded_at.elapsed().as_micros() as u64,
-                Ordering::Relaxed,
-            );
+            let us = picture.decoded_at.elapsed().as_micros() as u64;
+            DISPLAY_US.store(us, Ordering::Relaxed);
+            DISPLAY_MAX_US.fetch_max(us, Ordering::Relaxed);
         }
         // Letterbox: the render pass's viewport is the widget's bounds, so scale the quad.
         let picture = legato_core::controller::fit_picture(

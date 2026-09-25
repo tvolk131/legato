@@ -55,8 +55,13 @@ pub fn root(m: &Model) -> Element<'_, Message> {
     iced_m3::focus::scope(modal(main, pairing_dialog(m), m.pairing_open))
 }
 
-/// The stats shown over the Mac's display: what's streaming, and how far behind it is.
-pub fn stats_text(stats: &legato_engine::ViewerStats, display: std::time::Duration) -> [String; 2] {
+/// The stats shown over the Mac's display: what's streaming, how far behind it is, and
+/// its worst frames (what shows as stutter).
+pub fn stats_text(
+    stats: &legato_engine::ViewerStats,
+    display: std::time::Duration,
+    display_worst: std::time::Duration,
+) -> [String; 3] {
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
     let total = stats.mac + stats.network + stats.decode + display;
     [
@@ -76,6 +81,14 @@ pub fn stats_text(stats: &legato_engine::ViewerStats, display: std::time::Durati
             ms(stats.decode),
             ms(display)
         ),
+        format!(
+            "Worst: Mac {:.0} · decode {:.0} · display {:.0} · longest gap {:.0} ms · {} skipped",
+            ms(stats.mac_max),
+            ms(stats.decode_max),
+            ms(display_worst.max(display)),
+            ms(stats.longest_gap),
+            stats.skipped
+        ),
     ]
 }
 
@@ -83,7 +96,7 @@ pub fn stats_text(stats: &legato_engine::ViewerStats, display: std::time::Durati
 pub fn viewer(
     name: &str,
     frame: Option<legato_engine::ViewerFrame>,
-    stats: Option<[String; 2]>,
+    stats: Option<[String; 3]>,
 ) -> Element<'static, Message> {
     let content: Element<'static, Message> = match frame {
         Some(frame) => {
@@ -120,12 +133,13 @@ pub fn viewer(
         .into()
 }
 
-pub(crate) fn stats_panel([line1, line2]: [String; 2]) -> Element<'static, Message> {
+pub(crate) fn stats_panel([line1, line2, line3]: [String; 3]) -> Element<'static, Message> {
     container(
         container(
             column![
                 typography(line1, TypeScale::LabelMedium),
                 typography(line2, TypeScale::LabelMedium),
+                typography(line3, TypeScale::LabelMedium),
             ]
             .spacing(2),
         )
@@ -449,7 +463,7 @@ const FIXED_SIZES: [(u32, u32); 3] = [(3840, 2160), (2560, 1440), (1920, 1080)];
 
 fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
     use iced_m3::{RadioOption, radio_group};
-    use legato_engine::config::{Placement, Resolution};
+    use legato_engine::config::{Placement, Quality, Resolution};
     let Some(o) = m.display_options.clone() else {
         return dialog(column![]);
     };
@@ -530,7 +544,27 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
         })
     };
 
-    let max = size.map(|(w, h)| legato_core::extend::max_fps(w, h));
+    let qualities = [
+        (Quality::Sharpest, "Sharpest: full resolution"),
+        (
+            Quality::Balanced,
+            "Balanced: up to 2560×1440, about twice as quick at 4K",
+        ),
+        (Quality::Fastest, "Fastest: up to 1920×1080"),
+    ]
+    .map(|(q, label)| RadioOption::new(q, label));
+    let quality_choice = {
+        let o = o.clone();
+        radio_group(qualities, Some(o.quality)).on_select(move |quality| {
+            changed(crate::model::DisplayOptions {
+                quality,
+                ..o.clone()
+            })
+        })
+    };
+    // Encoding sets the pace, at the size it's sent at.
+    let sent = size.map(|size| o.quality.stream_size(size));
+    let max = sent.map(|(w, h)| legato_core::extend::max_fps(w, h));
     let rates = legato_core::extend::FRAME_RATES.map(|fps| {
         RadioOption::new(fps, format!("{fps} fps")).disabled(max.is_some_and(|max| fps > max))
     });
@@ -540,10 +574,10 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
         radio_group(rates, Some(fps))
             .on_select(move |fps| changed(crate::model::DisplayOptions { fps, ..o.clone() }))
     };
-    let rate_note = match (size, max) {
-        (Some((w, h)), Some(max)) => {
-            format!("At {w}×{h} the Mac can keep up with {max} fps. Smaller sizes can go faster.")
-        }
+    let rate_note = match (sent, max) {
+        (Some((w, h)), Some(max)) => format!(
+            "Sent at {w}×{h}, the Mac can keep up with {max} fps. Smaller sizes can go faster."
+        ),
         _ => "Limited to what the Mac can keep up with at the window's size: 60 fps at 4K, \
               120 at 2560×1440, 144 at 1920×1080."
             .to_string(),
@@ -558,6 +592,8 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
         where_,
         heading("Size"),
         size_choice,
+        heading("Stream quality"),
+        quality_choice,
         heading("Frame rate"),
         rate_choice,
         body(rate_note),

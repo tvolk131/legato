@@ -24,6 +24,8 @@ fn a_virtual_display_streams_as_h264() {
             width: 1920,
             height: 1080,
             hidpi: true,
+            stream_width: 1920,
+            stream_height: 1080,
             fps: 60,
             bitrate: 20_000_000,
         },

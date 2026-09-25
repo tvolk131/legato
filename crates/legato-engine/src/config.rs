@@ -44,6 +44,36 @@ pub enum Resolution {
     Fixed,
 }
 
+/// The size the extra display is sent at, relative to its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Quality {
+    /// Full resolution.
+    #[default]
+    Sharpest,
+    /// At most 2560×1440: about half the work of 4K, a little softer.
+    Balanced,
+    /// At most 1920×1080.
+    Fastest,
+}
+
+impl Quality {
+    /// The largest stream size, if limited.
+    pub fn cap(self) -> Option<(u32, u32)> {
+        match self {
+            Quality::Sharpest => None,
+            Quality::Balanced => Some((2560, 1440)),
+            Quality::Fastest => Some((1920, 1080)),
+        }
+    }
+
+    /// The size the display is sent at.
+    pub fn stream_size(self, display: (u32, u32)) -> (u32, u32) {
+        self.cap()
+            .map_or(display, |cap| legato_core::extend::fit_within(display, cap))
+    }
+}
+
 /// Virtual monitor mode: the extra display a Mac shows on this machine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -54,6 +84,8 @@ pub struct Extend {
     /// For full screen: which display, 1-based, left to right as `legato doctor` lists them.
     pub display: usize,
     pub resolution: Resolution,
+    /// How sharp the picture is sent, against how fast.
+    pub quality: Quality,
     /// The fixed size in pixels.
     pub width: u32,
     pub height: u32,
@@ -75,6 +107,7 @@ impl Default for Extend {
             placement: None,
             display: 1,
             resolution: Resolution::Match,
+            quality: Quality::Sharpest,
             width: 3840,
             height: 2160,
             hidpi: true,
@@ -91,11 +124,15 @@ impl Extend {
     pub fn request_for(&self, width: u32, height: u32) -> legato_proto::ExtendRequest {
         use legato_core::extend::{max_fps, prefers_hidpi, usable_size};
         let (width, height) = usable_size(width, height);
+        let (stream_width, stream_height) = self.quality.stream_size((width, height));
         legato_proto::ExtendRequest {
             width,
             height,
             hidpi: self.hidpi && prefers_hidpi(width, height),
-            fps: self.fps.clamp(1, max_fps(width, height)),
+            stream_width,
+            stream_height,
+            // Encoding sets the pace, and it works at the stream's size.
+            fps: self.fps.clamp(1, max_fps(stream_width, stream_height)),
             bitrate: self.bitrate_mbps.clamp(2, 200) * 1_000_000,
         }
     }
@@ -309,6 +346,23 @@ mod tests {
             (1920, 1080, 144, false)
         );
         assert_eq!(r.bitrate, 40_000_000);
+        assert_eq!((r.stream_width, r.stream_height), (1920, 1080));
+    }
+
+    #[test]
+    fn a_4k_display_can_be_sent_smaller_and_faster() {
+        let extend = Extend {
+            fps: 144,
+            quality: Quality::Balanced,
+            ..Extend::default()
+        };
+        let r = extend.request_for(3840, 2160);
+        assert_eq!(
+            (r.width, r.height, r.hidpi),
+            (3840, 2160, true),
+            "still a 4K display"
+        );
+        assert_eq!((r.stream_width, r.stream_height, r.fps), (2560, 1440, 120));
     }
 
     #[test]

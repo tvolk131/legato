@@ -44,7 +44,11 @@ pub struct EncoderConfig {
     pub bitrate: u32,
 }
 
-type Sink = Mutex<Box<dyn FnMut(Result<EncodedFrame>) + Send>>;
+struct Sink {
+    on_frame: Mutex<Box<dyn FnMut(Result<EncodedFrame>) + Send>>,
+    /// Pictures the encoder dropped rather than encoding (it couldn't keep up).
+    dropped: std::sync::atomic::AtomicU32,
+}
 
 pub struct Encoder {
     session: CFRetained<VTCompressionSession>,
@@ -77,7 +81,10 @@ impl Encoder {
         config: EncoderConfig,
         on_frame: impl FnMut(Result<EncodedFrame>) + Send + 'static,
     ) -> Result<Self> {
-        let sink: *mut Sink = Box::into_raw(Box::new(Mutex::new(Box::new(on_frame))));
+        let sink: *mut Sink = Box::into_raw(Box::new(Sink {
+            on_frame: Mutex::new(Box::new(on_frame)),
+            dropped: std::sync::atomic::AtomicU32::new(0),
+        }));
         // SAFETY: standard VideoToolbox setup; `sink` outlives the session (freed in Drop
         // after the session is invalidated).
         unsafe {
@@ -172,6 +179,36 @@ impl Encoder {
         Ok(())
     }
 
+    /// Encodes a picture, then waits until the one before it (at `previous`) has been
+    /// delivered, leaving this one in flight. For when frames take most of their time
+    /// budget: the encoder works on one while the other goes out, at the cost of about a
+    /// frame of delay. Call [`Encoder::flush`] if no picture follows soon.
+    pub fn encode_overlapped(
+        &self,
+        image: &CVPixelBuffer,
+        pts: Duration,
+        keyframe: bool,
+        previous: Option<Duration>,
+    ) -> Result<()> {
+        self.encode(image, pts, keyframe)?;
+        if let Some(previous) = previous {
+            // SAFETY: a live session.
+            unsafe {
+                self.session
+                    .complete_frames(CMTime::new(previous.as_micros() as i64, 1_000_000))
+            };
+        }
+        Ok(())
+    }
+
+    /// How many pictures the encoder has dropped so far.
+    pub fn dropped(&self) -> u32 {
+        // SAFETY: the sink lives as long as the encoder.
+        unsafe { &*self.sink }
+            .dropped
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Waits until every queued picture has been delivered.
     pub fn flush(&self) {
         // SAFETY: a live session.
@@ -203,13 +240,15 @@ unsafe extern "C-unwind" fn output(
         Err(anyhow::anyhow!("encoding failed (OSStatus {status})"))
     } else if sample.is_null() {
         // The encoder dropped the frame.
+        sink.dropped
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
     } else {
         // SAFETY: VideoToolbox passes a valid sample buffer for the call's duration.
         unsafe { to_annex_b(&*sample) }
     };
-    if let Ok(mut sink) = sink.lock() {
-        sink(result);
+    if let Ok(mut on_frame) = sink.on_frame.lock() {
+        on_frame(result);
     }
 }
 
@@ -266,8 +305,9 @@ unsafe fn to_annex_b(sample: &CMSampleBuffer) -> Result<EncodedFrame> {
             bail!("malformed encoded frame");
         }
         let pts = sample.presentation_time_stamp();
+        // Exact for the microsecond timestamps `encode` is given.
         let pts = if pts.timescale > 0 && pts.value >= 0 {
-            Duration::from_secs_f64(pts.value as f64 / pts.timescale as f64)
+            Duration::from_micros((pts.value as i128 * 1_000_000 / pts.timescale as i128) as u64)
         } else {
             Duration::ZERO
         };

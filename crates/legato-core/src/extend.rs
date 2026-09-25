@@ -31,6 +31,16 @@ pub fn prefers_hidpi(width: u32, height: u32) -> bool {
     width >= 2560 && height >= 1440
 }
 
+/// `size` scaled down (keeping its shape) to fit within `cap`, if it doesn't already.
+pub fn fit_within(size: (u32, u32), cap: (u32, u32)) -> (u32, u32) {
+    let (w, h) = (size.0.max(1) as f64, size.1.max(1) as f64);
+    let scale = (cap.0 as f64 / w).min(cap.1 as f64 / h).min(1.0);
+    (
+        ((w * scale).round() as u32) & !1,
+        ((h * scale).round() as u32) & !1,
+    )
+}
+
 /// A size the virtual display and the video pipeline accept: even, and not tiny.
 pub fn usable_size(width: u32, height: u32) -> (u32, u32) {
     (width.clamp(640, 7680) & !1, height.clamp(480, 4320) & !1)
@@ -121,6 +131,18 @@ mod tests {
         assert_eq!(max_fps(1920, 1080), 144);
         assert_eq!(max_fps(3440, 1440), 90);
         assert_eq!(max_fps(7680, 4320), 30, "never below the slowest option");
+    }
+
+    #[test]
+    fn streams_fit_within_a_cap_keeping_their_shape() {
+        assert_eq!(fit_within((3840, 2160), (2560, 1440)), (2560, 1440));
+        assert_eq!(fit_within((3440, 1440), (2560, 1440)), (2560, 1072));
+        assert_eq!(
+            fit_within((1920, 1080), (2560, 1440)),
+            (1920, 1080),
+            "never up"
+        );
+        assert_eq!(max_fps(2560, 1440), 120, "the budget follows the stream");
     }
 
     #[test]

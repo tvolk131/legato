@@ -36,6 +36,14 @@ pub struct ViewerStats {
     pub network: Duration,
     pub decode: Duration,
     pub relayed: bool,
+    /// The worst frames: what stutters.
+    pub mac_max: Duration,
+    pub decode_max: Duration,
+    /// The longest wait between pictures while they were coming (pauses of more than a
+    /// quarter of a second are the screen standing still, not a stutter).
+    pub longest_gap: Duration,
+    /// Pictures the Mac skipped (the network backed up) or its encoder dropped.
+    pub skipped: u32,
 }
 
 #[cfg(target_os = "macos")]
@@ -70,13 +78,23 @@ mod host {
 
     /// What the stream should be for `request`, within what the Mac can encode.
     fn stream_config(request: ExtendRequest) -> StreamConfig {
-        use legato_core::extend::{max_fps, usable_size};
+        use legato_core::extend::{fit_within, max_fps, usable_size};
         let (width, height) = usable_size(request.width, request.height);
+        let (stream_width, stream_height) = if request.stream_width == 0 {
+            (width, height)
+        } else {
+            fit_within(
+                usable_size(request.stream_width, request.stream_height),
+                (width, height),
+            )
+        };
         StreamConfig {
             width,
             height,
             hidpi: request.hidpi,
-            fps: request.fps.clamp(1, max_fps(width, height)),
+            stream_width,
+            stream_height,
+            fps: request.fps.clamp(1, max_fps(stream_width, stream_height)),
             bitrate: request.bitrate.clamp(1_000_000, 200_000_000),
         }
     }
@@ -122,7 +140,8 @@ mod host {
                                     let Some(frame) = frame else { break };
                                     let waiting = queued.fetch_sub(1, Ordering::Relaxed) - 1;
                                     let spent = frame.shown_at.map_or(Duration::ZERO, |t| t.elapsed());
-                                    video.send(&frame.data, frame.keyframe, spent).await?;
+                                    let skipped = stream.take_missed().min(u16::MAX.into()) as u16;
+                                    video.send(&frame.data, frame.keyframe, spent, skipped).await?;
                                     stream.set_backlogged(waiting >= BACKLOG);
                                 }
                                 _ = check.tick() => {
@@ -169,9 +188,11 @@ mod host {
             match tokio::task::spawn_blocking(move || stream.reconfigure(config)).await {
                 Ok(Ok(())) => {
                     tracing::info!(
-                        "extra display is now {}x{} at {} fps",
+                        "extra display is now {}x{}, sent at {}x{} and {} fps",
                         config.width,
                         config.height,
+                        config.stream_width,
+                        config.stream_height,
                         config.fps
                     );
                     self.report_bounds();
@@ -229,7 +250,14 @@ mod viewer {
         bytes: u64,
         mac: Duration,
         decode: Duration,
+        mac_max: Duration,
+        decode_max: Duration,
+        longest_gap: Duration,
+        skipped: u32,
     }
+
+    /// Longer than this between pictures is the screen standing still, not a stutter.
+    const STILL: Duration = Duration::from_millis(250);
 
     /// Decodes a video stream from the Mac into `frames` until it ends.
     pub(crate) fn decode(
@@ -274,7 +302,9 @@ mod viewer {
                 let mut totals = Totals::default();
                 let mut since = Instant::now();
                 let mut size = (0, 0);
+                let mut last_picture: Option<Instant> = None;
                 while let Some(frame) = rx.blocking_recv() {
+                    totals.skipped += u32::from(frame.skipped);
                     if !synced && !frame.keyframe {
                         continue;
                     }
@@ -290,6 +320,14 @@ mod viewer {
                             totals.bytes += frame.data.len() as u64;
                             totals.mac += frame.sender_time;
                             totals.decode += decode;
+                            totals.mac_max = totals.mac_max.max(frame.sender_time);
+                            totals.decode_max = totals.decode_max.max(decode);
+                            if let Some(previous) = last_picture.replace(decoded_at) {
+                                let gap = decoded_at - previous;
+                                if gap < STILL {
+                                    totals.longest_gap = totals.longest_gap.max(gap);
+                                }
+                            }
                             if let Some(nv12) = pictures.into_iter().last() {
                                 size = (nv12.width, nv12.height);
                                 frames.send_replace(Some(Arc::new(Picture {
@@ -322,6 +360,10 @@ mod viewer {
                             network,
                             decode: totals.decode / totals.frames,
                             relayed: matches!(path, Some((PathKind::Relay, _))),
+                            mac_max: totals.mac_max,
+                            decode_max: totals.decode_max,
+                            longest_gap: totals.longest_gap,
+                            skipped: totals.skipped,
                         }));
                         totals = Totals::default();
                         since = Instant::now();
