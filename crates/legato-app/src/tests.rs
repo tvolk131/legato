@@ -682,7 +682,11 @@ fn gpu_renders_the_dialogs_and_the_viewer() {
         decode: Duration::ZERO,
     });
     let (width, height, rgba) = render(
-        crate::view::viewer("Tommy's MacBook Pro", Some(frame), None),
+        crate::view::viewer(
+            "Tommy's MacBook Pro",
+            Some(tokio::sync::watch::channel(Some(frame)).1),
+            None,
+        ),
         (320.0, 180.0),
         "viewer",
     );

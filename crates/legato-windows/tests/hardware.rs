@@ -988,3 +988,109 @@ fn keys_go_through_the_portal_to_a_focused_winit_viewer() {
     drop(winit);
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// Why the viewer froze while the app's main window was in front: both are windows of
+/// the app's UI thread. After every update the UI redraws both, and winit paints one
+/// window per turn of its loop, taking whichever `WM_PAINT` Windows hands out first.
+/// This mimics that and counts which window gets painted, with each one in front.
+#[test]
+#[ignore = "shows windows"]
+fn which_of_a_threads_windows_gets_painted_when_both_need_it() {
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{RDW_INTERNALPAINT, RedrawWindow};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE,
+        PeekMessageW, RegisterClassW, TranslateMessage, WM_PAINT, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+        WS_VISIBLE,
+    };
+    use windows::core::w;
+
+    unsafe extern "system" fn proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+    let primary = screens()
+        .displays
+        .into_iter()
+        .find(|d| d.primary)
+        .unwrap()
+        .bounds;
+    let (x, y) = (primary.x as i32 + 40, primary.y as i32 + 40);
+    unsafe {
+        let instance = GetModuleHandleW(None).unwrap().into();
+        RegisterClassW(&WNDCLASSW {
+            lpfnWndProc: Some(proc),
+            hInstance: instance,
+            lpszClassName: w!("LegatoPaintOrder"),
+            ..Default::default()
+        });
+        let window = |title, dx| {
+            CreateWindowExW(
+                Default::default(),
+                w!("LegatoPaintOrder"),
+                title,
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                x + dx,
+                y,
+                300,
+                200,
+                None,
+                None,
+                Some(instance),
+                None,
+            )
+            .unwrap()
+        };
+        let (main, viewer) = (window(w!("main"), 0), window(w!("viewer"), 340));
+        let mut summary = Vec::new();
+        for (name, front) in [("main window in front", main), ("viewer in front", viewer)] {
+            let focused = viewer::focus(front);
+            let (mut main_paints, mut viewer_paints) = (0, 0);
+            for _ in 0..300 {
+                let _ = RedrawWindow(Some(main), None, None, RDW_INTERNALPAINT);
+                let _ = RedrawWindow(Some(viewer), None, None, RDW_INTERNALPAINT);
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                    if msg.message == WM_PAINT {
+                        if msg.hwnd == main {
+                            main_paints += 1;
+                        } else if msg.hwnd == viewer {
+                            viewer_paints += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+            let line = format!(
+                "{name} (focused {focused}): main painted {main_paints}, viewer {viewer_paints}"
+            );
+            eprintln!("{line}");
+            summary.push(line);
+        }
+        // Only the viewer asks to be painted: it always is.
+        let mut viewer_paints = 0;
+        for _ in 0..300 {
+            let _ = RedrawWindow(Some(viewer), None, None, RDW_INTERNALPAINT);
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+                if msg.message == WM_PAINT {
+                    viewer_paints += usize::from(msg.hwnd == viewer);
+                    break;
+                }
+            }
+        }
+        eprintln!("only the viewer repainted: viewer painted {viewer_paints}");
+        let _ = DestroyWindow(main);
+        let _ = DestroyWindow(viewer);
+        assert_eq!(viewer_paints, 300, "{summary:?}");
+    }
+}

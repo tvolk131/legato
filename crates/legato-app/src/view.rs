@@ -93,15 +93,16 @@ pub fn stats_text(
     ]
 }
 
-/// The window showing a Mac's extra display, with `stats` over it if they're shown.
+/// The window showing a Mac's extra display (`pictures`, once the first has come), with
+/// `stats` over it if they're shown.
 pub fn viewer(
     name: &str,
-    frame: Option<legato_engine::ViewerFrame>,
+    pictures: Option<crate::viewer::Source>,
     stats: Option<[String; 3]>,
 ) -> Element<'static, Message> {
-    let content: Element<'static, Message> = match frame {
-        Some(frame) => {
-            let picture = iced::widget::shader(crate::viewer::Picture(frame))
+    let content: Element<'static, Message> = match pictures {
+        Some(pictures) => {
+            let picture = iced::widget::shader(crate::viewer::Picture(pictures))
                 .width(Length::Fill)
                 .height(Length::Fill);
             match stats {
