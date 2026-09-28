@@ -249,7 +249,7 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
         push_distance: 30.0,
         ..Default::default()
     }));
-    capture.send(CaptureCommand::Event(Event::PeerYield(peer)));
+    capture.send(CaptureCommand::Event(Event::PeerLost(peer)));
     std::thread::sleep(Duration::from_millis(150));
     let _ = rx.try_iter().count();
     post(edge.right() - 1.0, y, 600);

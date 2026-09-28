@@ -135,13 +135,15 @@ pub(crate) async fn run(
     // Being driven: inject on a thread of its own.
     let by_peer: Arc<RwLock<HashMap<EndpointId, Arc<Session>>>> = Arc::default();
     let (inject_tx, inject_rx) = std_mpsc::channel();
+    // Peers this machine's own input took over from (they were sent `Yield`).
+    let (yielded_tx, mut yielded_rx) = mpsc::unbounded_channel::<EndpointId>();
     let injector = {
         let by_peer = by_peer.clone();
         let invert = config.scrolling.invert_wheel;
         let status = ctx.engine.status.clone();
         std::thread::Builder::new()
             .name("legato-inject".into())
-            .spawn(move || inject_loop(inject_rx, by_peer, invert, status))?
+            .spawn(move || inject_loop(inject_rx, by_peer, invert, status, yielded_tx))?
     };
 
     // Driving: capture this machine's input. It always runs, so the user's own input is
@@ -172,11 +174,11 @@ pub(crate) async fn run(
                             s.send_datagram(&msg);
                         }
                     }
-                    Action::Release { .. } => {
+                    Action::Release { .. } | Action::Unpark => {
                         let _ = active_tx.send(None);
                     }
                     // Still on the same peer, just shown in the portal window again.
-                    Action::Capture | Action::EnterPortal { .. } => {}
+                    Action::Capture | Action::EnterPortal { .. } | Action::ShowOnPortal { .. } => {}
                     Action::Drop { to, files } => {
                         if let Some(s) = sessions.get(&to) {
                             let _ = dropped_tx.send((s.clone(), files));
@@ -339,6 +341,13 @@ pub(crate) async fn run(
             Some((session, paths)) = dropped_rx.recv() => {
                 send_files_in_background(&ctx, session, paths, FilePurpose::Drop);
             }
+            Some(peer) = yielded_rx.recv() => {
+                // This machine's own input took over from the peer driving it: while its
+                // own pointer moves here, that peer hears where, to carry on from there.
+                if let Some(&machine) = ids.get(&peer) {
+                    capture.send(CaptureCommand::Event(Event::YieldedTo(machine)));
+                }
+            }
             Some(command) = commands.recv() => match command {
                 RunCommand::SendFiles { to, paths, purpose } => {
                     match by_peer.read().unwrap().get(&to).cloned() {
@@ -442,6 +451,8 @@ pub(crate) async fn run(
                                     peers.get(&machine).map_or("the other machine", |p| p.session.remote.name.as_str())
                                 );
                                 capture.send(CaptureCommand::Event(Event::PeerYield(machine)));
+                                // Parked, not driving it: this machine's next input does.
+                                ctx.status(Status::Controlling(None));
                             }
                             Control::Screens(screens) => {
                                 ctx.status(Status::PeerScreens { id: peer, screens: screens.clone() });
@@ -553,17 +564,24 @@ pub(crate) async fn run(
                             }
                             Control::Hello(_) => {}
                             input => {
+                                if matches!(input, Control::Enter { .. }) {
+                                    // Its pointer came across onto this machine's screens.
+                                    capture.send(CaptureCommand::Event(Event::PeerEntered(machine)));
+                                }
                                 let _ = inject_tx.send(Input::Control(peer, input));
                             }
                         }
                     }
                     SessionEvent::Datagram { peer, msg } => {
                         if let Datagram::Pointer { seq, pos } = msg {
-                            // The Mac's own pointer on the display shown here.
-                            if viewing.as_ref().is_some_and(|v| v.peer == peer)
-                                && let Some(&machine) = ids.get(&peer)
-                            {
-                                capture.send(CaptureCommand::PeerPointer { peer: machine, seq, pos });
+                            // Where the peer's own mouse has its pointer: shown here if
+                            // it's on a display shown here, or carried on from.
+                            if let Some(&machine) = ids.get(&peer) {
+                                capture.send(CaptureCommand::Event(Event::PeerPointer {
+                                    peer: machine,
+                                    seq,
+                                    pos,
+                                }));
                             }
                             continue;
                         }
@@ -648,6 +666,7 @@ fn inject_loop(
     sessions: Arc<RwLock<HashMap<EndpointId, Arc<Session>>>>,
     invert_wheel: bool,
     status: tokio::sync::broadcast::Sender<Status>,
+    yielded: mpsc::UnboundedSender<EndpointId>,
 ) {
     let mut receiver = Receiver::new(platform::receiver_config());
     let Some(mut injector) = Injector::new() else {
@@ -779,6 +798,7 @@ fn inject_loop(
                     driver.and_then(|d| sessions.read().unwrap().get(&d).cloned())
                 {
                     session.send(Control::Yield);
+                    let _ = yielded.send(session.peer);
                 }
             } else {
                 injector.apply(&action);

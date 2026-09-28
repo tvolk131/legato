@@ -146,6 +146,12 @@ impl TapState {
                     self.warped_to = Some(to);
                     self.set_hidden(false);
                 }
+                // The peer's pointer came across and put the cursor where it is.
+                Action::Unpark => {
+                    self.pin = None;
+                    self.warped_to = None;
+                    self.set_hidden(false);
+                }
                 _ => {}
             }
             (self.sink)(action);
@@ -179,7 +185,7 @@ impl TapState {
                 CaptureCommand::SetRemap(peer, remap) => self.controller.set_remap(peer, remap),
                 CaptureCommand::SetConfig(config) => self.controller.set_config(config),
                 // Portals are shown on Windows only.
-                CaptureCommand::SetPortal(_) | CaptureCommand::PeerPointer { .. } => {}
+                CaptureCommand::SetPortal(_) => {}
                 CaptureCommand::SetShown(shown) => self.controller.set_shown(shown),
                 CaptureCommand::Stop => return false,
             }
