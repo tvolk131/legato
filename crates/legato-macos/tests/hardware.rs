@@ -188,14 +188,36 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
             }
         )
     });
-    // While captured, motion goes to the peer and the cursor stays put.
+    // While captured, motion goes to the peer and the cursor stays put. Each event says
+    // where it would take the cursor from where it's held.
     let held = cursor_position();
-    post(held.x, held.y, 30);
-    post(held.x, held.y, 30);
+    post(held.x + 30.0, held.y, 30);
+    post(held.x + 30.0, held.y, 30);
+    // The first event after a warp reports the warp's jump in its delta (rdar://11757097):
+    // here a big move back towards this Mac, though it barely moved. It mustn't hand the
+    // pointer back.
+    post(held.x + 2.0, held.y, -600);
     let later: Vec<Action> = rx.try_iter().collect();
     let still = cursor_position();
+    let bounced = later
+        .iter()
+        .any(|a| matches!(a, Action::Release { .. } | Action::Send { msg: Control::Leave, .. }));
 
+    // Back on this Mac, with a push needed to cross again: the first event after the warp
+    // back, spiking towards the peer, mustn't cross straight over.
+    capture.send(CaptureCommand::SetConfig(ControllerConfig {
+        push_distance: 30.0,
+        ..Default::default()
+    }));
     capture.send(CaptureCommand::Event(Event::PeerYield(peer)));
+    std::thread::sleep(Duration::from_millis(150));
+    let back = cursor_position();
+    let _ = rx.try_iter().count();
+    post(back.x, back.y, 600);
+    let recrossed = rx
+        .try_iter()
+        .any(|a| matches!(a, Action::Send { msg: Control::Enter { .. }, .. }));
+
     std::thread::sleep(Duration::from_millis(100));
     drop(capture);
     Injector::new()
@@ -211,4 +233,6 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
         (still.x - held.x).abs() < 1.0 && (still.y - held.y).abs() < 1.0,
         "cursor moved: {held:?} → {still:?}"
     );
+    assert!(!bounced, "a warp's delta spike handed the pointer back: {later:?}");
+    assert!(!recrossed, "a warp's delta spike crossed straight back over");
 }

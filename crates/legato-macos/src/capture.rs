@@ -63,6 +63,7 @@ impl Capture {
                     out: Vec::new(),
                     port: None,
                     pin: None,
+                    warped_to: None,
                     hidden: false,
                     flags: 0,
                 };
@@ -108,6 +109,9 @@ struct TapState {
     port: Option<CFRetained<CFMachPort>>,
     /// Where the cursor is held while captured.
     pin: Option<CGPoint>,
+    /// Where the cursor was last warped to, until the next motion event: that event's
+    /// delta fields can't be trusted (see [`TapState::motion`]).
+    warped_to: Option<CGPoint>,
     hidden: bool,
     /// Last seen modifier flags, to tell presses from releases.
     flags: u64,
@@ -132,11 +136,14 @@ impl TapState {
                     );
                     self.pin = Some(pin);
                     warp(pin);
+                    self.warped_to = Some(pin);
                     self.set_hidden(true);
                 }
                 Action::Release { warp } => {
                     self.pin = None;
-                    self::warp(CGPoint::new(warp.x, warp.y));
+                    let to = CGPoint::new(warp.x, warp.y);
+                    self::warp(to);
+                    self.warped_to = Some(to);
                     self.set_hidden(false);
                 }
                 _ => {}
@@ -189,10 +196,7 @@ impl TapState {
                 || t == CGEventType::RightMouseDragged
                 || t == CGEventType::OtherMouseDragged =>
             {
-                let (dx, dy) = (
-                    int(CGEventField::MouseEventDeltaX) as f64,
-                    int(CGEventField::MouseEventDeltaY) as f64,
-                );
+                let (dx, dy) = self.motion(ev);
                 if self.pin.is_some() {
                     // Dropped at the HID tap, so the hidden cursor doesn't move.
                     self.handle(Event::CapturedMotion {
@@ -257,6 +261,31 @@ impl TapState {
             }
             _ => Verdict::Pass,
         }
+    }
+
+    /// How far a motion event moved the pointer.
+    ///
+    /// macOS's delta fields are wrong for the first event after a warp: they include the
+    /// warp's jump (rdar://11757097). Warping to the pin when taking over another machine
+    /// then read as a big push back towards this one, and warping back as a big push
+    /// towards the other machine, so the pointer bounced between them on every other event.
+    /// So while pinned (events are dropped, and the cursor held there) the motion is where
+    /// each event would take the cursor, measured from the pin, and just after a warp it's
+    /// measured from where the warp put the cursor.
+    fn motion(&mut self, ev: &CGEvent) -> (f64, f64) {
+        let loc = CGEvent::location(Some(ev));
+        if let Some(pin) = self.pin {
+            self.warped_to = None;
+            return (loc.x - pin.x, loc.y - pin.y);
+        }
+        if let Some(from) = self.warped_to.take() {
+            return (loc.x - from.x, loc.y - from.y);
+        }
+        let int = |field| CGEvent::integer_value_field(Some(ev), field);
+        (
+            int(CGEventField::MouseEventDeltaX) as f64,
+            int(CGEventField::MouseEventDeltaY) as f64,
+        )
     }
 
     /// Keeps the bounds of the display a peer shows current: it moves when it's arranged
