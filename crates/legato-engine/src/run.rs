@@ -663,6 +663,8 @@ fn inject_loop(
     let (mut typing_noted, mut ignored_noted) = (false, false);
     // For the log: when the latest entry was, until the cursor has been noted.
     let mut entered_at: Option<Instant> = None;
+    // For the log: how many of the driver's movements came, and moved the cursor, since.
+    let (mut moves_came, mut moves_used) = (0u32, 0u32);
     let mut controlled = false;
     loop {
         let input = match receiver.next_deadline() {
@@ -676,6 +678,7 @@ fn inject_loop(
                     driver = Some(peer);
                     (typing_noted, ignored_noted) = (false, false);
                     entered_at = Some(now);
+                    (moves_came, moves_used) = (0, 0);
                 }
                 let key_down = matches!(msg, Control::Key { down: true, .. });
                 // Only the current driver's input counts.
@@ -709,7 +712,12 @@ fn inject_loop(
                 false
             }
             Ok(Input::Datagram(msg)) => {
+                let before = out.len();
                 receiver.datagram(msg, &mut out);
+                moves_came = moves_came.saturating_add(1);
+                if out.len() > before {
+                    moves_used = moves_used.saturating_add(1);
+                }
                 false
             }
             Ok(Input::LocalActivity(what)) => {
@@ -745,7 +753,6 @@ fn inject_loop(
         if entered_at
             .is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_millis(400))
             && receiver.is_controlled()
-            && let Some(state) = platform::cursor_state()
         {
             entered_at = None;
             let name = driver
@@ -757,7 +764,13 @@ fn inject_loop(
                         .map(|s| s.remote.name.clone())
                 })
                 .unwrap_or_else(|| "another machine".into());
-            tracing::info!("\"{name}\" is driving this machine; the cursor here is {state}.");
+            // Movements are datagrams, which can be lost; clicks carry their own position.
+            let cursor = platform::cursor_state()
+                .map_or_else(String::new, |state| format!("; the cursor here is {state}"));
+            tracing::info!(
+                "\"{name}\" is driving this machine: {moves_came} of its movements came since it \
+                 took over, {moves_used} moved the cursor{cursor}."
+            );
         }
         receiver.tick(now, &mut out);
         for action in out.drain(..) {
