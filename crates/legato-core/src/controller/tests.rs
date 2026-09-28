@@ -208,8 +208,20 @@ fn the_macs_own_pointer_on_its_shown_display_is_reported_to_the_viewer() {
     assert_eq!(reported.len(), 2);
     assert!(reported[1].0 > reported[0].0, "newer reports win");
     assert_eq!(reported[1].1, Point::new(520.0, -310.0));
-    // On the MacBook, or once it's no longer shown: nothing to tell.
+    // Onto the MacBook: the PC hears once more, so it knows the pointer left...
     assert_eq!(motion(&mut c, 500.0, 400.0, 0.0, &mut out), Verdict::Pass);
+    assert!(
+        matches!(
+            std::mem::take(&mut out)[..],
+            [Action::Datagram {
+                to: PC,
+                msg: Datagram::Pointer { pos, .. },
+            }] if pos == Point::new(500.0, 400.0)
+        ),
+        "the PC wasn't told the pointer left the display it shows"
+    );
+    // ...and then, or once it's no longer shown, there's nothing to tell.
+    assert_eq!(motion(&mut c, 510.0, 400.0, 0.0, &mut out), Verdict::Pass);
     c.set_shown(None);
     assert_eq!(motion(&mut c, 500.0, -300.0, -3.0, &mut out), Verdict::Pass);
     assert!(out.is_empty(), "{out:?}");
@@ -608,8 +620,24 @@ fn releasing_carried_files_back_home_drops_nothing() {
     assert!(!h.c.is_carrying());
 }
 
+/// The Mac's own pointer is at `(x, y)` (its native coordinates), as it reports.
+fn mac_pointer(seq: u32, x: f64, y: f64) -> Event {
+    Event::PeerPointer {
+        peer: MAC,
+        seq,
+        pos: Point::new(x, y),
+    }
+}
+
+fn entered_at(actions: &[Action]) -> Option<Point> {
+    sent(actions).into_iter().find_map(|m| match m {
+        Control::Enter { pos, .. } => Some(pos),
+        _ => None,
+    })
+}
+
 #[test]
-fn yield_returns_the_cursor_where_it_left() {
+fn a_yield_parks_the_pointer_on_the_mac() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);
     h.step(
@@ -627,13 +655,11 @@ fn yield_returns_the_cursor_where_it_left() {
     );
     h.take();
     h.step(0, Event::PeerYield(MAC));
-    let out = h.take();
-    assert_eq!(h.c.active_peer(), None);
-    assert!(out.contains(&Action::Release {
-        warp: Point::new(1920.0, 2159.0)
-    }));
-    assert!(sent(&out).contains(&Control::Leave));
-    // The held key's release is swallowed and goes nowhere: the Mac already let go.
+    // The Mac's own trackpad has it: nothing goes back to Windows, and nothing is sent
+    // (the Mac already let go of everything).
+    assert_eq!(h.c.active_peer(), Some(MAC), "still over there, parked");
+    assert!(h.take().is_empty());
+    // The held key's release is swallowed and goes nowhere, and doesn't take over.
     assert_eq!(
         h.step(
             0,
@@ -645,6 +671,208 @@ fn yield_returns_the_cursor_where_it_left() {
         Verdict::Swallow
     );
     assert!(h.take().is_empty());
+}
+
+#[test]
+fn parked_it_carries_on_from_where_the_macs_own_trackpad_left_the_pointer() {
+    let mut h = Harness::new();
+    h.cross_to_mac(1920.0);
+    h.take();
+    h.step(0, Event::PeerYield(MAC));
+    // The Mac's trackpad moves its pointer around its own screen.
+    h.step(8, mac_pointer(1, 400.0, 300.0));
+    h.step(8, mac_pointer(2, 500.0, 600.0));
+    // An old report arriving late changes nothing.
+    h.step(8, mac_pointer(1, 50.0, 50.0));
+    assert!(h.take().is_empty());
+    // Windows' mouse moves: it takes the pointer back from there, no jump.
+    h.step(
+        8,
+        Event::CapturedMotion {
+            delta: Point::new(15.0, 0.0),
+        },
+    );
+    let out = h.take();
+    assert_eq!(entered_at(&out), Some(Point::new(500.0, 600.0)), "{out:?}");
+    assert!(
+        out.iter().any(|a| matches!(
+            a,
+            Action::Datagram {
+                msg: Datagram::Motion { pos, .. },
+                ..
+            } if (pos.x - 510.0).abs() < 0.01 && pos.y == 600.0
+        )),
+        "and moves on from there: {out:?}"
+    );
+}
+
+#[test]
+fn parked_a_key_or_click_takes_the_pointer_back_first() {
+    for event in [
+        Event::Key {
+            usage: A,
+            down: true,
+        },
+        Event::Button {
+            button: Button::Left,
+            down: true,
+        },
+        Event::Scroll(Scroll::Wheel { x: 0.0, y: -120.0 }),
+    ] {
+        let mut h = Harness::new();
+        h.cross_to_mac(1920.0);
+        h.step(0, Event::PeerYield(MAC));
+        h.step(8, mac_pointer(1, 700.0, 200.0));
+        h.take();
+        assert_eq!(h.step(8, event.clone()), Verdict::Swallow);
+        let out = sent(&h.take());
+        assert!(
+            matches!(out.first(), Some(Control::Enter { pos, .. }) if *pos == Point::new(700.0, 200.0)),
+            "{event:?}: {out:?}"
+        );
+        assert_eq!(out.len(), 2, "then the input itself: {out:?}");
+    }
+}
+
+#[test]
+fn parked_the_macs_pointer_coming_across_brings_it_back_here() {
+    let mut h = Harness::new();
+    h.cross_to_mac(1920.0);
+    h.step(0, Event::PeerYield(MAC));
+    h.take();
+    // The Mac's trackpad pushes up onto Windows: it sends Enter.
+    h.step(8, Event::PeerEntered(MAC));
+    assert_eq!(h.c.active_peer(), None);
+    assert_eq!(
+        h.take(),
+        [Action::Unpark],
+        "shown where the Mac put it, not warped"
+    );
+}
+
+#[test]
+fn losing_the_mac_while_parked_brings_the_cursor_home() {
+    let mut h = Harness::new();
+    h.cross_to_mac(1920.0);
+    h.step(0, Event::PeerYield(MAC));
+    h.take();
+    h.step(8, Event::PeerLost(MAC));
+    assert_eq!(h.c.active_peer(), None);
+    assert!(h.take().contains(&Action::Release {
+        warp: Point::new(1920.0, 2159.0)
+    }));
+}
+
+#[test]
+fn after_taking_over_this_machine_reports_its_own_pointer_to_the_one_it_took_over_from() {
+    let mut h = Harness::new();
+    // The Mac drove Windows, and Windows' own mouse took over.
+    h.step(0, Event::YieldedTo(MAC));
+    h.step(
+        8,
+        Event::LocalMotion {
+            pos: Point::new(1000.0, 700.0),
+            attempted: Point::new(5.0, 0.0),
+        },
+    );
+    let out = h.take();
+    assert!(
+        matches!(
+            out.as_slice(),
+            [Action::Datagram {
+                to: MAC,
+                msg: Datagram::Pointer { pos, .. }
+            }] if *pos == Point::new(1000.0, 700.0)
+        ),
+        "{out:?}"
+    );
+    // Once the Mac drives Windows again it knows where the pointer is.
+    h.step(0, Event::PeerEntered(MAC));
+    h.step(
+        8,
+        Event::LocalMotion {
+            pos: Point::new(1010.0, 700.0),
+            attempted: Point::new(5.0, 0.0),
+        },
+    );
+    assert!(h.take().is_empty());
+}
+
+#[test]
+fn a_report_of_the_macs_pointer_on_its_own_screen_parks_this_machine() {
+    let mut h = Harness::new();
+    h.step(
+        8,
+        Event::LocalMotion {
+            pos: Point::new(1000.0, 700.0),
+            attempted: Point::new(1.0, 0.0),
+        },
+    );
+    // The Mac's own trackpad has the pointer, on the MacBook.
+    h.step(8, mac_pointer(1, 300.0, 400.0));
+    assert_eq!(h.c.active_peer(), Some(MAC));
+    assert_eq!(
+        h.take(),
+        [Action::Capture],
+        "hidden: there's one pointer, over there"
+    );
+    h.step(
+        8,
+        Event::CapturedMotion {
+            delta: Point::new(0.0, 3.0),
+        },
+    );
+    assert_eq!(entered_at(&h.take()), Some(Point::new(300.0, 400.0)));
+    // Reports from nowhere on the Mac's screens (out of date) are ignored.
+    let mut h = Harness::new();
+    h.step(8, mac_pointer(1, -5000.0, 400.0));
+    assert!(h.take().is_empty());
+    assert_eq!(h.c.active_peer(), None);
+}
+
+#[test]
+fn the_macs_pointer_on_its_extra_display_shows_on_the_portal() {
+    let mut h = with_portal();
+    // Not parked: the cursor here just shows where the Mac's pointer is on the picture.
+    h.step(
+        8,
+        mac_pointer(1, EXTRA.x + EXTRA.width / 2.0, EXTRA.y + EXTRA.height / 4.0),
+    );
+    assert_eq!(
+        h.take(),
+        [Action::ShowOnPortal {
+            at: Point::new(0.5, 0.25)
+        }]
+    );
+    assert_eq!(h.c.active_peer(), None);
+    // Then off it, onto the MacBook: the pointer left this machine's screen, so its
+    // cursor hides, and this machine's mouse carries on from there.
+    h.step(8, mac_pointer(2, 300.0, 400.0));
+    assert_eq!(h.take(), [Action::Capture]);
+    h.step(
+        8,
+        Event::CapturedMotion {
+            delta: Point::new(0.0, 3.0),
+        },
+    );
+    assert_eq!(entered_at(&h.take()), Some(Point::new(300.0, 400.0)));
+    // Parked on the Mac, its pointer moving onto the extra display brings it here.
+    let mut h = with_portal();
+    h.cross_to_mac(1920.0);
+    h.step(0, Event::PeerYield(MAC));
+    h.step(8, mac_pointer(1, 300.0, 400.0));
+    h.take();
+    h.step(8, mac_pointer(2, EXTRA.x, EXTRA.y + EXTRA.height / 2.0));
+    assert_eq!(h.c.active_peer(), None);
+    assert_eq!(
+        h.take(),
+        [
+            Action::Unpark,
+            Action::ShowOnPortal {
+                at: Point::new(0.0, 0.5)
+            }
+        ]
+    );
 }
 
 #[test]

@@ -78,7 +78,7 @@ fn reports_displays() {
 
 #[test]
 #[ignore = "moves the cursor"]
-fn crossing_an_edge_captures_forwards_input_and_yield_releases() {
+fn crossing_an_edge_captures_forwards_input_and_a_yield_parks() {
     let local = screens();
     let rightmost = (0..local.displays.len())
         .max_by(|&a, &b| {
@@ -182,24 +182,54 @@ fn crossing_an_edge_captures_forwards_input_and_yield_releases() {
         "swallowed motion must not move the cursor"
     );
 
-    // The peer takes control back: the cursor reappears where it left Windows.
+    // The peer's own mouse takes over: the pointer is still over there, so this PC's
+    // cursor stays parked and hidden...
     capture.send(Command::Event(Event::PeerYield(PEER)));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(cursor(), pinned, "a yield must leave the cursor parked");
+    // ...while the peer says where its own mouse takes the pointer...
+    capture.send(Command::Event(Event::PeerPointer {
+        peer: PEER,
+        seq: 1,
+        pos: legato_proto::Point::new(700.0, 300.0),
+    }));
+    std::thread::sleep(Duration::from_millis(100));
+    let actions: Vec<Action> = rx.try_iter().collect();
+    assert!(
+        !actions.iter().any(|a| matches!(
+            a,
+            Action::Release { .. }
+                | Action::Send {
+                    msg: Control::Leave | Control::Enter { .. },
+                    ..
+                }
+        )),
+        "{actions:?}"
+    );
+    // ...and this PC's mouse carries on from there, not from where it last was.
+    mouse_move(-10, 0);
+    let actions: Vec<Action> = rx.try_iter().collect();
+    let resumed_at = actions.iter().find_map(|a| match a {
+        Action::Send {
+            msg: Control::Enter { pos, .. },
+            ..
+        } => Some(*pos),
+        _ => None,
+    });
+    assert_eq!(
+        resumed_at,
+        Some(legato_proto::Point::new(700.0, 300.0)),
+        "{actions:?}"
+    );
+    assert_eq!(cursor(), pinned, "resuming must keep the cursor parked");
+
+    // Losing the peer brings the cursor back where it left Windows.
+    capture.send(Command::Event(Event::PeerLost(PEER)));
     std::thread::sleep(Duration::from_millis(200));
     let back = cursor();
     assert!(
         back.x >= edge.right() as i32 - 2,
         "cursor not returned to the edge: {back:?}"
-    );
-    let actions: Vec<Action> = rx.try_iter().collect();
-    assert!(
-        actions.iter().any(|a| matches!(
-            a,
-            Action::Send {
-                msg: Control::Leave,
-                ..
-            }
-        )),
-        "{actions:?}"
     );
 
     drop(capture);
@@ -1186,7 +1216,12 @@ fn the_cursor_shows_when_the_peer_takes_over() {
     mouse_move(5, 0);
     note("to start with");
 
+    // How the peer takes over: its `Enter` reaches the capture (`PeerEntered`) and the
+    // receiver (the `MoveTo`), in either order.
+    let entered = || capture.send(Command::Event(Event::PeerEntered(PEER)));
+
     // 1. The PC wasn't driving the Mac: the Mac just takes over.
+    entered();
     injector.apply(&Inject::MoveTo { pos: target(0.0) });
     note("1. the peer takes over an idle PC");
     injector.apply(&Inject::MoveTo { pos: target(40.0) });
@@ -1196,7 +1231,8 @@ fn the_cursor_shows_when_the_peer_takes_over() {
     drive_the_peer();
     note("2. driving the peer (cursor parked and hidden)");
     capture.send(Command::Event(Event::PeerYield(PEER)));
-    note("2. the peer took its cursor back");
+    note("2. the peer took its cursor back (still parked)");
+    entered();
     injector.apply(&Inject::MoveTo { pos: target(80.0) });
     note("2. then the peer takes over");
     injector.apply(&Inject::MoveTo { pos: target(120.0) });
@@ -1205,6 +1241,7 @@ fn the_cursor_shows_when_the_peer_takes_over() {
     // 3. The PC was driving the Mac, and the Mac takes over before saying so.
     drive_the_peer();
     note("3. driving the peer again");
+    entered();
     injector.apply(&Inject::MoveTo { pos: target(160.0) });
     note("3. the peer takes over before taking its cursor back");
     injector.apply(&Inject::MoveTo { pos: target(200.0) });
@@ -1217,10 +1254,29 @@ fn the_cursor_shows_when_the_peer_takes_over() {
     injector.apply(&Inject::MoveTo { pos: target(240.0) });
     note("3. ...and moves it again");
 
+    // 4. Parked, and the peer's pointer arrives before the capture hears it came across.
+    drive_the_peer();
+    capture.send(Command::Event(Event::PeerYield(PEER)));
+    note("4. driving the peer, which took its cursor back");
+    injector.apply(&Inject::MoveTo { pos: target(280.0) });
+    std::thread::sleep(Duration::from_millis(50));
+    entered();
+    note("4. the peer takes over, its pointer here first");
+    // Coming out of parking mustn't move the cursor from where the peer put it.
+    let (unparked, put) = (cursor(), target(280.0));
+    let unpark_moved =
+        (unparked.x - put.x as i32).abs() > 2 || (unparked.y - put.y as i32).abs() > 2;
+    injector.apply(&Inject::MoveTo { pos: target(320.0) });
+    note("4. ...and moves it");
+
     drop(capture);
     assert!(
         !moved_back,
         "the late hand-back moved the cursor to {after:?}, from where the peer put it ({placed:?})"
+    );
+    assert!(
+        !unpark_moved,
+        "coming out of parking moved the cursor to {unparked:?}, from where the peer put it ({put:?})"
     );
     let hidden: Vec<_> = report
         .iter()
@@ -1307,11 +1363,11 @@ fn the_pcs_cursor_follows_the_macs_own_pointer_on_its_display() {
     std::thread::sleep(Duration::from_millis(100));
     let _ = rx.try_iter().count();
     let report = |seq: u32, px: f64, py: f64| {
-        capture.send(Command::PeerPointer {
+        capture.send(Command::Event(Event::PeerPointer {
             peer: PEER,
             seq,
             pos: legato_proto::Point::new(px, py),
-        });
+        }));
         std::thread::sleep(Duration::from_millis(150));
         cursor()
     };
@@ -1356,7 +1412,41 @@ fn the_pcs_cursor_follows_the_macs_own_pointer_on_its_display() {
     let still = report(3, remote.x, remote.y);
     eprintln!("while driving the Mac: parked at {parked:?}, then {still:?}");
     assert!(near(still, parked.x, parked.y), "{still:?}");
+
+    // The Mac's own trackpad takes over (parked), and moves the pointer onto its extra
+    // display: the pointer is on this PC's screen, so this PC's cursor shows it there.
     capture.send(Command::Event(Event::PeerYield(PEER)));
+    std::thread::sleep(Duration::from_millis(100));
+    let onto = report(4, remote.center().x, remote.y + remote.height / 4.0);
+    let state = cursor_state();
+    eprintln!("parked, then the Mac's pointer onto its extra display: {onto:?}, {state}");
+    assert!(near(onto, x + w / 2, y + h / 4), "{onto:?}");
+    assert!(
+        state.contains("showing true") && state.contains("image true"),
+        "{state}"
+    );
+    // Then back onto the MacBook's own screen: this PC's cursor hides (parked), and this
+    // PC's mouse carries on from where the trackpad left the pointer.
+    let _ = rx.try_iter().count();
+    let _ = report(5, 700.0, 300.0);
+    mouse_move(3, 0);
+    std::thread::sleep(Duration::from_millis(100));
+    let actions: Vec<Action> = rx.try_iter().collect();
+    let resumed_at = actions.iter().find_map(|a| match a {
+        Action::Send {
+            msg: Control::Enter { pos, .. },
+            ..
+        } => Some(*pos),
+        _ => None,
+    });
+    eprintln!("...back on the MacBook's screen, then this PC's mouse: {resumed_at:?}");
+    assert_eq!(
+        resumed_at,
+        Some(legato_proto::Point::new(700.0, 300.0)),
+        "{actions:?}"
+    );
+
+    capture.send(Command::Event(Event::PeerLost(PEER)));
     std::thread::sleep(Duration::from_millis(100));
     capture.send(Command::SetPortal(None));
     drop(capture);

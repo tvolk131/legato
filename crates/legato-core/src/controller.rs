@@ -59,8 +59,24 @@ pub enum Event {
         down: bool,
     },
     Scroll(Scroll),
-    /// The peer saw physical input and wants its cursor back.
+    /// The peer saw physical input and wants its cursor back. While driving it, this
+    /// machine parks: the pointer stays there, and this machine carries on from wherever
+    /// the peer's own mouse leaves it (see [`Event::PeerPointer`]).
     PeerYield(MachineId),
+    /// The peer came across onto this machine's screens (it sent `Enter`): the pointer is
+    /// here now, where the peer put it.
+    PeerEntered(MachineId),
+    /// This machine's own keyboard or mouse took over from the peer driving it (which was
+    /// sent `Yield`). While this machine's own pointer moves on its screens, that peer is
+    /// told where, so it can carry on from there.
+    YieldedTo(MachineId),
+    /// A peer's own pointer (moved by its own mouse or trackpad) is at `pos`, in its
+    /// native coordinates. Newer `seq` wins.
+    PeerPointer {
+        peer: MachineId,
+        seq: u32,
+        pos: Point,
+    },
     /// The connection to the peer dropped.
     PeerLost(MachineId),
     /// The user is dragging these files (or stopped: `None`). While files are carried the
@@ -92,6 +108,15 @@ pub fn fit_picture(size: (f64, f64), area: Rect) -> Rect {
         area.y + (area.height - fh) / 2.0,
         fw,
         fh,
+    )
+}
+
+/// Where `pos` (the peer's native coordinates) is on a portal's picture showing `remote`:
+/// 0..1 across and down it.
+fn portal_at(remote: Rect, pos: Point) -> Point {
+    Point::new(
+        ((pos.x - remote.x) / remote.width).clamp(0.0, 1.0),
+        ((pos.y - remote.y) / remote.height).clamp(0.0, 1.0),
     )
 }
 
@@ -130,13 +155,6 @@ pub enum CaptureCommand {
     SetPortal(Option<Portal>),
     /// Shows (or stops showing) one of this machine's displays on a peer.
     SetShown(Option<Shown>),
-    /// A peer's own pointer is at `pos` (its native coordinates) on the display this
-    /// machine's portal shows: show this machine's cursor there if it's free.
-    PeerPointer {
-        peer: MachineId,
-        seq: u32,
-        pos: Point,
-    },
     Stop,
 }
 
@@ -161,6 +179,13 @@ pub enum Action {
     /// Stop capturing and show the local cursor over the portal's picture, at `at` (0..1
     /// across and down it): the peer's cursor moved onto the display the portal shows.
     EnterPortal { at: Point },
+    /// Stop capturing and show the local cursor where it is: the peer's pointer came
+    /// across onto this machine's screens and put it there.
+    Unpark,
+    /// Move the local cursor over the portal's picture, at `at` (0..1 across and down it),
+    /// without capturing: the peer's own pointer is there, on the display the portal
+    /// shows. The move mustn't count as this machine's own input.
+    ShowOnPortal { at: Point },
     /// The user let go of dragged files over a peer: send them there.
     Drop {
         to: MachineId,
@@ -217,9 +242,13 @@ enum State {
         peer: MachineId,
         /// Shared cursor, in desk units.
         cursor: Point,
-        /// Where the local cursor reappears (local native coordinates) if the peer takes
-        /// control back.
+        /// Where the local cursor reappears (local native coordinates) if the peer goes
+        /// away.
         return_to: Point,
+        /// Parked: the peer's own keyboard or mouse is driving it. This machine's cursor
+        /// stays hidden, `cursor` follows the peer's reports, and this machine's next
+        /// input carries on from there.
+        idle: bool,
     },
     /// The pointer is over the portal window.
     Portal {
@@ -243,6 +272,15 @@ pub struct Controller {
     carrying: Option<Vec<std::path::PathBuf>>,
     portal: Option<Portal>,
     shown: Option<Shown>,
+    /// The peer this machine last took over from with its own input: while this
+    /// machine's own pointer moves here, that peer is told where.
+    watcher: Option<MachineId>,
+    /// The newest [`Event::PeerPointer`] used from each peer.
+    pointer_seq: HashMap<MachineId, u32>,
+    /// The local pointer's last position (local native).
+    last_local: Point,
+    /// The local pointer was last on the shown display.
+    on_shown: bool,
 }
 
 impl Controller {
@@ -259,6 +297,10 @@ impl Controller {
             carrying: None,
             portal: None,
             shown: None,
+            watcher: None,
+            pointer_seq: HashMap::new(),
+            last_local: Point::default(),
+            on_shown: false,
         }
     }
 
@@ -378,14 +420,147 @@ impl Controller {
             Event::PortalMotion { at, pos, attempted } => {
                 self.portal_motion(now, at, pos, attempted, out)
             }
-            Event::PeerYield(peer) | Event::PeerLost(peer) => {
-                let yielded = matches!(event, Event::PeerYield(_));
-                if self.active_peer() == Some(peer) {
-                    self.exit_to_local(yielded, out);
+            Event::PeerYield(peer) => {
+                match &mut self.state {
+                    State::Remote { peer: p, idle, .. } if *p == peer => {
+                        // The pointer stays over there: park, and carry on from wherever
+                        // the peer's own mouse takes it.
+                        *idle = true;
+                        self.push = None;
+                    }
+                    State::Portal { peer: p, .. } if *p == peer => self.exit_to_local(true, out),
+                    _ => {}
                 }
                 self.drop_routes(peer);
                 Verdict::Pass
             }
+            Event::PeerLost(peer) => {
+                if self.active_peer() == Some(peer) {
+                    self.exit_to_local(false, out);
+                }
+                self.drop_routes(peer);
+                if self.watcher == Some(peer) {
+                    self.watcher = None;
+                }
+                self.pointer_seq.remove(&peer);
+                Verdict::Pass
+            }
+            Event::PeerEntered(peer) => {
+                if self.watcher == Some(peer) {
+                    // It's driving this machine now; it knows where the pointer is.
+                    self.watcher = None;
+                }
+                if let State::Remote { peer: p, .. } = self.state
+                    && p == peer
+                {
+                    self.state = State::Local;
+                    self.push = None;
+                    out.push(Action::Unpark);
+                }
+                Verdict::Pass
+            }
+            Event::YieldedTo(peer) => {
+                self.watcher = Some(peer);
+                Verdict::Pass
+            }
+            Event::PeerPointer { peer, seq, pos } => {
+                self.peer_pointer(peer, seq, pos, out);
+                Verdict::Pass
+            }
+        }
+    }
+
+    /// A peer's own mouse moved its pointer to `pos` (its native coordinates).
+    fn peer_pointer(&mut self, peer: MachineId, seq: u32, pos: Point, out: &mut Vec<Action>) {
+        if self
+            .pointer_seq
+            .get(&peer)
+            .is_some_and(|&last| (seq.wrapping_sub(last) as i32) <= 0)
+        {
+            return;
+        }
+        self.pointer_seq.insert(peer, seq);
+        let Some(machine) = self.layout.machine(peer) else {
+            return;
+        };
+        // On the display a portal here shows (a Mac's extra display), or on one of the
+        // peer's shared screens. Anywhere else is a report out of date with the layout.
+        let on_portal = self
+            .portal
+            .filter(|p| p.peer == peer && p.remote.contains(pos))
+            .map(|p| portal_at(p.remote, pos));
+        let on_screens = machine
+            .screens
+            .displays
+            .iter()
+            .any(|d| d.bounds.contains(pos));
+        let desk = machine.to_desk(pos);
+        match self.state {
+            State::Remote {
+                peer: p,
+                idle: true,
+                ..
+            } if p == peer => {
+                if let Some(at) = on_portal {
+                    // Onto its display shown here: the pointer is on this machine's
+                    // screen now, so its cursor shows it.
+                    self.state = State::Local;
+                    self.push = None;
+                    out.push(Action::Unpark);
+                    out.push(Action::ShowOnPortal { at });
+                } else if on_screens {
+                    let clamped = self.clamp_to_machine(peer, desk);
+                    if let State::Remote { cursor, .. } = &mut self.state {
+                        *cursor = clamped;
+                    }
+                }
+            }
+            State::Local => {
+                if let Some(at) = on_portal {
+                    out.push(Action::ShowOnPortal { at });
+                } else if on_screens {
+                    // Its own mouse took the pointer onto its own screens: it's there, not
+                    // here. Park, so this machine's next input carries on from there.
+                    self.push = None;
+                    self.state = State::Remote {
+                        peer,
+                        cursor: self.clamp_to_machine(peer, desk),
+                        return_to: self.last_local,
+                        idle: true,
+                    };
+                    out.push(Action::Capture);
+                }
+            }
+            // This machine's own input is driving: it knows where the pointer is.
+            State::Remote { .. } | State::Portal { .. } => {}
+        }
+    }
+
+    /// This machine's own input while parked: take the pointer back, from wherever the
+    /// peer's own mouse left it.
+    fn resume(&mut self, out: &mut Vec<Action>) {
+        let State::Remote {
+            peer,
+            cursor,
+            idle: true,
+            ..
+        } = self.state
+        else {
+            return;
+        };
+        let Some(machine) = self.layout.machine(peer) else {
+            return;
+        };
+        self.seq = self.seq.wrapping_add(1);
+        out.push(Action::Send {
+            to: peer,
+            msg: Control::Enter {
+                seq: self.seq,
+                pos: machine.to_native(cursor),
+            },
+        });
+        if let State::Remote { idle, .. } = &mut self.state {
+            *idle = false;
         }
     }
 
@@ -413,15 +588,32 @@ impl Controller {
             // Shouldn't happen while captured; don't let it move the shared cursor.
             return Verdict::Swallow;
         }
-        if let Some(shown) = self.shown.filter(|s| s.display.contains(pos)) {
-            // On a display a peer shows: the pointer stays this machine's, and the peer
-            // shows its own cursor where it is.
+        self.last_local = pos;
+        let on_shown = self.shown.filter(|s| s.display.contains(pos));
+        // Just off it, the peer that shows it hears once more, to stop showing it.
+        let left_shown = std::mem::replace(&mut self.on_shown, on_shown.is_some());
+        // Tell the peer that shows this display, and the one this machine last took over
+        // from, where this machine's own pointer is: it's theirs to show, or to carry on
+        // from.
+        let told: Vec<MachineId> = on_shown
+            .or(self.shown.filter(|_| left_shown))
+            .map(|s| s.peer)
+            .into_iter()
+            .chain(self.watcher)
+            .collect();
+        for (i, &to) in told.iter().enumerate() {
+            if told[..i].contains(&to) {
+                continue;
+            }
             self.seq = self.seq.wrapping_add(1);
-            self.push = None;
             out.push(Action::Datagram {
-                to: shown.peer,
+                to,
                 msg: Datagram::Pointer { seq: self.seq, pos },
             });
+        }
+        if on_shown.is_some() {
+            // On a display a peer shows: the pointer stays this machine's.
+            self.push = None;
             return Verdict::Pass;
         }
         let Some((target, dir, pushing, entry)) = self.edge_crossing(pos, attempted) else {
@@ -496,6 +688,7 @@ impl Controller {
             peer,
             cursor,
             return_to,
+            idle: false,
         };
         self.push = None;
         out.push(Action::Capture);
@@ -593,6 +786,9 @@ impl Controller {
     }
 
     fn captured_motion(&mut self, now: Instant, delta: Point, out: &mut Vec<Action>) {
+        if delta.x != 0.0 || delta.y != 0.0 {
+            self.resume(out);
+        }
         let State::Remote { peer, cursor, .. } = self.state else {
             return;
         };
@@ -641,6 +837,9 @@ impl Controller {
     }
 
     fn key(&mut self, usage: u16, down: bool, out: &mut Vec<Action>) -> Verdict {
+        if down && !self.keys.contains_key(&usage) {
+            self.resume(out);
+        }
         if down {
             if let Some(&route) = self.keys.get(&usage) {
                 // OS auto-repeat. The receiving side repeats on its own.
@@ -680,6 +879,9 @@ impl Controller {
     }
 
     fn button(&mut self, button: Button, down: bool, out: &mut Vec<Action>) -> Verdict {
+        if down {
+            self.resume(out);
+        }
         if !down
             && button == Button::Left
             && let Some(files) = self.carrying.take()
@@ -713,6 +915,7 @@ impl Controller {
     }
 
     fn scroll(&mut self, scroll: Scroll, out: &mut Vec<Action>) -> Verdict {
+        self.resume(out);
         let Route::Peer(peer) = self.current_route() else {
             return Verdict::Pass;
         };
@@ -791,7 +994,9 @@ impl Controller {
             peer,
             cursor,
             return_to,
+            idle: false,
         };
+        self.watcher = None;
     }
 
     fn leave_peer(&mut self, peer: MachineId, out: &mut Vec<Action>) {

@@ -115,7 +115,7 @@ Suggested workspace:
 
 1. **Detect the edge.** Watch cursor positions in the hook. An edge only counts if it's an *outer* edge of this machine's desktop (not a boundary between two local monitors) and the layout has a neighbour there. Treat each machine's desktop as a union of rectangles, not a bounding box. Optional guards: a dwell time, a double-tap, dead corners, or "don't switch while a button is held".
 2. **Capture.** Once you switch to `Remote`, the hook swallows every mouse and keyboard event, so nothing happens locally. You then read *deltas* instead of positions:
-   - **macOS:** read `kCGMouseEventDeltaX/Y` from each event. Warp the hidden cursor back with `CGWarpMouseCursorPosition`, and lower `CGEventSourceSetLocalEventsSuppressionInterval` from its 0.25 s default (lan-mouse uses 0.05 s) or motion stutters.
+   - **macOS:** read `kCGMouseEventDeltaX/Y` from each event, except the first one after a warp (see 4.6). Warp the hidden cursor back with `CGWarpMouseCursorPosition`, and lower `CGEventSourceSetLocalEventsSuppressionInterval` from its 0.25 s default (lan-mouse uses 0.05 s) or motion stutters.
    - **Windows:** a swallowed move never actually moves the cursor, so `MSLLHOOKSTRUCT.pt − pinned point` is the delta, with acceleration already applied. Raw Input (`RIDEV_INPUTSINK`) gives unaccelerated device deltas if you want them.
    - **X11:** `XGrabPointer`/`XGrabKeyboard` on your own window, then either warp to the center or read raw valuators from `XI_RawMotion`.
 3. **Track a virtual cursor.** Add the deltas to a virtual position in the *client's* coordinate space. Scale them by the ratio of the two machines' DPI so speed feels the same. Clamp to the rectangles the client reported. When the virtual cursor crosses one of the client's outer edges, look up that side's neighbour and switch: back to `Local` (warp the real cursor to the matching point and unhide it) or to another client.
@@ -138,7 +138,7 @@ Recommendation: **send absolute positions by default, with a relative mode as an
 
 - **Absolute:** the server tracks the virtual cursor and sends `Motion { seq, x, y }` in client coordinates. Each message is idempotent: if a datagram is lost, the next one supersedes it with no accumulated drift. It also avoids Windows applying acceleration a second time.
 - **Relative:** needed when an app on the client has locked the pointer (games, 3D viewports). Offer it per screen, or switch to it when the client reports pointer lock.
-- **Client's own mouse:** if the client's local mouse moves the cursor, the server's virtual position goes stale. The client should report local cursor movement so the server can resync or step back.
+- **Client's own mouse:** if the client's local mouse moves the cursor, the server's virtual position goes stale. The client should report local cursor movement so the server can resync or step back. Legato does this; see 4.7.
 
 ### 4.4 Scroll and buttons
 
@@ -234,6 +234,19 @@ The mDNS `user_data` field (≤245 bytes, unauthenticated) can advertise a displ
 - Windows doesn't call a process's own `WH_KEYBOARD_LL` hook while one of its windows is in front, if the process is registered for raw keyboard input. winit registers every app for raw mouse and keyboard input, for `DeviceEvent`s, which iced doesn't use. So with Legato's viewer or main window in front, the hook never saw a key: typing on the Mac's display went to Windows, and so did typing meant for a MacBook driven over the edge.
 - Raw input registrations are per process (one target per device type, and the last one wins). The capture therefore takes the mouse's for itself and removes the keyboard's, both when it starts and again whenever a portal is set.
 - Found with a CI hardware test using a real winit window. A plain window in the same process doesn't show the problem.
+
+### 4.6 macOS: the event after a warp
+- The first mouse event after `CGWarpMouseCursorPosition` reports the warp's jump in its delta fields, as if the mouse had moved from the old position to the new one (rdar://11757097, still true on macOS 26). Taking over a peer warps the hidden cursor to the middle of the main display, so that first delta read as a big push back, and the pointer bounced home. The warp back on release read as a push over. With both, the pointer bounced every other event, and the Mac's trackpad couldn't drive the PC (fixed in 0.3.0-alpha.15).
+- Using the location instead (event position minus the park point) for every event is wrong too. A trackpad moves the hidden cursor even though the tap drops its events, so the hidden cursor drifts away from the park point, and the pointer moves like a laptop's pointing stick (0.3.0-alpha.15; fixed in alpha.16).
+- So `TapState::motion` uses the location minus the warp target for the first event after a warp only, and the delta fields for every other one. The macOS hardware test posts events with the spike in the delta the way the hardware does. Posted events move the cursor even when the tap drops them, so the test can't check the held cursor itself.
+
+### 4.7 One pointer between two machines
+The pointer has one position, shared by both machines, and whichever machine's mouse moves next carries on from there. The cursor you see is always that of the machine whose screen the pointer is on.
+- **Parking.** When a machine drives a peer and the peer's own mouse or keyboard is used, the peer tells it (`Control::Yield`), and it *parks*: it keeps its cursor hidden and pinned, and stops sending motion. The peer then sends its pointer's position (`Datagram::Pointer`) to the machine it took over from, which updates the parked position. The parked machine's next motion, key-down, click or scroll takes the pointer back *from where the peer left it* (`Enter` at that point), so switching between the two machines' mice never makes the pointer jump.
+- **Coming across.** If the peer's own mouse takes the pointer across the edge, its `Enter` unparks this machine: the cursor shows where the peer put it. If it takes the pointer onto the peer's extra display shown here, this machine's cursor shows it on the picture (`ShowOnPortal`).
+- **Leaving the extra display.** The Mac reports its pointer while it's on the display the PC shows, and once more when it moves off it. That last report tells the PC the pointer is back on the MacBook, so the PC hides its cursor there and parks.
+- **Losing the peer** while parked brings the cursor back where it left this machine.
+- Protocol 8 (0.3.0-alpha.17). The messages are unchanged, but this only works if both machines park and report, so older versions don't connect.
 
 ### 6.4 iroh gotchas
 
