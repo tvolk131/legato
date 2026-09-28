@@ -187,6 +187,9 @@ impl TapState {
                 // Portals are shown on Windows only.
                 CaptureCommand::SetPortal(_) => {}
                 CaptureCommand::SetShown(shown) => self.controller.set_shown(shown),
+                CaptureCommand::SetShownPicture(picture) => {
+                    self.controller.set_shown_picture(picture);
+                }
                 CaptureCommand::Stop => return false,
             }
         }
