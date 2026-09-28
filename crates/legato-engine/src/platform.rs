@@ -36,6 +36,10 @@ mod imp {
     }
 
     pub use legato_macos::{clipboard_change_count, frontmost_app, receiver_config};
+
+    pub fn cursor_state() -> Option<String> {
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -66,6 +70,10 @@ mod imp {
     pub use legato_windows::{
         clipboard_change_count, foreground_app as frontmost_app, receiver_config,
     };
+
+    pub fn cursor_state() -> Option<String> {
+        Some(legato_windows::cursor_state())
+    }
 }
 
 pub fn check_permissions() -> Result<()> {
@@ -78,6 +86,11 @@ pub fn receiver_config() -> ReceiverConfig {
 
 pub fn clipboard_change_count() -> u64 {
     imp::clipboard_change_count()
+}
+
+/// How the cursor looks to the OS, for the log (Windows only).
+pub fn cursor_state() -> Option<String> {
+    imp::cursor_state()
 }
 
 /// The app (or window) in front, which gets typing, for the log.

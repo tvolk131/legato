@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use legato_core::controller::{
@@ -475,10 +475,20 @@ pub(crate) async fn run(
                                 #[cfg(target_os = "macos")]
                                 {
                                     if let Some(old) = host.take() {
+                                        capture.send(CaptureCommand::SetShown(None));
                                         old.stop().await;
                                     }
                                     match extend::Host::start(session.clone(), request, "Legato".into()).await {
-                                        Ok(h) => host = Some(h),
+                                        Ok(h) => {
+                                            // While this Mac's own pointer is on it, the viewer
+                                            // shows its cursor there.
+                                            capture.send(CaptureCommand::SetShown(Some(legato_core::controller::Shown {
+                                                peer: machine,
+                                                display: h.bounds(),
+                                                id: h.display_id(),
+                                            })));
+                                            host = Some(h);
+                                        }
                                         Err(e) => {
                                             ctx.status(Status::Problem(format!(
                                                 "Couldn't show an extra display on \"{}\": {e:#}",
@@ -523,6 +533,7 @@ pub(crate) async fn run(
                             Control::ExtendStop { reason } => {
                                 #[cfg(target_os = "macos")]
                                 if let Some(h) = host.take_if(|h| h.peer == peer) {
+                                    capture.send(CaptureCommand::SetShown(None));
                                     h.stop().await;
                                 }
                                 if viewing.as_ref().is_some_and(|v| v.peer == peer) {
@@ -546,7 +557,16 @@ pub(crate) async fn run(
                             }
                         }
                     }
-                    SessionEvent::Datagram { msg, .. } => {
+                    SessionEvent::Datagram { peer, msg } => {
+                        if let Datagram::Pointer { seq, pos } = msg {
+                            // The Mac's own pointer on the display shown here.
+                            if viewing.as_ref().is_some_and(|v| v.peer == peer)
+                                && let Some(&machine) = ids.get(&peer)
+                            {
+                                capture.send(CaptureCommand::PeerPointer { peer: machine, seq, pos });
+                            }
+                            continue;
+                        }
                         let _ = inject_tx.send(Input::Datagram(msg));
                     }
                     SessionEvent::Blob { tag, data, .. } => {
@@ -587,6 +607,7 @@ pub(crate) async fn run(
                         by_peer.write().unwrap().remove(&peer);
                         #[cfg(target_os = "macos")]
                         if let Some(h) = host.take_if(|h| h.peer == peer) {
+                            capture.send(CaptureCommand::SetShown(None));
                             h.stop().await;
                         }
                         if viewing.as_ref().is_some_and(|v| v.peer == peer) {
@@ -640,6 +661,8 @@ fn inject_loop(
     // For the log: where the first typing after each entry went, and whether typing that
     // arrived while not being driven was noted.
     let (mut typing_noted, mut ignored_noted) = (false, false);
+    // For the log: when the latest entry was, until the cursor has been noted.
+    let mut entered_at: Option<Instant> = None;
     let mut controlled = false;
     loop {
         let input = match receiver.next_deadline() {
@@ -652,6 +675,7 @@ fn inject_loop(
                 if matches!(msg, Control::Enter { .. }) {
                     driver = Some(peer);
                     (typing_noted, ignored_noted) = (false, false);
+                    entered_at = Some(now);
                 }
                 let key_down = matches!(msg, Control::Key { down: true, .. });
                 // Only the current driver's input counts.
@@ -715,6 +739,26 @@ fn inject_loop(
             }
             Err(RecvTimeoutError::Timeout) => false,
         };
+        // A moment after another machine takes over this one, note what the cursor here
+        // looks like: when it seems to have vanished, this says whether it's somewhere
+        // else, hidden, or suppressed.
+        if entered_at
+            .is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_millis(400))
+            && receiver.is_controlled()
+            && let Some(state) = platform::cursor_state()
+        {
+            entered_at = None;
+            let name = driver
+                .and_then(|d| {
+                    sessions
+                        .read()
+                        .unwrap()
+                        .get(&d)
+                        .map(|s| s.remote.name.clone())
+                })
+                .unwrap_or_else(|| "another machine".into());
+            tracing::info!("\"{name}\" is driving this machine; the cursor here is {state}.");
+        }
         receiver.tick(now, &mut out);
         for action in out.drain(..) {
             if action == Inject::SendYield {

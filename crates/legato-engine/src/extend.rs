@@ -392,6 +392,15 @@ mod host {
             tokio::task::spawn_blocking(move || stream.request_keyframe(track));
         }
 
+        /// Where the display is, in this Mac's native coordinates.
+        pub(crate) fn bounds(&self) -> Rect {
+            to_rect(self.stream.display().bounds())
+        }
+
+        pub(crate) fn display_id(&self) -> u32 {
+            self.stream.display().id()
+        }
+
         /// Tells the viewer where the display is now.
         fn report_bounds(&self) {
             let bounds = to_rect(self.stream.display().bounds());

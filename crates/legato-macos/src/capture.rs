@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use legato_core::LocalInput;
-use legato_core::controller::{Action, CaptureCommand, Controller, Event, Verdict};
+use legato_core::controller::{Action, CaptureCommand, Controller, Event, Shown, Verdict};
 use legato_core::keymap::{self, usage};
 use legato_proto::{Button, Point, Scroll};
 use objc2_core_foundation::{
@@ -172,7 +172,8 @@ impl TapState {
                 CaptureCommand::SetRemap(peer, remap) => self.controller.set_remap(peer, remap),
                 CaptureCommand::SetConfig(config) => self.controller.set_config(config),
                 // Portals are shown on Windows only.
-                CaptureCommand::SetPortal(_) => {}
+                CaptureCommand::SetPortal(_) | CaptureCommand::PeerPointer { .. } => {}
+                CaptureCommand::SetShown(shown) => self.controller.set_shown(shown),
                 CaptureCommand::Stop => return false,
             }
         }
@@ -200,6 +201,7 @@ impl TapState {
                 } else {
                     (self.local_input)(LocalInput::Motion { dx, dy });
                     let loc = CGEvent::location(Some(ev));
+                    self.follow_shown();
                     self.handle(Event::LocalMotion {
                         pos: Point::new(loc.x, loc.y),
                         attempted: Point::new(dx, dy),
@@ -254,6 +256,19 @@ impl TapState {
                 self.handle(Event::Scroll(scroll))
             }
             _ => Verdict::Pass,
+        }
+    }
+
+    /// Keeps the bounds of the display a peer shows current: it moves when it's arranged
+    /// to match where it's shown.
+    fn follow_shown(&mut self) {
+        let Some(shown) = self.controller.shown().copied() else {
+            return;
+        };
+        let b = CGDisplayBounds(shown.id);
+        let display = legato_proto::Rect::new(b.origin.x, b.origin.y, b.size.width, b.size.height);
+        if display != shown.display && display.width > 0.0 {
+            self.controller.set_shown(Some(Shown { display, ..shown }));
         }
     }
 

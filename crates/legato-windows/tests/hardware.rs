@@ -1094,3 +1094,271 @@ fn which_of_a_threads_windows_gets_painted_when_both_need_it() {
         assert_eq!(viewer_paints, 300, "{summary:?}");
     }
 }
+
+/// Windows' own view of the cursor: showing, suppressed (Windows hides it after touch or
+/// pen until real mouse input), and whether it has an image (a window set none).
+fn cursor_state() -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CURSOR_SHOWING, CURSOR_SUPPRESSED, CURSORINFO, GetCursorInfo,
+    };
+    let mut info = CURSORINFO {
+        cbSize: size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetCursorInfo(&mut info).unwrap() };
+    format!(
+        "showing {}, suppressed {}, image {}, at {},{}",
+        info.flags.0 & CURSOR_SHOWING.0 != 0,
+        info.flags.0 & CURSOR_SUPPRESSED.0 != 0,
+        !info.hCursor.is_invalid(),
+        info.ptScreenPos.x,
+        info.ptScreenPos.y
+    )
+}
+
+/// When the Mac takes over the PC (its trackpad pushed past the MacBook's edge), the PC's
+/// cursor has to show where the Mac put it: whether or not the PC was driving the Mac
+/// just before, and whichever of the Mac's "take it back" and "here's the pointer" comes
+/// first.
+#[test]
+#[ignore = "moves the cursor"]
+fn the_cursor_shows_when_the_peer_takes_over() {
+    use legato_core::Inject;
+
+    let local = screens();
+    let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
+    let rightmost = (0..local.displays.len())
+        .max_by(|&a, &b| {
+            local.displays[a]
+                .bounds
+                .right()
+                .total_cmp(&local.displays[b].bounds.right())
+        })
+        .unwrap();
+    let edge = local.displays[rightmost].bounds;
+    let mut layout = Layout::new(local.clone());
+    let peer = Screens {
+        displays: vec![Display {
+            id: 1,
+            bounds: Rect::new(0.0, 0.0, 1000.0, 800.0),
+            pixel_scale: 2.0,
+            ui_scale: 1.0,
+            primary: true,
+            name: "peer".into(),
+        }],
+        native_per_desk: 1.0,
+    };
+    assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
+    let capture = Capture::start(
+        Controller::new(
+            ControllerConfig {
+                push_distance: 0.0,
+                ..Default::default()
+            },
+            layout,
+        ),
+        CaptureOptions {
+            accept_injected: true,
+        },
+        |_| {},
+        |_| {},
+    )
+    .unwrap();
+    let mut injector = legato_windows::Injector::new();
+    // Where the peer puts the pointer when it takes over (the receiver's `MoveTo`).
+    let target =
+        |dx: f64| legato_proto::Point::new(primary.center().x + dx, primary.center().y - 120.0);
+    let mut report = Vec::new();
+    let mut note = |what: &str| {
+        std::thread::sleep(Duration::from_millis(150));
+        let line = format!("{what}: {}", cursor_state());
+        eprintln!("{line}");
+        report.push(line);
+    };
+    let drive_the_peer = || {
+        unsafe { SetCursorPos(edge.right() as i32 - 3, edge.center().y as i32).unwrap() };
+        for _ in 0..4 {
+            mouse_move(25, 0);
+        }
+    };
+
+    unsafe { SetCursorPos(primary.center().x as i32, primary.center().y as i32).unwrap() };
+    mouse_move(5, 0);
+    note("to start with");
+
+    // 1. The PC wasn't driving the Mac: the Mac just takes over.
+    injector.apply(&Inject::MoveTo { pos: target(0.0) });
+    note("1. the peer takes over an idle PC");
+    injector.apply(&Inject::MoveTo { pos: target(40.0) });
+    note("1. ...and moves it");
+
+    // 2. The PC was driving the Mac, and gets its cursor back first (the usual order).
+    drive_the_peer();
+    note("2. driving the peer (cursor parked and hidden)");
+    capture.send(Command::Event(Event::PeerYield(PEER)));
+    note("2. the peer took its cursor back");
+    injector.apply(&Inject::MoveTo { pos: target(80.0) });
+    note("2. then the peer takes over");
+    injector.apply(&Inject::MoveTo { pos: target(120.0) });
+    note("2. ...and moves it");
+
+    // 3. The PC was driving the Mac, and the Mac takes over before saying so.
+    drive_the_peer();
+    note("3. driving the peer again");
+    injector.apply(&Inject::MoveTo { pos: target(160.0) });
+    note("3. the peer takes over before taking its cursor back");
+    injector.apply(&Inject::MoveTo { pos: target(200.0) });
+    note("3. ...and moves it");
+    capture.send(Command::Event(Event::PeerYield(PEER)));
+    note("3. then it says it took its cursor back");
+    // Handing back late mustn't move the cursor from where the peer put it.
+    let (after, placed) = (cursor(), target(200.0));
+    let moved_back = (after.x - placed.x as i32).abs() > 2 || (after.y - placed.y as i32).abs() > 2;
+    injector.apply(&Inject::MoveTo { pos: target(240.0) });
+    note("3. ...and moves it again");
+
+    drop(capture);
+    assert!(
+        !moved_back,
+        "the late hand-back moved the cursor to {after:?}, from where the peer put it ({placed:?})"
+    );
+    let hidden: Vec<_> = report
+        .iter()
+        .filter(|l| {
+            (l.contains("takes over") || l.contains("moves it"))
+                && !(l.contains("showing true") && l.contains("image true"))
+        })
+        .collect();
+    assert!(hidden.is_empty(), "cursor not shown: {hidden:#?}");
+}
+
+/// The Mac's own trackpad or mouse moves its pointer onto its extra display, shown here:
+/// this PC's cursor goes to the same place on the picture, as the cursor of the machine
+/// the screen belongs to, without handing this PC's input to the Mac.
+#[test]
+#[ignore = "moves the cursor and shows a window"]
+fn the_pcs_cursor_follows_the_macs_own_pointer_on_its_display() {
+    use legato_core::controller::Portal;
+
+    let local = screens();
+    let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
+    let rightmost = (0..local.displays.len())
+        .max_by(|&a, &b| {
+            local.displays[a]
+                .bounds
+                .right()
+                .total_cmp(&local.displays[b].bounds.right())
+        })
+        .unwrap();
+    let edge = local.displays[rightmost].bounds;
+    let mut layout = Layout::new(local.clone());
+    let peer = Screens {
+        displays: vec![Display {
+            id: 1,
+            bounds: Rect::new(0.0, 0.0, 1512.0, 982.0),
+            pixel_scale: 2.0,
+            ui_scale: 1.0,
+            primary: true,
+            name: "peer".into(),
+        }],
+        native_per_desk: 1.0,
+    };
+    assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
+    let (tx, rx) = mpsc::channel();
+    let capture = Capture::start(
+        Controller::new(
+            ControllerConfig {
+                push_distance: 0.0,
+                ..Default::default()
+            },
+            layout,
+        ),
+        CaptureOptions {
+            accept_injected: true,
+        },
+        move |action| {
+            let _ = tx.send(action);
+        },
+        |_| {},
+    )
+    .unwrap();
+    let (w, h) = (640, 360);
+    let (x, y) = (
+        primary.center().x as i32 - w / 2,
+        primary.center().y as i32 - h / 2,
+    );
+    let viewer = viewer::Viewer::open(x, y, w, h, Duration::ZERO);
+    // The Mac's extra display, above its MacBook, shown here in the window.
+    let remote = Rect::new(-96.0, -1080.0, 1920.0, 1080.0);
+    capture.send(Command::SetPortal(Some(Portal {
+        peer: PEER,
+        remote,
+        window: viewer.hwnd.0 as usize as u64,
+    })));
+    std::thread::sleep(Duration::from_millis(100));
+    let under = window_at(x + w / 2, y + h / 2, viewer.hwnd);
+    if under != "the viewer" {
+        eprintln!("skipped: something else covers the viewer: {under}");
+        return;
+    }
+    // This PC's own pointer is elsewhere, idle.
+    unsafe { SetCursorPos(x - 50, y - 50).unwrap() };
+    mouse_move(-2, 0);
+    std::thread::sleep(Duration::from_millis(100));
+    let _ = rx.try_iter().count();
+    let report = |seq: u32, px: f64, py: f64| {
+        capture.send(Command::PeerPointer {
+            peer: PEER,
+            seq,
+            pos: legato_proto::Point::new(px, py),
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        cursor()
+    };
+    let near = |p: POINT, qx: i32, qy: i32| (p.x - qx).abs() <= 2 && (p.y - qy).abs() <= 2;
+
+    let middle = report(1, remote.center().x, remote.center().y);
+    eprintln!("the Mac's pointer in the middle of its display: this PC's cursor at {middle:?}");
+    assert!(near(middle, x + w / 2, y + h / 2), "{middle:?}");
+    let stale = report(1, remote.x + 10.0, remote.y + 10.0);
+    assert!(
+        near(stale, middle.x, middle.y),
+        "an older report moved it: {stale:?}"
+    );
+    let corner = report(2, remote.x, remote.y);
+    eprintln!("...at its top-left corner: {corner:?}");
+    assert!(near(corner, x, y), "{corner:?}");
+    let entered = rx
+        .try_iter()
+        .filter(|a| {
+            matches!(
+                a,
+                Action::Send {
+                    msg: Control::Enter { .. },
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        entered, 0,
+        "showing the Mac's pointer handed this PC's input to the Mac"
+    );
+
+    // While this PC drives the Mac, its cursor stays parked.
+    unsafe { SetCursorPos(edge.right() as i32 - 3, edge.center().y as i32).unwrap() };
+    for _ in 0..4 {
+        mouse_move(25, 0);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let parked = cursor();
+    // A corner, so moving there couldn't be mistaken for staying parked.
+    let still = report(3, remote.x, remote.y);
+    eprintln!("while driving the Mac: parked at {parked:?}, then {still:?}");
+    assert!(near(still, parked.x, parked.y), "{still:?}");
+    capture.send(Command::Event(Event::PeerYield(PEER)));
+    std::thread::sleep(Duration::from_millis(100));
+    capture.send(Command::SetPortal(None));
+    drop(capture);
+    drop(viewer);
+}

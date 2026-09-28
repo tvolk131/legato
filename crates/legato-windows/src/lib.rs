@@ -11,6 +11,31 @@ mod inject;
 
 pub use capture::{Capture, CaptureOptions, Command};
 
+/// Windows' view of the cursor, for the log: where it is, whether it's showing, whether
+/// Windows is suppressing it (as it does after touch or pen input), and whether it has an
+/// image (none while a window has set none).
+pub fn cursor_state() -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CURSOR_SHOWING, CURSOR_SUPPRESSED, CURSORINFO, GetCursorInfo,
+    };
+    let mut info = CURSORINFO {
+        cbSize: size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: fills in a correctly sized structure.
+    if unsafe { GetCursorInfo(&mut info) }.is_err() {
+        return "unknown".into();
+    }
+    format!(
+        "at {},{}, showing {}, suppressed {}, has an image {}",
+        info.ptScreenPos.x,
+        info.ptScreenPos.y,
+        info.flags.0 & CURSOR_SHOWING.0 != 0,
+        info.flags.0 & CURSOR_SUPPRESSED.0 != 0,
+        !info.hCursor.is_invalid()
+    )
+}
+
 /// The window in front, which gets typing (for the log).
 pub fn foreground_app() -> Option<String> {
     // SAFETY: no preconditions.
