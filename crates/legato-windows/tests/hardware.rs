@@ -1352,7 +1352,8 @@ fn the_pcs_cursor_follows_the_macs_own_pointer_on_its_display() {
     }
     std::thread::sleep(Duration::from_millis(100));
     let parked = cursor();
-    let still = report(3, remote.center().x, remote.center().y);
+    // A corner, so moving there couldn't be mistaken for staying parked.
+    let still = report(3, remote.x, remote.y);
     eprintln!("while driving the Mac: parked at {parked:?}, then {still:?}");
     assert!(near(still, parked.x, parked.y), "{still:?}");
     capture.send(Command::Event(Event::PeerYield(PEER)));
