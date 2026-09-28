@@ -275,18 +275,21 @@ pub(crate) async fn run(
     // The shared desk as arranged, even when this machine may not drive the others.
     let mut layout_now = Layout::new(local.clone());
     // Asks the Mac to arrange its extra display to match where it's shown here.
-    let arrange =
-        |viewing: &mut Option<Viewing>, layout: &Layout, ids: &HashMap<EndpointId, MachineId>| {
-            let Some(v) = viewing.as_mut() else { return };
-            let Some(&machine) = ids.get(&v.peer) else {
-                return;
-            };
-            if let Some(origin) = v.arrangement(layout, machine)
-                && let Some(s) = by_peer.read().unwrap().get(&v.peer)
-            {
-                s.send(Control::ExtendArrange { origin });
-            }
+    let arrange = |viewing: &mut Option<Viewing>,
+                   window: Option<u64>,
+                   layout: &Layout,
+                   ids: &HashMap<EndpointId, MachineId>| {
+        let Some(v) = viewing.as_mut() else { return };
+        let Some(&machine) = ids.get(&v.peer) else {
+            return;
         };
+        let client = window.and_then(platform::window_area);
+        if let Some((origin, picture)) = v.arrangement(layout, machine, client)
+            && let Some(s) = by_peer.read().unwrap().get(&v.peer)
+        {
+            s.send(Control::ExtendArrange { origin, picture });
+        }
+    };
 
     loop {
         tokio::select! {
@@ -399,7 +402,7 @@ pub(crate) async fn run(
                     if let Some(v) = viewing.as_mut() {
                         v.area = area;
                     }
-                    arrange(&mut viewing, &layout_now, &ids);
+                    arrange(&mut viewing, viewer_window, &layout_now, &ids);
                 }
             },
             Some(result) = inbox_done.recv() => match result {
@@ -497,6 +500,7 @@ pub(crate) async fn run(
                                                 peer: machine,
                                                 display: h.bounds(),
                                                 id: h.display_id(),
+                                                picture: None,
                                             })));
                                             host = Some(h);
                                         }
@@ -522,7 +526,7 @@ pub(crate) async fn run(
                                     v.bounds = Some(bounds);
                                     ctx.status(Status::Extended { id: peer, bounds });
                                     set_portal(&viewing, viewer_window, &ids);
-                                    arrange(&mut viewing, &layout_now, &ids);
+                                    arrange(&mut viewing, viewer_window, &layout_now, &ids);
                                 }
                             }
                             Control::ExtendResize(request) => {
@@ -533,13 +537,15 @@ pub(crate) async fn run(
                                 #[cfg(not(target_os = "macos"))]
                                 let _ = request;
                             }
-                            Control::ExtendArrange { origin } => {
+                            Control::ExtendArrange { origin, picture } => {
                                 #[cfg(target_os = "macos")]
                                 if let Some(h) = host.as_ref().filter(|h| h.peer == peer) {
                                     h.arrange(origin).await;
+                                    // Its edges lead onto the viewer's screens beside the picture.
+                                    capture.send(CaptureCommand::SetShownPicture(Some(picture)));
                                 }
                                 #[cfg(not(target_os = "macos"))]
-                                let _ = origin;
+                                let _ = (origin, picture);
                             }
                             Control::ExtendStop { reason } => {
                                 #[cfg(target_os = "macos")]
@@ -564,9 +570,12 @@ pub(crate) async fn run(
                             }
                             Control::Hello(_) => {}
                             input => {
-                                if matches!(input, Control::Enter { .. }) {
+                                if let Control::Enter { seq, .. } = input {
                                     // Its pointer came across onto this machine's screens.
-                                    capture.send(CaptureCommand::Event(Event::PeerEntered(machine)));
+                                    capture.send(CaptureCommand::Event(Event::PeerEntered {
+                                        peer: machine,
+                                        seq,
+                                    }));
                                 }
                                 let _ = inject_tx.send(Input::Control(peer, input));
                             }

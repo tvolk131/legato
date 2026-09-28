@@ -17,8 +17,7 @@ use legato_core::LocalInput;
 use legato_core::controller::{Action, CaptureCommand, Controller, Event, Verdict};
 use legato_core::keymap;
 use legato_proto::{Button, Point, Rect, Scroll};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, VK_RSHIFT};
@@ -28,8 +27,8 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT,
-    GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageW, HHOOK,
-    HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG,
+    GetAncestor, GetCursorPos, GetForegroundWindow, GetMessageW, HHOOK, HWND_TOPMOST,
+    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG,
     MSLLHOOKSTRUCT, PostThreadMessageW, RegisterClassW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
     SetCursor, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW,
     ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL,
@@ -507,26 +506,11 @@ impl State {
     /// Where the portal window draws the peer's display, in screen coordinates.
     fn portal_picture(&self) -> Option<Rect> {
         let portal = self.controller.portal()?;
-        let window = HWND(portal.window as usize as *mut core::ffi::c_void);
-        // SAFETY: window queries; a stale handle just fails them.
-        unsafe {
-            let mut client = RECT::default();
-            GetClientRect(window, &mut client).ok()?;
-            let mut origin = POINT::default();
-            if !ClientToScreen(window, &mut origin).as_bool() {
-                return None;
-            }
-            let area = Rect::new(
-                origin.x as f64,
-                origin.y as f64,
-                (client.right - client.left) as f64,
-                (client.bottom - client.top) as f64,
-            );
-            Some(legato_core::controller::fit_picture(
-                (portal.remote.width, portal.remote.height),
-                area,
-            ))
-        }
+        let area = crate::client_area(portal.window)?;
+        Some(legato_core::controller::fit_picture(
+            (portal.remote.width, portal.remote.height),
+            area,
+        ))
     }
 
     fn on_command(&mut self, command: Command) -> Option<Vec<Effect>> {
@@ -544,7 +528,7 @@ impl State {
                 self.controller.set_config(config);
                 Some(vec![])
             }
-            Command::SetShown(_) => Some(vec![]),
+            Command::SetShown(_) | Command::SetShownPicture(_) => Some(vec![]),
             Command::SetPortal(portal) => {
                 if portal.is_some() {
                     // The viewer's window exists by now, and so does whatever registered

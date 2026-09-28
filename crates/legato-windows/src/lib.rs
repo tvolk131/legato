@@ -36,6 +36,29 @@ pub fn cursor_state() -> String {
     )
 }
 
+/// A window's client area on the screen (physical pixels), or `None` for a stale handle.
+pub fn client_area(window: u64) -> Option<legato_proto::Rect> {
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+    let window = HWND(window as usize as *mut core::ffi::c_void);
+    // SAFETY: window queries; a stale handle just fails them.
+    unsafe {
+        let mut client = RECT::default();
+        GetClientRect(window, &mut client).ok()?;
+        let mut origin = POINT::default();
+        if !ClientToScreen(window, &mut origin).as_bool() {
+            return None;
+        }
+        Some(legato_proto::Rect::new(
+            origin.x as f64,
+            origin.y as f64,
+            (client.right - client.left) as f64,
+            (client.bottom - client.top) as f64,
+        ))
+    }
+}
+
 /// The window in front, which gets typing (for the log).
 pub fn foreground_app() -> Option<String> {
     // SAFETY: no preconditions.

@@ -586,13 +586,15 @@ impl Viewing {
         }
     }
 
-    /// Where the Mac should put the display so it matches where it's shown here, if that
-    /// hasn't been asked for already.
+    /// Where the Mac should put the display so it matches where it's shown here, and
+    /// where its picture is here, if that hasn't been sent already. `client` is the
+    /// window's contents, where the OS reports them more exactly than `area`.
     pub(crate) fn arrangement(
         &mut self,
         layout: &legato_core::Layout,
         machine: legato_core::MachineId,
-    ) -> Option<legato_proto::Point> {
+        client: Option<Rect>,
+    ) -> Option<(legato_proto::Point, Rect)> {
         let (bounds, area) = (self.bounds?, self.area?);
         let key = (area, (bounds.width, bounds.height));
         if self.arranged_for == Some(key) {
@@ -605,7 +607,11 @@ impl Viewing {
             (bounds.width, bounds.height),
         )?;
         self.arranged_for = Some(key);
-        Some(origin)
+        let picture = legato_core::controller::fit_picture(
+            (bounds.width, bounds.height),
+            client.unwrap_or(area),
+        );
+        Some((origin, picture))
     }
 }
 

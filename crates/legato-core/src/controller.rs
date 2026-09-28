@@ -63,9 +63,12 @@ pub enum Event {
     /// machine parks: the pointer stays there, and this machine carries on from wherever
     /// the peer's own mouse leaves it (see [`Event::PeerPointer`]).
     PeerYield(MachineId),
-    /// The peer came across onto this machine's screens (it sent `Enter`): the pointer is
-    /// here now, where the peer put it.
-    PeerEntered(MachineId),
+    /// The peer came across onto this machine's screens (it sent `Enter` with this `seq`):
+    /// the pointer is here now, where the peer put it. Its reports from before are stale.
+    PeerEntered {
+        peer: MachineId,
+        seq: u32,
+    },
     /// This machine's own keyboard or mouse took over from the peer driving it (which was
     /// sent `Yield`). While this machine's own pointer moves on its screens, that peer is
     /// told where, so it can carry on from there.
@@ -142,6 +145,9 @@ pub struct Shown {
     pub display: Rect,
     /// The display's id, so the backend can follow it if it moves.
     pub id: u32,
+    /// Where the peer shows it: the picture's rect in the peer's native coordinates, once
+    /// known. Its edges lead onto the peer's own screens beside it.
+    pub picture: Option<Rect>,
 }
 
 /// Sent to a capture backend's thread from elsewhere.
@@ -155,6 +161,8 @@ pub enum CaptureCommand {
     SetPortal(Option<Portal>),
     /// Shows (or stops showing) one of this machine's displays on a peer.
     SetShown(Option<Shown>),
+    /// Where the peer shows that display (see [`Shown::picture`]).
+    SetShownPicture(Option<Rect>),
     Stop,
 }
 
@@ -272,8 +280,9 @@ pub struct Controller {
     carrying: Option<Vec<std::path::PathBuf>>,
     portal: Option<Portal>,
     shown: Option<Shown>,
-    /// The peer this machine last took over from with its own input: while this
-    /// machine's own pointer moves here, that peer is told where.
+    /// The peer that last had the pointer, before this machine did (it came home from
+    /// there, or this machine's own input took over from it): while this machine's own
+    /// pointer moves here, that peer is told where, so it can carry on from there.
     watcher: Option<MachineId>,
     /// The newest [`Event::PeerPointer`] used from each peer.
     pointer_seq: HashMap<MachineId, u32>,
@@ -325,6 +334,13 @@ impl Controller {
 
     pub fn shown(&self) -> Option<&Shown> {
         self.shown.as_ref()
+    }
+
+    /// Where the peer shows the shown display (see [`Shown::picture`]).
+    pub fn set_shown_picture(&mut self, picture: Option<Rect>) {
+        if let Some(shown) = &mut self.shown {
+            shown.picture = picture;
+        }
     }
 
     /// Whether files are being carried.
@@ -445,10 +461,18 @@ impl Controller {
                 self.pointer_seq.remove(&peer);
                 Verdict::Pass
             }
-            Event::PeerEntered(peer) => {
+            Event::PeerEntered { peer, seq } => {
                 if self.watcher == Some(peer) {
                     // It's driving this machine now; it knows where the pointer is.
                     self.watcher = None;
+                }
+                // Its reports sent before it came across (they can arrive after) are stale.
+                if self
+                    .pointer_seq
+                    .get(&peer)
+                    .is_none_or(|&last| newer(seq, last))
+                {
+                    self.pointer_seq.insert(peer, seq);
                 }
                 if let State::Remote { peer: p, .. } = self.state
                     && p == peer
@@ -475,7 +499,7 @@ impl Controller {
         if self
             .pointer_seq
             .get(&peer)
-            .is_some_and(|&last| (seq.wrapping_sub(last) as i32) <= 0)
+            .is_some_and(|&last| !newer(seq, last))
         {
             return;
         }
@@ -506,6 +530,7 @@ impl Controller {
                     // screen now, so its cursor shows it.
                     self.state = State::Local;
                     self.push = None;
+                    self.watcher = Some(peer);
                     out.push(Action::Unpark);
                     out.push(Action::ShowOnPortal { at });
                 } else if on_screens {
@@ -518,6 +543,9 @@ impl Controller {
             State::Local => {
                 if let Some(at) = on_portal {
                     out.push(Action::ShowOnPortal { at });
+                    // This machine's cursor is the pointer now: if this machine's own mouse
+                    // takes it elsewhere, the peer hears where.
+                    self.watcher = Some(peer);
                 } else if on_screens {
                     // Its own mouse took the pointer onto its own screens: it's there, not
                     // here. Park, so this machine's next input carries on from there.
@@ -611,10 +639,21 @@ impl Controller {
                 msg: Datagram::Pointer { seq: self.seq, pos },
             });
         }
-        if on_shown.is_some() {
-            // On a display a peer shows: the pointer stays this machine's.
-            self.push = None;
-            return Verdict::Pass;
+        if let Some(shown) = on_shown {
+            // On a display a peer shows: the pointer stays this machine's, unless it's
+            // pushed off an edge onto the peer's own screens beside the picture.
+            let Some((target, dir, pushing, entry)) =
+                self.shown_edge_crossing(shown, pos, attempted)
+            else {
+                self.push = None;
+                return Verdict::Pass;
+            };
+            if !self.accumulate_push(now, target, dir, pushing) || self.switch_blocked() {
+                return Verdict::Pass;
+            }
+            self.enter_peer(target, entry, pos, out);
+            out.push(Action::Capture);
+            return Verdict::Swallow;
         }
         let Some((target, dir, pushing, entry)) = self.edge_crossing(pos, attempted) else {
             self.push = None;
@@ -660,6 +699,96 @@ impl Controller {
             }
         }
         None
+    }
+
+    /// Pushing off an edge of the shown display with none of this machine's displays
+    /// beyond: onto the peer's screens just beside the same spot on the picture, if the
+    /// peer has one there. Like [`Self::edge_crossing`]'s result.
+    fn shown_edge_crossing(
+        &self,
+        shown: Shown,
+        pos: Point,
+        attempted: Point,
+    ) -> Option<(MachineId, Dir, f64, Point)> {
+        let picture = shown.picture?;
+        let machine = self.layout.machine(shown.peer)?;
+        let local = self.layout.local();
+        let display = shown.display;
+        let attempted_desk = scale(attempted, local.desk_per_native());
+        for dir in [Dir::Left, Dir::Right, Dir::Up, Dir::Down] {
+            let pushing = dir.component(attempted_desk);
+            if pushing <= 0.0 || !at_native_edge(display, pos, dir) {
+                continue;
+            }
+            // Another of this machine's displays beyond: the OS moves the cursor there.
+            let here = add(edge_point_native(display, pos, dir), scale(dir.unit(), 0.5));
+            if local
+                .screens
+                .displays
+                .iter()
+                .any(|d| d.bounds.contains(here))
+            {
+                continue;
+            }
+            let at = portal_at(display, pos);
+            let on_picture = Point::new(
+                picture.x + at.x * picture.width,
+                picture.y + at.y * picture.height,
+            );
+            let edge = machine.to_desk(edge_point_native(picture, on_picture, dir));
+            let beyond = add(edge, scale(dir.unit(), 0.5));
+            if let Some((target, _)) = self.layout.display_at(beyond)
+                && target == shown.peer
+            {
+                return Some((target, dir, pushing, beyond));
+            }
+        }
+        None
+    }
+
+    /// If `wanted` (desk) is on the picture of this machine's display that `peer` shows,
+    /// comes home onto that display: the pointer's on this machine's display again.
+    fn remote_to_shown(&mut self, peer: MachineId, wanted: Point, out: &mut Vec<Action>) -> bool {
+        let Some(shown) = self.shown.filter(|s| s.peer == peer) else {
+            return false;
+        };
+        if self.holding_on(peer) {
+            // Dragging something on the peer across the picture: keep dragging it there.
+            return false;
+        }
+        let (Some(picture), Some(machine)) = (shown.picture, self.layout.machine(peer)) else {
+            return false;
+        };
+        let native = machine.to_native(wanted);
+        if !picture.contains(native) {
+            return false;
+        }
+        let at = portal_at(picture, native);
+        let d = shown.display;
+        let warp = Point::new(
+            (d.x + at.x * d.width).min(d.right() - 1.0),
+            (d.y + at.y * d.height).min(d.bottom() - 1.0),
+        );
+        self.leave_peer(peer, out);
+        self.state = State::Local;
+        self.push = None;
+        out.push(Action::Release { warp });
+        self.came_home(peer, warp, out);
+        true
+    }
+
+    /// The pointer came home from `peer` to `pos` (local native): the peer hears where it
+    /// is now, and whenever this machine's own mouse moves it, so the peer carries on
+    /// from there rather than from where it last had it.
+    fn came_home(&mut self, peer: MachineId, pos: Point, out: &mut Vec<Action>) {
+        self.watcher = Some(peer);
+        self.last_local = pos;
+        self.on_shown = self.shown.is_some_and(|s| s.display.contains(pos));
+        self.seq = self.seq.wrapping_add(1);
+        out.push(Action::Datagram {
+            to: peer,
+            msg: Datagram::Pointer { seq: self.seq, pos },
+        });
     }
 
     /// Whether a mouse button pressed on `peer` is still held (e.g. dragging a window).
@@ -783,6 +912,8 @@ impl Controller {
     fn leave_portal(&mut self, peer: MachineId, out: &mut Vec<Action>) {
         self.leave_peer(peer, out);
         self.state = State::Local;
+        // The pointer's this machine's again; its next motion tells the peer where.
+        self.watcher = Some(peer);
     }
 
     fn captured_motion(&mut self, now: Instant, delta: Point, out: &mut Vec<Action>) {
@@ -793,7 +924,7 @@ impl Controller {
             return;
         };
         let wanted = add(cursor, scale(delta, self.layout.local().desk_per_native()));
-        if self.remote_to_portal(peer, wanted, out) {
+        if self.remote_to_portal(peer, wanted, out) || self.remote_to_shown(peer, wanted, out) {
             return;
         }
         let clamped = self.clamp_to_machine(peer, wanted);
@@ -816,6 +947,7 @@ impl Controller {
                             self.state = State::Local;
                             let warp = self.layout.local().to_native(beyond);
                             out.push(Action::Release { warp });
+                            self.came_home(peer, warp, out);
                         } else {
                             self.enter_peer(target, beyond, self.return_point(), out);
                         }
@@ -1132,6 +1264,11 @@ fn edge_point_native(display: Rect, pos: Point, dir: Dir) -> Point {
         Dir::Up => Point::new(pos.x, display.top()),
         Dir::Down => Point::new(pos.x, display.bottom()),
     }
+}
+
+/// Whether `seq` comes after `last`, allowing for wrapping.
+fn newer(seq: u32, last: u32) -> bool {
+    (seq.wrapping_sub(last) as i32) > 0
 }
 
 fn dominant_dir(v: Point) -> Dir {

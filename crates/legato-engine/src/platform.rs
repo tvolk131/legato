@@ -40,6 +40,10 @@ mod imp {
     pub fn cursor_state() -> Option<String> {
         None
     }
+
+    pub fn window_area(_window: u64) -> Option<legato_proto::Rect> {
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -74,6 +78,8 @@ mod imp {
     pub fn cursor_state() -> Option<String> {
         Some(legato_windows::cursor_state())
     }
+
+    pub use legato_windows::client_area as window_area;
 }
 
 pub fn check_permissions() -> Result<()> {
@@ -91,6 +97,12 @@ pub fn clipboard_change_count() -> u64 {
 /// How the cursor looks to the OS, for the log (Windows only).
 pub fn cursor_state() -> Option<String> {
     imp::cursor_state()
+}
+
+/// Where a window's contents are on the screen (native coordinates), where the OS says
+/// so exactly (Windows only).
+pub fn window_area(window: u64) -> Option<legato_proto::Rect> {
+    imp::window_area(window)
 }
 
 /// The app (or window) in front, which gets typing, for the log.

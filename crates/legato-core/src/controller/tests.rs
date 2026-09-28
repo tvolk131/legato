@@ -177,6 +177,7 @@ fn the_macs_own_pointer_on_its_shown_display_is_reported_to_the_viewer() {
         peer: PC,
         display,
         id: 7,
+        picture: None,
     }));
     let mut now = Instant::now();
     let mut out = vec![];
@@ -741,7 +742,7 @@ fn parked_the_macs_pointer_coming_across_brings_it_back_here() {
     h.step(0, Event::PeerYield(MAC));
     h.take();
     // The Mac's trackpad pushes up onto Windows: it sends Enter.
-    h.step(8, Event::PeerEntered(MAC));
+    h.step(8, Event::PeerEntered { peer: MAC, seq: 1 });
     assert_eq!(h.c.active_peer(), None);
     assert_eq!(
         h.take(),
@@ -787,7 +788,7 @@ fn after_taking_over_this_machine_reports_its_own_pointer_to_the_one_it_took_ove
         "{out:?}"
     );
     // Once the Mac drives Windows again it knows where the pointer is.
-    h.step(0, Event::PeerEntered(MAC));
+    h.step(0, Event::PeerEntered { peer: MAC, seq: 1 });
     h.step(
         8,
         Event::LocalMotion {
@@ -1336,4 +1337,288 @@ fn pushing_past_a_full_screen_portals_edge_towards_the_mac_crosses_to_it() {
     assert!(out.contains(&Action::Capture));
     assert!(!sent(&out).contains(&Control::Leave), "still the same Mac");
     assert_eq!(h.c.active_peer(), Some(MAC));
+}
+
+/// Where `actions` report this machine's pointer to `to`.
+fn reported_to(actions: &[Action], to: MachineId) -> Vec<Point> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Datagram {
+                to: t,
+                msg: Datagram::Pointer { pos, .. },
+            } if *t == to => Some(*pos),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn coming_home_from_the_mac_tells_it_where_the_pointer_went() {
+    let mut h = Harness::new();
+    h.cross_to_mac(1920.0);
+    h.step(
+        8,
+        Event::CapturedMotion {
+            delta: Point::new(0.0, 300.0),
+        },
+    );
+    h.take();
+    let mut actions = vec![];
+    while h.c.active_peer().is_some() {
+        h.step(
+            8,
+            Event::CapturedMotion {
+                delta: Point::new(0.0, -150.0),
+            },
+        );
+        actions.extend(h.take());
+    }
+    let warp = actions
+        .iter()
+        .find_map(|a| match a {
+            Action::Release { warp } => Some(*warp),
+            _ => None,
+        })
+        .unwrap();
+    // Right away, so the Mac parks, and then as this machine's own mouse moves it: the
+    // Mac's trackpad carries on from here, not from where this machine left its pointer.
+    assert_eq!(reported_to(&actions, MAC), [warp]);
+    h.step(
+        8,
+        Event::LocalMotion {
+            pos: Point::new(-2000.0, 700.0),
+            attempted: Point::new(-3.0, 0.0),
+        },
+    );
+    assert_eq!(reported_to(&h.take(), MAC), [Point::new(-2000.0, 700.0)]);
+    // Until the Mac comes across again: then it knows.
+    h.step(0, Event::PeerEntered { peer: MAC, seq: 50 });
+    h.take();
+    h.step(
+        8,
+        Event::LocalMotion {
+            pos: Point::new(-2100.0, 700.0),
+            attempted: Point::new(-3.0, 0.0),
+        },
+    );
+    assert!(reported_to(&h.take(), MAC).is_empty());
+}
+
+#[test]
+fn off_the_portal_or_after_showing_the_macs_pointer_this_machines_mouse_is_reported() {
+    // Leaving the picture: the pointer's back on this machine.
+    let mut h = with_portal();
+    h.step(8, portal_at(Point::new(0.5, 0.5)));
+    h.take();
+    h.step(
+        8,
+        Event::LocalMotion {
+            pos: Point::new(100.0, 700.0),
+            attempted: Point::new(3.0, 0.0),
+        },
+    );
+    let actions = h.take();
+    assert!(sent(&actions).contains(&Control::Leave), "{actions:?}");
+    assert_eq!(reported_to(&actions, MAC), [Point::new(100.0, 700.0)]);
+    // This machine's cursor showing the Mac's pointer on the picture, then moved off it
+    // by this machine's own mouse.
+    let mut h = with_portal();
+    h.step(8, mac_pointer(1, EXTRA.x + 100.0, EXTRA.y + 100.0));
+    assert!(matches!(h.take()[..], [Action::ShowOnPortal { .. }]));
+    h.step(
+        8,
+        Event::LocalMotion {
+            pos: Point::new(100.0, 700.0),
+            attempted: Point::new(3.0, 0.0),
+        },
+    );
+    assert_eq!(reported_to(&h.take(), MAC), [Point::new(100.0, 700.0)]);
+}
+
+#[test]
+fn a_report_sent_before_the_mac_came_across_is_stale() {
+    let mut h = Harness::new();
+    h.step(0, Event::PeerEntered { peer: MAC, seq: 10 });
+    // Overtaken by its `Enter` on the way: the Mac's pointer isn't there any more.
+    h.step(8, mac_pointer(9, 300.0, 400.0));
+    assert!(h.take().is_empty());
+    assert_eq!(h.c.active_peer(), None);
+    // Sent after it came home.
+    h.step(8, mac_pointer(11, 300.0, 400.0));
+    assert_eq!(h.take(), [Action::Capture]);
+}
+
+/// The Mac's view: the PC's three monitors above the MacBook, and the Mac's extra display
+/// above it too, shown on the PC.
+mod the_macs_extra_display {
+    use super::*;
+
+    const PC: MachineId = MachineId(2);
+    /// In the Mac's coordinates.
+    const DISPLAY: Rect = Rect::new(-96.0, -1080.0, 1920.0, 1080.0);
+    /// Full screen on the PC's middle monitor, in the PC's coordinates.
+    const FULL_SCREEN: Rect = Rect::new(0.0, 0.0, 3840.0, 2160.0);
+
+    fn mac(picture: Option<Rect>) -> Harness {
+        let mut layout = Layout::new(macbook_16());
+        assert!(layout.place_next_to_local(
+            PC,
+            windows_triple_4k(),
+            0,
+            Side::Above,
+            Align::Center,
+            0.0
+        ));
+        let mut h = Harness {
+            c: Controller::new(
+                ControllerConfig {
+                    push_distance: 0.0,
+                    ..Default::default()
+                },
+                layout,
+            ),
+            now: Instant::now(),
+            out: vec![],
+        };
+        h.c.set_shown(Some(Shown {
+            peer: PC,
+            display: DISPLAY,
+            id: 7,
+            picture: None,
+        }));
+        h.c.set_shown_picture(picture);
+        h
+    }
+
+    fn push(h: &mut Harness, x: f64, y: f64, dx: f64, dy: f64) -> Verdict {
+        h.step(
+            8,
+            Event::LocalMotion {
+                pos: Point::new(x, y),
+                attempted: Point::new(dx, dy),
+            },
+        )
+    }
+
+    fn near(p: Point, x: f64, y: f64) -> bool {
+        (p.x - x).abs() < 1.0 && (p.y - y).abs() < 1.0
+    }
+
+    #[test]
+    fn its_edges_lead_onto_the_pcs_monitors_beside_the_picture() {
+        // Not knowing where the PC shows it, its edges lead nowhere.
+        let mut h = mac(None);
+        assert_eq!(push(&mut h, DISPLAY.x, -540.0, -5.0, 0.0), Verdict::Pass);
+        assert_eq!(h.c.active_peer(), None);
+        // Full screen on the middle monitor: nothing's above it...
+        let mut h = mac(Some(FULL_SCREEN));
+        assert_eq!(push(&mut h, 500.0, DISPLAY.y, 0.0, -5.0), Verdict::Pass);
+        // ...the MacBook is below it (macOS moves the pointer there itself)...
+        assert_eq!(push(&mut h, 500.0, -1.0, 0.0, 5.0), Verdict::Pass);
+        assert_eq!(h.c.active_peer(), None);
+        h.take();
+        // ...and the left monitor is to its left, level with the same spot.
+        assert_eq!(push(&mut h, DISPLAY.x, -540.0, -5.0, 0.0), Verdict::Swallow);
+        assert_eq!(h.c.active_peer(), Some(PC));
+        let actions = h.take();
+        let at = entered_at(&actions).unwrap();
+        assert!(
+            at.x < 0.0 && at.x > -2.0 && (at.y - 1080.0).abs() < 1.0,
+            "{at:?}"
+        );
+        assert!(actions.contains(&Action::Capture));
+    }
+
+    #[test]
+    fn in_a_window_its_edges_lead_onto_the_monitor_around_it() {
+        let window = Rect::new(1000.0, 500.0, 1600.0, 900.0);
+        let mut h = mac(Some(window));
+        assert_eq!(
+            push(&mut h, DISPLAY.right() - 1.0, -540.0, 5.0, 0.0),
+            Verdict::Swallow
+        );
+        let at = entered_at(&h.take()).unwrap();
+        assert!(near(at, window.right() + 0.75, 950.0), "{at:?}");
+        // Above it, too, since the window doesn't reach the top of the monitor.
+        let mut h = mac(Some(window));
+        assert_eq!(push(&mut h, 864.0, DISPLAY.y, 0.0, -5.0), Verdict::Swallow);
+        let at = entered_at(&h.take()).unwrap();
+        assert!(near(at, 1800.0, window.y - 0.75), "{at:?}");
+    }
+
+    #[test]
+    fn back_onto_the_picture_brings_the_pointer_home_to_it() {
+        let mut h = mac(Some(FULL_SCREEN));
+        push(&mut h, DISPLAY.x, -540.0, -5.0, 0.0);
+        h.take();
+        // A little further onto the left monitor, then back.
+        h.step(
+            8,
+            Event::CapturedMotion {
+                delta: Point::new(-20.0, 0.0),
+            },
+        );
+        assert_eq!(h.c.active_peer(), Some(PC));
+        h.take();
+        h.step(
+            8,
+            Event::CapturedMotion {
+                delta: Point::new(25.0, 0.0),
+            },
+        );
+        assert_eq!(h.c.active_peer(), None);
+        let actions = h.take();
+        assert!(sent(&actions).contains(&Control::Leave), "{actions:?}");
+        let warp = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Release { warp } => Some(*warp),
+                _ => None,
+            })
+            .unwrap();
+        // It entered just off the picture's edge, so it's 4⅓ desk units onto the picture:
+        // 6.5 of the PC's pixels, 3.25 of the display's points.
+        assert!(near(warp, DISPLAY.x + 3.25, -540.0), "{warp:?}");
+        // The PC hears where, so its cursor shows it on the picture.
+        assert_eq!(reported_to(&actions, PC), [warp]);
+    }
+
+    #[test]
+    fn dragging_on_the_pc_carries_on_across_the_picture() {
+        let mut h = mac(Some(FULL_SCREEN));
+        push(&mut h, DISPLAY.x, -540.0, -5.0, 0.0);
+        h.step(
+            8,
+            Event::Button {
+                button: Button::Left,
+                down: true,
+            },
+        );
+        h.step(
+            8,
+            Event::CapturedMotion {
+                delta: Point::new(40.0, 0.0),
+            },
+        );
+        assert_eq!(h.c.active_peer(), Some(PC), "the drag was dropped");
+        h.step(
+            8,
+            Event::Button {
+                button: Button::Left,
+                down: false,
+            },
+        );
+        h.step(
+            8,
+            Event::CapturedMotion {
+                delta: Point::new(1.0, 0.0),
+            },
+        );
+        assert_eq!(
+            h.c.active_peer(),
+            None,
+            "let go over the picture, it comes home"
+        );
+    }
 }

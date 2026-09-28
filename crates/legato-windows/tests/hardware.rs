@@ -1218,7 +1218,7 @@ fn the_cursor_shows_when_the_peer_takes_over() {
 
     // How the peer takes over: its `Enter` reaches the capture (`PeerEntered`) and the
     // receiver (the `MoveTo`), in either order.
-    let entered = || capture.send(Command::Event(Event::PeerEntered(PEER)));
+    let entered = || capture.send(Command::Event(Event::PeerEntered { peer: PEER, seq: 1 }));
 
     // 1. The PC wasn't driving the Mac: the Mac just takes over.
     entered();

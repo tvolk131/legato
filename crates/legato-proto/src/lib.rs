@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
@@ -204,9 +204,12 @@ pub enum Control {
     /// was resized, or went full screen).
     ExtendResize(ExtendRequest),
     /// Viewer → Mac: move the extra display in the Mac's arrangement, to this top-left
-    /// corner in the Mac's native coordinates, so it matches where it's shown.
+    /// corner in the Mac's native coordinates, so it matches where it's shown. `picture`
+    /// is where it's shown: its rect in the viewer's native coordinates, so the pointer
+    /// can cross the display's edges onto the viewer's screens beside it.
     ExtendArrange {
         origin: Point,
+        picture: Rect,
     },
 }
 
@@ -499,6 +502,7 @@ mod tests {
             }),
             Control::ExtendArrange {
                 origin: Point::new(-96.0, -1080.0),
+                picture: Rect::new(0.0, 0.0, 3840.0, 2160.0),
             },
         ];
         for msg in msgs {
