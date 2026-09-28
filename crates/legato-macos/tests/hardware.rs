@@ -179,10 +179,15 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
     for _ in 0..5 {
         post(edge.right() - 1.0, y, 20);
         actions.extend(rx.try_iter());
-        if actions
-            .iter()
-            .any(|a| matches!(a, Action::Send { msg: Control::Enter { .. }, .. }))
-        {
+        if actions.iter().any(|a| {
+            matches!(
+                a,
+                Action::Send {
+                    msg: Control::Enter { .. },
+                    ..
+                }
+            )
+        }) {
             break;
         }
     }
@@ -202,17 +207,24 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
         main.origin.x + main.size.width / 2.0,
         main.origin.y + main.size.height / 2.0,
     );
-    let held = cursor_position();
     post(pin.0 + 30.0, pin.1, 30);
     // The first event after a warp reports the warp's jump in its delta (rdar://11757097):
     // here a big move back towards this Mac, though it barely moved. It mustn't hand the
     // pointer back.
     post(pin.0 + 2.0, pin.1, -600);
     let later: Vec<Action> = rx.try_iter().collect();
-    let still = cursor_position();
-    let bounced = later
-        .iter()
-        .any(|a| matches!(a, Action::Release { .. } | Action::Send { msg: Control::Leave, .. }));
+    // (That the held cursor doesn't move can't be checked here: a posted event moves the
+    // cursor to its location even when the tap drops it, unlike the hardware's.)
+    let bounced = later.iter().any(|a| {
+        matches!(
+            a,
+            Action::Release { .. }
+                | Action::Send {
+                    msg: Control::Leave,
+                    ..
+                }
+        )
+    });
 
     // Back on this Mac, with a push needed to cross again: the first event after the warp
     // back (to where it left), spiking towards the peer, mustn't cross straight over.
@@ -224,9 +236,15 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
     std::thread::sleep(Duration::from_millis(150));
     let _ = rx.try_iter().count();
     post(edge.right() - 1.0, y, 600);
-    let recrossed = rx
-        .try_iter()
-        .any(|a| matches!(a, Action::Send { msg: Control::Enter { .. }, .. }));
+    let recrossed = rx.try_iter().any(|a| {
+        matches!(
+            a,
+            Action::Send {
+                msg: Control::Enter { .. },
+                ..
+            }
+        )
+    });
 
     std::thread::sleep(Duration::from_millis(100));
     drop(capture);
@@ -240,9 +258,11 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
         "{later:?}"
     );
     assert!(
-        (still.x - held.x).abs() < 1.0 && (still.y - held.y).abs() < 1.0,
-        "cursor moved: {held:?} → {still:?}"
+        !bounced,
+        "a warp's delta spike handed the pointer back: {later:?}"
     );
-    assert!(!bounced, "a warp's delta spike handed the pointer back: {later:?}");
-    assert!(!recrossed, "a warp's delta spike crossed straight back over");
+    assert!(
+        !recrossed,
+        "a warp's delta spike crossed straight back over"
+    );
 }
