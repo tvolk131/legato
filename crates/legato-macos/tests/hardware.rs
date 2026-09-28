@@ -175,10 +175,17 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
         std::thread::sleep(Duration::from_millis(20));
     };
     let y = edge.y + edge.height / 2.0;
+    let mut actions: Vec<Action> = Vec::new();
     for _ in 0..5 {
         post(edge.right() - 1.0, y, 20);
+        actions.extend(rx.try_iter());
+        if actions
+            .iter()
+            .any(|a| matches!(a, Action::Send { msg: Control::Enter { .. }, .. }))
+        {
+            break;
+        }
     }
-    let actions: Vec<Action> = rx.try_iter().collect();
     let entered = actions.iter().any(|a| {
         matches!(
             a,
@@ -188,15 +195,19 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
             }
         )
     });
-    // While captured, motion goes to the peer and the cursor stays put. Each event says
-    // where it would take the cursor from where it's held.
+    // While captured, the cursor is held in the middle of the main display, and each
+    // event says where it would take it from there, as the hardware's do.
+    let main = objc2_core_graphics::CGDisplayBounds(objc2_core_graphics::CGMainDisplayID());
+    let pin = (
+        main.origin.x + main.size.width / 2.0,
+        main.origin.y + main.size.height / 2.0,
+    );
     let held = cursor_position();
-    post(held.x + 30.0, held.y, 30);
-    post(held.x + 30.0, held.y, 30);
+    post(pin.0 + 30.0, pin.1, 30);
     // The first event after a warp reports the warp's jump in its delta (rdar://11757097):
     // here a big move back towards this Mac, though it barely moved. It mustn't hand the
     // pointer back.
-    post(held.x + 2.0, held.y, -600);
+    post(pin.0 + 2.0, pin.1, -600);
     let later: Vec<Action> = rx.try_iter().collect();
     let still = cursor_position();
     let bounced = later
@@ -204,16 +215,15 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
         .any(|a| matches!(a, Action::Release { .. } | Action::Send { msg: Control::Leave, .. }));
 
     // Back on this Mac, with a push needed to cross again: the first event after the warp
-    // back, spiking towards the peer, mustn't cross straight over.
+    // back (to where it left), spiking towards the peer, mustn't cross straight over.
     capture.send(CaptureCommand::SetConfig(ControllerConfig {
         push_distance: 30.0,
         ..Default::default()
     }));
     capture.send(CaptureCommand::Event(Event::PeerYield(peer)));
     std::thread::sleep(Duration::from_millis(150));
-    let back = cursor_position();
     let _ = rx.try_iter().count();
-    post(back.x, back.y, 600);
+    post(edge.right() - 1.0, y, 600);
     let recrossed = rx
         .try_iter()
         .any(|a| matches!(a, Action::Send { msg: Control::Enter { .. }, .. }));
