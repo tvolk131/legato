@@ -200,19 +200,36 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
             }
         )
     });
-    // While captured, the cursor is held in the middle of the main display, and each
-    // event says where it would take it from there, as the hardware's do.
+    // Taking over warped the hidden cursor to the middle of the main display. The first
+    // event after a warp reports the warp's jump in its delta (rdar://11757097): here a big
+    // move back towards this Mac, though it moved 2 points. It mustn't hand the pointer
+    // back.
     let main = objc2_core_graphics::CGDisplayBounds(objc2_core_graphics::CGMainDisplayID());
     let pin = (
         main.origin.x + main.size.width / 2.0,
         main.origin.y + main.size.height / 2.0,
     );
-    post(pin.0 + 30.0, pin.1, 30);
-    // The first event after a warp reports the warp's jump in its delta (rdar://11757097):
-    // here a big move back towards this Mac, though it barely moved. It mustn't hand the
-    // pointer back.
     post(pin.0 + 2.0, pin.1, -600);
+    // After that, each event moves the peer's cursor by its own motion, however far the
+    // hidden cursor has drifted from the pin (a trackpad moves it, dropped or not).
+    for i in 1..=3 {
+        post(pin.0 + 2.0 + 10.0 * f64::from(i), pin.1, 10);
+    }
     let later: Vec<Action> = rx.try_iter().collect();
+    let entered_at = actions.iter().find_map(|a| match a {
+        Action::Send {
+            msg: Control::Enter { pos, .. },
+            ..
+        } => Some(pos.x),
+        _ => None,
+    });
+    let last_x = later.iter().rev().find_map(|a| match a {
+        Action::Datagram {
+            msg: legato_proto::Datagram::Motion { pos, .. },
+            ..
+        } => Some(pos.x),
+        _ => None,
+    });
     // (That the held cursor doesn't move can't be checked here: a posted event moves the
     // cursor to its location even when the tap drops it, unlike the hardware's.)
     let bounced = later.iter().any(|a| {
@@ -260,6 +277,13 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
     assert!(
         !bounced,
         "a warp's delta spike handed the pointer back: {later:?}"
+    );
+    // 2 points, then 3 × 10: the peer's cursor is 32 in, not a sum of drifts.
+    let (entered_at, last_x) = (entered_at.unwrap(), last_x.unwrap());
+    assert!(
+        (last_x - entered_at - 32.0).abs() < 1.0,
+        "moved {} rather than 32: {later:?}",
+        last_x - entered_at
     );
     assert!(
         !recrossed,

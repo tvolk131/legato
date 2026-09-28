@@ -269,16 +269,13 @@ impl TapState {
     /// warp's jump (rdar://11757097). Warping to the pin when taking over another machine
     /// then read as a big push back towards this one, and warping back as a big push
     /// towards the other machine, so the pointer bounced between them on every other event.
-    /// So while pinned (events are dropped, and the cursor held there) the motion is where
-    /// each event would take the cursor, measured from the pin, and just after a warp it's
-    /// measured from where the warp put the cursor.
+    /// So the first event after a warp is measured from where the warp put the cursor.
+    /// Every other one uses the delta fields: the hidden cursor isn't really held at the
+    /// pin (a trackpad moves it though its events are dropped), so its location can't
+    /// stand in for them.
     fn motion(&mut self, ev: &CGEvent) -> (f64, f64) {
-        let loc = CGEvent::location(Some(ev));
-        if let Some(pin) = self.pin {
-            self.warped_to = None;
-            return (loc.x - pin.x, loc.y - pin.y);
-        }
         if let Some(from) = self.warped_to.take() {
+            let loc = CGEvent::location(Some(ev));
             return (loc.x - from.x, loc.y - from.y);
         }
         let int = |field| CGEvent::integer_value_field(Some(ev), field);
