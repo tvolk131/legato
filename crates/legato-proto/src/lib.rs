@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
@@ -345,6 +345,11 @@ pub enum FilePurpose {
 pub enum Datagram {
     /// Absolute cursor position. Newer `seq` wins; older ones are dropped.
     Motion { seq: u32, pos: Point },
+    /// Mac → the PC showing its extra display: the Mac's own pointer (its trackpad or
+    /// mouse) is at `pos` on that display, in the Mac's native coordinates. The PC shows
+    /// its own cursor there, as it would for its own mouse: far quicker than the picture.
+    /// Newer `seq` wins.
+    Pointer { seq: u32, pos: Point },
 }
 
 /// Messages on the pairing stream (ALPN [`PAIR_ALPN`]).
@@ -520,6 +525,15 @@ mod tests {
         let mut bad_flag = header.encode();
         bad_flag[4] = 7;
         assert_eq!(VideoFrameHeader::decode(bad_flag), None);
+    }
+
+    #[test]
+    fn pointer_datagrams_round_trip() {
+        let d = Datagram::Pointer {
+            seq: 7,
+            pos: Point::new(-96.5, -1080.0),
+        };
+        assert_eq!(decode_datagram(&encode_datagram(&d)).unwrap(), d);
     }
 
     #[test]

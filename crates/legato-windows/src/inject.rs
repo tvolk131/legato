@@ -128,6 +128,11 @@ fn button_flags(button: Button, down: bool) -> (MOUSE_EVENT_FLAGS, u32) {
     }
 }
 
+/// Moves the cursor to `pos` (native), marked as ours so our hooks leave it alone.
+pub(crate) fn move_cursor(pos: Point) {
+    send(&[mouse(move_to(pos), 0, MOUSEEVENTF_MOVE)]);
+}
+
 fn mouse((dx, dy): (i32, i32), data: u32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
     let flags = if flags == MOUSEEVENTF_MOVE {
         MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK

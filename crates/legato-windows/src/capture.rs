@@ -135,6 +135,11 @@ struct State {
     where_: Option<Where>,
     /// When a key that went here instead of the portal was last logged.
     key_noted: Option<Instant>,
+    /// The peer driving this PC moved the cursor while it was parked for driving the
+    /// peer: when the peer then hands back, leave the cursor where the peer put it.
+    peer_moved: bool,
+    /// The last [`CaptureCommand::PeerPointer`] used, to drop older ones.
+    peer_pointer_seq: Option<u32>,
 }
 
 /// Where the pointer is relative to a portal's picture, for the log.
@@ -173,14 +178,21 @@ impl State {
                     let pin = pin_point(&self.controller);
                     self.pin = Some(pin);
                     self.catching = false;
+                    self.peer_moved = false;
                     effects.push(Effect::Pin(pin));
                     (self.sink)(Action::Capture);
                 }
                 Action::Release { warp } => {
                     self.pin = None;
-                    let to = clamp_to_displays(&self.controller, warp);
-                    self.last_pos = Some(to);
-                    effects.push(Effect::Unpin(to));
+                    if std::mem::take(&mut self.peer_moved) {
+                        // The peer took over this PC before saying it took its own
+                        // cursor back, and has placed ours: leave it there.
+                        effects.push(Effect::StopCatching);
+                    } else {
+                        let to = clamp_to_displays(&self.controller, warp);
+                        self.last_pos = Some(to);
+                        effects.push(Effect::Unpin(to));
+                    }
                     (self.sink)(Action::Release { warp });
                 }
                 Action::EnterPortal { at } => {
@@ -207,6 +219,10 @@ impl State {
         if info.dwExtraInfo == crate::INJECTED_TAG
             || (info.flags & LLMHF_INJECTED != 0 && !self.options.accept_injected)
         {
+            if info.dwExtraInfo == crate::INJECTED_TAG && msg == WM_MOUSEMOVE && self.pin.is_some()
+            {
+                self.peer_moved = true;
+            }
             return (Verdict::Pass, vec![]);
         }
         if self.pin.is_none() {
@@ -446,6 +462,43 @@ impl State {
         .1
     }
 
+    /// Puts this PC's cursor where the peer's own pointer is on the display the portal
+    /// shows (the peer's trackpad or mouse moved it there). The cursor on a screen is always
+    /// the cursor of the machine the screen belongs to, and this one is far quicker than
+    /// the picture. Only while this PC's pointer is free: not driving anyone.
+    fn show_peer_pointer(&mut self, peer: legato_core::MachineId, seq: u32, pos: Point) {
+        let Some(portal) = self.controller.portal().copied().filter(|p| p.peer == peer) else {
+            return;
+        };
+        if self.pin.is_some() || self.controller.active_peer().is_some() {
+            return;
+        }
+        if self
+            .peer_pointer_seq
+            .is_some_and(|last| (seq.wrapping_sub(last) as i32) <= 0)
+        {
+            return;
+        }
+        self.peer_pointer_seq = Some(seq);
+        let Some(picture) = self.portal_picture() else {
+            return;
+        };
+        let r = portal.remote;
+        let (ax, ay) = (
+            ((pos.x - r.x) / r.width).clamp(0.0, 1.0),
+            ((pos.y - r.y) / r.height).clamp(0.0, 1.0),
+        );
+        let to = Point::new(
+            (picture.x + ax * picture.width).min(picture.right() - 1.0),
+            (picture.y + ay * picture.height).min(picture.bottom() - 1.0),
+        );
+        crate::inject::move_cursor(to);
+        self.last_pos = Some(POINT {
+            x: to.x as i32,
+            y: to.y as i32,
+        });
+    }
+
     /// Where on the portal's picture `pos` is (0..1 each way), if it's over it and the
     /// portal window isn't covered there.
     fn portal_hit(&self, pos: POINT) -> Option<Point> {
@@ -507,7 +560,13 @@ impl State {
                 self.controller.set_config(config);
                 Some(vec![])
             }
+            Command::SetShown(_) => Some(vec![]),
+            Command::PeerPointer { peer, seq, pos } => {
+                self.show_peer_pointer(peer, seq, pos);
+                Some(vec![])
+            }
             Command::SetPortal(portal) => {
+                self.peer_pointer_seq = None;
                 if portal.is_some() {
                     // The viewer's window exists by now, and so does whatever registered
                     // raw input for it.
@@ -892,6 +951,8 @@ fn run(
             catching: false,
             where_: None,
             key_noted: None,
+            peer_moved: false,
+            peer_pointer_seq: None,
         });
     });
     if let Err(e) = crate::drop::register(window) {

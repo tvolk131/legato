@@ -107,6 +107,18 @@ pub struct Portal {
     pub window: u64,
 }
 
+/// One of this machine's displays that isn't shared, shown by a peer: a Mac's extra
+/// display, in a window or full screen on a PC. While this machine's own pointer is on
+/// it, the peer is told where, so it can show its cursor there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shown {
+    pub peer: MachineId,
+    /// The display, in this machine's native coordinates.
+    pub display: Rect,
+    /// The display's id, so the backend can follow it if it moves.
+    pub id: u32,
+}
+
 /// Sent to a capture backend's thread from elsewhere.
 #[derive(Debug)]
 pub enum CaptureCommand {
@@ -116,6 +128,15 @@ pub enum CaptureCommand {
     SetRemap(MachineId, KeyRemap),
     SetConfig(ControllerConfig),
     SetPortal(Option<Portal>),
+    /// Shows (or stops showing) one of this machine's displays on a peer.
+    SetShown(Option<Shown>),
+    /// A peer's own pointer is at `pos` (its native coordinates) on the display this
+    /// machine's portal shows: show this machine's cursor there if it's free.
+    PeerPointer {
+        peer: MachineId,
+        seq: u32,
+        pos: Point,
+    },
     Stop,
 }
 
@@ -221,6 +242,7 @@ pub struct Controller {
     buttons: HashMap<Button, Route>,
     carrying: Option<Vec<std::path::PathBuf>>,
     portal: Option<Portal>,
+    shown: Option<Shown>,
 }
 
 impl Controller {
@@ -236,6 +258,7 @@ impl Controller {
             buttons: HashMap::new(),
             carrying: None,
             portal: None,
+            shown: None,
         }
     }
 
@@ -251,6 +274,15 @@ impl Controller {
             self.leave_portal(peer, out);
         }
         self.portal = portal;
+    }
+
+    /// One of this machine's displays is shown by a peer (or no longer is).
+    pub fn set_shown(&mut self, shown: Option<Shown>) {
+        self.shown = shown;
+    }
+
+    pub fn shown(&self) -> Option<&Shown> {
+        self.shown.as_ref()
     }
 
     /// Whether files are being carried.
@@ -380,6 +412,17 @@ impl Controller {
         if self.active_peer().is_some() {
             // Shouldn't happen while captured; don't let it move the shared cursor.
             return Verdict::Swallow;
+        }
+        if let Some(shown) = self.shown.filter(|s| s.display.contains(pos)) {
+            // On a display a peer shows: the pointer stays this machine's, and the peer
+            // shows its own cursor where it is.
+            self.seq = self.seq.wrapping_add(1);
+            self.push = None;
+            out.push(Action::Datagram {
+                to: shown.peer,
+                msg: Datagram::Pointer { seq: self.seq, pos },
+            });
+            return Verdict::Pass;
         }
         let Some((target, dir, pushing, entry)) = self.edge_crossing(pos, attempted) else {
             self.push = None;

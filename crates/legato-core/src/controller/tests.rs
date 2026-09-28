@@ -153,6 +153,68 @@ fn bottom_edges_without_a_neighbour_are_walls() {
     assert_eq!(h.c.active_peer(), None);
 }
 
+#[test]
+fn the_macs_own_pointer_on_its_shown_display_is_reported_to_the_viewer() {
+    const PC: MachineId = MachineId(2);
+    let mut layout = Layout::new(macbook_16());
+    assert!(layout.place_next_to_local(
+        PC,
+        windows_triple_4k(),
+        0,
+        Side::Above,
+        Align::Center,
+        0.0
+    ));
+    let mut c = Controller::new(
+        ControllerConfig {
+            push_distance: 0.0,
+            ..Default::default()
+        },
+        layout,
+    );
+    let display = Rect::new(-96.0, -1080.0, 1920.0, 1080.0);
+    c.set_shown(Some(Shown {
+        peer: PC,
+        display,
+        id: 7,
+    }));
+    let mut now = Instant::now();
+    let mut out = vec![];
+    let mut motion = |c: &mut Controller, x: f64, y: f64, dy: f64, out: &mut Vec<Action>| {
+        now += Duration::from_millis(8);
+        c.handle(
+            now,
+            Event::LocalMotion {
+                pos: Point::new(x, y),
+                attempted: Point::new(0.0, dy),
+            },
+            out,
+        )
+    };
+    // On the shown display: the Mac keeps its pointer, and the PC hears where it is.
+    assert_eq!(motion(&mut c, 500.0, -300.0, -3.0, &mut out), Verdict::Pass);
+    assert_eq!(motion(&mut c, 520.0, -310.0, -3.0, &mut out), Verdict::Pass);
+    assert_eq!(c.active_peer(), None);
+    let reported: Vec<(u32, Point)> = out
+        .drain(..)
+        .map(|a| match a {
+            Action::Datagram {
+                to: PC,
+                msg: Datagram::Pointer { seq, pos },
+            } => (seq, pos),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(reported.len(), 2);
+    assert!(reported[1].0 > reported[0].0, "newer reports win");
+    assert_eq!(reported[1].1, Point::new(520.0, -310.0));
+    // On the MacBook, or once it's no longer shown: nothing to tell.
+    assert_eq!(motion(&mut c, 500.0, 400.0, 0.0, &mut out), Verdict::Pass);
+    c.set_shown(None);
+    assert_eq!(motion(&mut c, 500.0, -300.0, -3.0, &mut out), Verdict::Pass);
+    assert!(out.is_empty(), "{out:?}");
+}
+
 /// Backends report positions on their own displays (Windows clamps its hook's). A position
 /// on none of them is on a display this machine doesn't share: the Mac's extra display.
 #[test]

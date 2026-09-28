@@ -1211,10 +1211,17 @@ fn the_cursor_shows_when_the_peer_takes_over() {
     note("3. ...and moves it");
     capture.send(Command::Event(Event::PeerYield(PEER)));
     note("3. then it says it took its cursor back");
+    // Handing back late mustn't move the cursor from where the peer put it.
+    let (after, placed) = (cursor(), target(200.0));
+    let moved_back = (after.x - placed.x as i32).abs() > 2 || (after.y - placed.y as i32).abs() > 2;
     injector.apply(&Inject::MoveTo { pos: target(240.0) });
     note("3. ...and moves it again");
 
     drop(capture);
+    assert!(
+        !moved_back,
+        "the late hand-back moved the cursor to {after:?}, from where the peer put it ({placed:?})"
+    );
     let hidden: Vec<_> = report
         .iter()
         .filter(|l| {
@@ -1223,4 +1230,134 @@ fn the_cursor_shows_when_the_peer_takes_over() {
         })
         .collect();
     assert!(hidden.is_empty(), "cursor not shown: {hidden:#?}");
+}
+
+/// The Mac's own trackpad or mouse moves its pointer onto its extra display, shown here:
+/// this PC's cursor goes to the same place on the picture, as the cursor of the machine
+/// the screen belongs to, without handing this PC's input to the Mac.
+#[test]
+#[ignore = "moves the cursor and shows a window"]
+fn the_pcs_cursor_follows_the_macs_own_pointer_on_its_display() {
+    use legato_core::controller::Portal;
+
+    let local = screens();
+    let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
+    let rightmost = (0..local.displays.len())
+        .max_by(|&a, &b| {
+            local.displays[a]
+                .bounds
+                .right()
+                .total_cmp(&local.displays[b].bounds.right())
+        })
+        .unwrap();
+    let edge = local.displays[rightmost].bounds;
+    let mut layout = Layout::new(local.clone());
+    let peer = Screens {
+        displays: vec![Display {
+            id: 1,
+            bounds: Rect::new(0.0, 0.0, 1512.0, 982.0),
+            pixel_scale: 2.0,
+            ui_scale: 1.0,
+            primary: true,
+            name: "peer".into(),
+        }],
+        native_per_desk: 1.0,
+    };
+    assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
+    let (tx, rx) = mpsc::channel();
+    let capture = Capture::start(
+        Controller::new(
+            ControllerConfig {
+                push_distance: 0.0,
+                ..Default::default()
+            },
+            layout,
+        ),
+        CaptureOptions {
+            accept_injected: true,
+        },
+        move |action| {
+            let _ = tx.send(action);
+        },
+        |_| {},
+    )
+    .unwrap();
+    let (w, h) = (640, 360);
+    let (x, y) = (
+        primary.center().x as i32 - w / 2,
+        primary.center().y as i32 - h / 2,
+    );
+    let viewer = viewer::Viewer::open(x, y, w, h, Duration::ZERO);
+    // The Mac's extra display, above its MacBook, shown here in the window.
+    let remote = Rect::new(-96.0, -1080.0, 1920.0, 1080.0);
+    capture.send(Command::SetPortal(Some(Portal {
+        peer: PEER,
+        remote,
+        window: viewer.hwnd.0 as usize as u64,
+    })));
+    std::thread::sleep(Duration::from_millis(100));
+    let under = window_at(x + w / 2, y + h / 2, viewer.hwnd);
+    if under != "the viewer" {
+        eprintln!("skipped: something else covers the viewer: {under}");
+        return;
+    }
+    // This PC's own pointer is elsewhere, idle.
+    unsafe { SetCursorPos(x - 50, y - 50).unwrap() };
+    mouse_move(-2, 0);
+    std::thread::sleep(Duration::from_millis(100));
+    let _ = rx.try_iter().count();
+    let report = |seq: u32, px: f64, py: f64| {
+        capture.send(Command::PeerPointer {
+            peer: PEER,
+            seq,
+            pos: legato_proto::Point::new(px, py),
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        cursor()
+    };
+    let near = |p: POINT, qx: i32, qy: i32| (p.x - qx).abs() <= 2 && (p.y - qy).abs() <= 2;
+
+    let middle = report(1, remote.center().x, remote.center().y);
+    eprintln!("the Mac's pointer in the middle of its display: this PC's cursor at {middle:?}");
+    assert!(near(middle, x + w / 2, y + h / 2), "{middle:?}");
+    let stale = report(1, remote.x + 10.0, remote.y + 10.0);
+    assert!(
+        near(stale, middle.x, middle.y),
+        "an older report moved it: {stale:?}"
+    );
+    let corner = report(2, remote.x, remote.y);
+    eprintln!("...at its top-left corner: {corner:?}");
+    assert!(near(corner, x, y), "{corner:?}");
+    let entered = rx
+        .try_iter()
+        .filter(|a| {
+            matches!(
+                a,
+                Action::Send {
+                    msg: Control::Enter { .. },
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        entered, 0,
+        "showing the Mac's pointer handed this PC's input to the Mac"
+    );
+
+    // While this PC drives the Mac, its cursor stays parked.
+    unsafe { SetCursorPos(edge.right() as i32 - 3, edge.center().y as i32).unwrap() };
+    for _ in 0..4 {
+        mouse_move(25, 0);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let parked = cursor();
+    let still = report(3, remote.center().x, remote.center().y);
+    eprintln!("while driving the Mac: parked at {parked:?}, then {still:?}");
+    assert!(near(still, parked.x, parked.y), "{still:?}");
+    capture.send(Command::Event(Event::PeerYield(PEER)));
+    std::thread::sleep(Duration::from_millis(100));
+    capture.send(Command::SetPortal(None));
+    drop(capture);
+    drop(viewer);
 }
