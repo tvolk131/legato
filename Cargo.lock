@@ -2305,9 +2305,9 @@ dependencies = [
 
 [[package]]
 name = "iced-m3"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "141e9cbb7382491759eb0dd9fe27d5124a8ea969e4477d3a53b487005ae7cd6b"
+checksum = "a98295a5439c7c620bcbfcf6fb73b9599fb8b6b71205834e9fe64cea52c194e7"
 dependencies = [
  "iced",
  "material-colors",
@@ -3091,7 +3091,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "legato-app"
-version = "0.3.0-alpha.19"
+version = "0.3.0-alpha.20"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -3117,7 +3117,7 @@ dependencies = [
 
 [[package]]
 name = "legato-cli"
-version = "0.3.0-alpha.19"
+version = "0.3.0-alpha.20"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3137,7 +3137,7 @@ dependencies = [
 
 [[package]]
 name = "legato-core"
-version = "0.3.0-alpha.19"
+version = "0.3.0-alpha.20"
 dependencies = [
  "insta",
  "keycode",
@@ -3148,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "legato-engine"
-version = "0.3.0-alpha.19"
+version = "0.3.0-alpha.20"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3171,7 +3171,7 @@ dependencies = [
 
 [[package]]
 name = "legato-macos"
-version = "0.3.0-alpha.19"
+version = "0.3.0-alpha.20"
 dependencies = [
  "legato-core",
  "legato-proto",
@@ -3183,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "legato-net"
-version = "0.3.0-alpha.19"
+version = "0.3.0-alpha.20"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3202,7 +3202,7 @@ dependencies = [
 
 [[package]]
 name = "legato-proto"
-version = "0.3.0-alpha.19"
+version = "0.3.0-alpha.20"
 dependencies = [
  "postcard",
  "proptest",
@@ -3212,7 +3212,7 @@ dependencies = [
 
 [[package]]
 name = "legato-screen"
-version = "0.3.0-alpha.19"
+version = "0.3.0-alpha.20"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -3232,7 +3232,7 @@ dependencies = [
 
 [[package]]
 name = "legato-windows"
-version = "0.3.0-alpha.19"
+version = "0.3.0-alpha.20"
 dependencies = [
  "legato-core",
  "legato-proto",

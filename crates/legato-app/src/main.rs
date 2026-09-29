@@ -70,6 +70,8 @@ pub enum Message {
     Tray(tray::Event),
     Quit,
     Page(Page),
+    /// Expand or collapse the navigation rail.
+    ToggleRail,
     ToggleSharing(bool),
     Sharing(Result<(), String>),
     Status(Status),
@@ -182,6 +184,7 @@ impl App {
         let net = engine.net();
         let model = Model {
             page: Page::Devices,
+            rail_expanded: false,
             this: Device {
                 id: net.id(),
                 name: net.config().name.clone(),
@@ -324,6 +327,7 @@ impl App {
                 .then(|()| iced::exit());
             }
             Message::Page(page) => self.model.page = page,
+            Message::ToggleRail => self.model.rail_expanded = !self.model.rail_expanded,
             Message::ToggleSharing(on) => {
                 if on {
                     return self.start_sharing();
@@ -1057,7 +1061,13 @@ fn pairing_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
 }
 
 fn theme(app: &App, _window: window::Id) -> Theme {
-    Theme::from_accent(iced::Color::from_rgb8(0x3d, 0x5a, 0xfe), app.dark)
+    app_theme(app.dark)
+}
+
+/// Legato's colors, with Material 3 Expressive motion: springs, and buttons that change
+/// shape as they're pressed or selected.
+pub(crate) fn app_theme(dark: bool) -> Theme {
+    Theme::from_accent(iced::Color::from_rgb8(0x3d, 0x5a, 0xfe), dark).expressive()
 }
 
 fn main() -> iced::Result {
