@@ -14,7 +14,8 @@ use crate::INJECTED_TAG;
 /// Posts events on behalf of a remote keyboard and mouse.
 ///
 /// macOS doesn't derive modifier state from posted modifier key presses reliably, so the
-/// injector tracks held modifiers itself and stamps the flags onto every event.
+/// injector tracks held modifiers itself and stamps the flags onto every event, with the
+/// marks a Mac keyboard puts on a key's own events (see [`key_flags`]).
 pub struct Injector {
     source: CFRetained<CGEventSource>,
     cursor: Point,
@@ -130,6 +131,7 @@ impl Injector {
         let Some(event) = CGEvent::new_keyboard_event(Some(&self.source), keycode, down) else {
             return;
         };
+        let mut marks = CGEventFlags::empty();
         if hid == usage::CAPS_LOCK {
             if !down {
                 return;
@@ -145,14 +147,17 @@ impl Injector {
                 self.modifiers.retain(|m| *m != hid);
             }
             CGEvent::set_type(Some(&event), CGEventType::FlagsChanged);
-        } else if repeat {
-            CGEvent::set_integer_value_field(
-                Some(&event),
-                CGEventField::KeyboardEventAutorepeat,
-                1,
-            );
+        } else {
+            marks = key_flags(hid);
+            if repeat {
+                CGEvent::set_integer_value_field(
+                    Some(&event),
+                    CGEventField::KeyboardEventAutorepeat,
+                    1,
+                );
+            }
         }
-        self.post(&event);
+        self.post_with(&event, marks);
     }
 
     fn scroll(&mut self, scroll: Scroll) {
@@ -208,9 +213,27 @@ impl Injector {
     }
 
     fn post(&self, event: &CGEvent) {
-        CGEvent::set_flags(Some(event), self.flags());
+        self.post_with(event, CGEventFlags::empty());
+    }
+
+    fn post_with(&self, event: &CGEvent, marks: CGEventFlags) {
+        CGEvent::set_flags(Some(event), self.flags() | marks);
         CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event));
     }
+}
+
+/// The marks a Mac keyboard puts on this key's own events: function key (arrows, F keys,
+/// Home, End…) and keypad (arrows, keypad keys). macOS's Control-arrow shortcuts for
+/// spaces and Mission Control only match with the function-key mark.
+fn key_flags(hid: u16) -> CGEventFlags {
+    let mut flags = CGEventFlags::empty();
+    if keymap::is_mac_function_key(hid) {
+        flags |= CGEventFlags::MaskSecondaryFn;
+    }
+    if keymap::is_mac_keypad_key(hid) {
+        flags |= CGEventFlags::MaskNumericPad;
+    }
+    flags
 }
 
 fn button_index(button: Button) -> usize {
