@@ -2305,9 +2305,9 @@ dependencies = [
 
 [[package]]
 name = "iced-m3"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecc37d96c837beae3e6e50886d4ae636a01e0ef2621310283ebe8f7bf777f744"
+checksum = "a98295a5439c7c620bcbfcf6fb73b9599fb8b6b71205834e9fe64cea52c194e7"
 dependencies = [
  "iced",
  "material-colors",

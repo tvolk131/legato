@@ -448,19 +448,12 @@ fn control_mode(m: &Model) -> Element<'_, Message> {
             .find(|id| id.starts_with(c.as_str()))
             .unwrap_or_else(|| c.clone())
     });
-    // One choice of several: a connected group of toggle buttons. The chosen one is
-    // filled with the secondary color (Material's tonal toggle), not just rounder.
+    // One choice of several: a connected group of toggle buttons.
     button_group(choices.into_iter().map(|(value, label)| {
-        let chosen = value == selected;
-        let choice = button(label)
+        button(label)
             .variant(ButtonVariant::Tonal)
-            .selected(chosen)
-            .on_press(Message::ControlMode(value));
-        if chosen {
-            choice.palette(|t| (t.colors.secondary, t.colors.on_secondary))
-        } else {
-            choice
-        }
+            .selected(value == selected)
+            .on_press(Message::ControlMode(value))
     }))
     .connected(true)
     .into()
