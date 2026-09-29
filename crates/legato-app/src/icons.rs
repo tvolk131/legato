@@ -6,6 +6,8 @@ const DEVICES: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24
 const ARRANGEMENT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M2 5h9v6H2zm2 2v2h5V7zm9-2h9v6h-9zm2 2v2h5V7zM7 14h10v6H7zm2 2v2h6v-2z"/></svg>"#;
 const SETTINGS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 5h10v2H3zm14 0h4v2h-4zm-4-2h2v6h-2zM3 11h4v2H3zm8 0h10v2H11zM7 9h2v6H7zm-4 8h12v2H3zm16 0h2v2h-2zm-2-2h2v6h-2z"/></svg>"#;
 
+const MENU: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>"#;
+
 pub fn devices() -> Handle {
     Handle::from_memory(DEVICES.as_bytes())
 }
@@ -16,6 +18,11 @@ pub fn arrangement() -> Handle {
 
 pub fn settings() -> Handle {
     Handle::from_memory(SETTINGS.as_bytes())
+}
+
+/// Expands and collapses the navigation rail.
+pub fn menu() -> Handle {
+    Handle::from_memory(MENU.as_bytes())
 }
 
 /// A 32 × 32 RGBA tray icon: two screens, one handing over to the other. Drawn in black

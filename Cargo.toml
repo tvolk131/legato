@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["spikes"]
 
 [workspace.package]
-version = "0.3.0-alpha.19"
+version = "0.3.0-alpha.20"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
@@ -13,7 +13,7 @@ publish = false
 
 [workspace.dependencies]
 iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "canvas", "svg", "thread-pool"] }
-iced-m3 = "=0.1.0-beta.2"
+iced-m3 = "=0.1.0-beta.3"
 iced_test = "=0.14.0"
 legato-proto = { path = "crates/legato-proto" }
 legato-core = { path = "crates/legato-core" }

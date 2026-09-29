@@ -4,8 +4,9 @@ use iced::widget::{Space, canvas, column, container, row, scrollable};
 use iced::{Alignment, Length};
 use iced_m3::dialog::{dialog, modal};
 use iced_m3::{
-    ButtonVariant, Element, NavigationItem, TypeScale, app_bar, button, card, icon, list,
-    list_item, loading_indicator, navigation_rail, slider, snackbar, switch, typography,
+    ButtonVariant, Element, MenuItem, NavigationItem, TypeScale, app_bar, button, button_group,
+    card, icon, icon_button, list, list_item, loading_indicator, navigation_rail, slider, snackbar,
+    split_button, switch, typography,
 };
 use legato_core::Layout;
 use legato_engine::arrange::{self, ConnectedPeer};
@@ -27,6 +28,8 @@ pub fn root(m: &Model) -> Element<'_, Message> {
         ],
         Some(m.page),
     )
+    .header(icon_button(icon(icons::menu())).on_press(Message::ToggleRail))
+    .expanded(m.rail_expanded)
     .on_select(Message::Page);
 
     let sharing = switch(m.sharing)
@@ -204,27 +207,21 @@ fn devices(m: &Model) -> Element<'_, Message> {
             } else {
                 send
             };
+            // The main action, with where and how to show it in its menu.
             let display: Option<Element<'_, Message>> = m.can_view(p).then(|| {
-                let main: Element<'_, Message> = if m.viewing == Some(p.device.id) {
-                    button("Stop display")
-                        .variant(ButtonVariant::Tonal)
-                        .on_press(Message::StopDisplay)
-                        .into()
+                let (label, action) = if m.viewing == Some(p.device.id) {
+                    ("Stop display", Message::StopDisplay)
                 } else {
-                    button("Show as display")
-                        .variant(ButtonVariant::Tonal)
-                        .on_press(Message::ShowDisplay(p.device.id))
-                        .into()
+                    ("Show as display", Message::ShowDisplay(p.device.id))
                 };
-                row![
-                    main,
-                    button("Options…")
-                        .variant(ButtonVariant::Text)
-                        .on_press(Message::DisplayOptions(p.device.id)),
-                ]
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .into()
+                split_button(
+                    label,
+                    action,
+                    [MenuItem::new(
+                        "Display options…",
+                        Message::DisplayOptions(p.device.id),
+                    )],
+                )
             });
             list_item(p.device.name.clone())
                 .supporting_text(format!("{} · {status}", os_name(p.device.os)))
@@ -433,14 +430,13 @@ fn settings(m: &Model) -> Element<'_, Message> {
 }
 
 fn control_mode(m: &Model) -> Element<'_, Message> {
-    use iced_m3::{Segment, SegmentSelection, segmented_buttons};
     let this = m.this.id.to_string();
-    let mut segments = vec![
-        Segment::new(None, "Any device"),
-        Segment::new(Some(this.clone()), "Only this device"),
+    let mut choices = vec![
+        (None, "Any device".to_string()),
+        (Some(this.clone()), "Only this device".to_string()),
     ];
     for p in &m.paired {
-        segments.push(Segment::new(
+        choices.push((
             Some(p.device.id.to_string()),
             format!("Only {}", p.device.name),
         ));
@@ -452,12 +448,22 @@ fn control_mode(m: &Model) -> Element<'_, Message> {
             .find(|id| id.starts_with(c.as_str()))
             .unwrap_or_else(|| c.clone())
     });
-    segmented_buttons(segments, SegmentSelection::Single(Some(selected)))
-        .on_change(|selection| match selection {
-            SegmentSelection::Single(Some(value)) => Message::ControlMode(value),
-            _ => Message::ControlMode(None),
-        })
-        .into()
+    // One choice of several: a connected group of toggle buttons. The chosen one is
+    // filled with the secondary color (Material's tonal toggle), not just rounder.
+    button_group(choices.into_iter().map(|(value, label)| {
+        let chosen = value == selected;
+        let choice = button(label)
+            .variant(ButtonVariant::Tonal)
+            .selected(chosen)
+            .on_press(Message::ControlMode(value));
+        if chosen {
+            choice.palette(|t| (t.colors.secondary, t.colors.on_secondary))
+        } else {
+            choice
+        }
+    }))
+    .connected(true)
+    .into()
 }
 
 /// Fixed sizes offered for the Mac's display.

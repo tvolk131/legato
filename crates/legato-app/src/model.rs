@@ -51,6 +51,8 @@ pub struct Pairing {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
     pub page: Page,
+    /// The navigation rail shows its destinations' labels beside their icons.
+    pub rail_expanded: bool,
     pub this: Device,
     pub version: String,
     pub state_dir: String,

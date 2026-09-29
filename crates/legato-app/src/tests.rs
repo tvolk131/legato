@@ -67,6 +67,7 @@ fn model(page: Page) -> Model {
     );
     Model {
         page,
+        rail_expanded: false,
         this: Device {
             id: id(3),
             name: "STUDIO-PC".into(),
@@ -133,7 +134,7 @@ fn write_png(path: &Path, (width, height, rgba): (u32, u32, &[u8])) {
 
 /// Compares the screen with its golden image (see the module docs).
 fn snapshot(ui: &mut iced_test::Simulator<'_, Message, Theme>, name: &str) {
-    let theme = Theme::from_accent(iced::Color::from_rgb8(0x3d, 0x5a, 0xfe), false);
+    let theme = crate::app_theme(false);
     // iced_test only hands the pixels over as a PNG it writes itself (named after the
     // renderer), so render into a scratch folder and read that back.
     let scratch = std::env::temp_dir().join(format!("legato-ui-{}-{name}", std::process::id()));
@@ -227,6 +228,19 @@ fn devices_page_lists_paired_and_nearby_devices() {
             .iter()
             .any(|m| matches!(m, Message::Pair(id) if *id == jane)),
         "{messages:?}"
+    );
+}
+
+#[test]
+fn the_navigation_rail_expands_to_show_labels_beside_icons() {
+    let mut m = model(Page::Devices);
+    m.rail_expanded = true;
+    let mut ui = simulator(crate::view::root(&m));
+    snapshot(&mut ui, "rail-expanded");
+    ui.click("Settings").unwrap();
+    assert!(
+        ui.into_messages()
+            .any(|m| matches!(m, Message::Page(Page::Settings)))
     );
 }
 
@@ -624,7 +638,7 @@ fn display_options_fit_the_default_window() {
         (920.0, 640.0),
         crate::view::root(&m),
     );
-    let theme = Theme::from_accent(iced::Color::from_rgb8(0x3d, 0x5a, 0xfe), false);
+    let theme = crate::app_theme(false);
     ui.snapshot(&theme).unwrap();
     assert!(ui.find("Show").is_ok());
 }
@@ -636,7 +650,7 @@ fn display_options_fit_the_default_window() {
 #[ignore = "needs a GPU backend: ICED_TEST_BACKEND=wgpu"]
 fn gpu_renders_the_dialogs_and_the_viewer() {
     use legato_engine::config::Placement;
-    let theme = Theme::from_accent(iced::Color::from_rgb8(0x3d, 0x5a, 0xfe), false);
+    let theme = crate::app_theme(false);
     let render = |element: crate::Element<'_, Message>, size: (f32, f32), name: &str| {
         let mut ui = iced_test::Simulator::with_size(iced::Settings::default(), size, element);
         let dir = std::env::temp_dir().join(format!("legato-gpu-{}", std::process::id()));
