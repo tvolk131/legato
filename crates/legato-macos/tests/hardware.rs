@@ -290,3 +290,195 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
         "a warp's delta spike crossed straight back over"
     );
 }
+
+/// Records this process's own posted key-downs (keycode and flags) as a listen-only tap at
+/// the session level sees them, after the window server has had them.
+mod key_tap {
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+    use std::sync::{Arc, Mutex, mpsc};
+
+    use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonModes};
+    use objc2_core_graphics::{
+        CGEvent, CGEventField, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+        CGEventTapProxy, CGEventType,
+    };
+
+    pub type Seen = Arc<Mutex<Vec<(i64, u64)>>>;
+
+    pub struct KeyTap {
+        pub seen: Seen,
+        run_loop: SendRunLoop,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    struct SendRunLoop(CFRetained<CFRunLoop>);
+    // SAFETY: CFRunLoopStop may be called from any thread.
+    unsafe impl Send for SendRunLoop {}
+
+    impl KeyTap {
+        pub fn start() -> Self {
+            let seen = Seen::default();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let thread = {
+                let seen = seen.clone();
+                std::thread::spawn(move || run(seen, ready_tx))
+            };
+            let run_loop = ready_rx.recv().unwrap().expect("couldn't create the tap");
+            Self {
+                seen,
+                run_loop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for KeyTap {
+        fn drop(&mut self) {
+            self.run_loop.0.stop();
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn run(seen: Seen, ready: mpsc::Sender<Option<SendRunLoop>>) {
+        let state = Box::into_raw(Box::new(seen));
+        // SAFETY: the callback matches the required signature, and `state` outlives the
+        // run loop, which is the only caller of the callback.
+        let port = unsafe {
+            CGEvent::tap_create(
+                CGEventTapLocation::SessionEventTap,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::ListenOnly,
+                1 << CGEventType::KeyDown.0,
+                Some(callback),
+                state.cast(),
+            )
+        };
+        let Some(port) = port else {
+            // SAFETY: no tap, so nothing else references `state`.
+            drop(unsafe { Box::from_raw(state) });
+            let _ = ready.send(None);
+            return;
+        };
+        let source = CFMachPort::new_run_loop_source(None, Some(&port), 0).unwrap();
+        let run_loop = CFRunLoop::current().unwrap();
+        // SAFETY: the mode constant is a valid static CFString.
+        run_loop.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
+        CGEvent::tap_enable(&port, true);
+        let _ = ready.send(Some(SendRunLoop(run_loop)));
+        CFRunLoop::run();
+        CGEvent::tap_enable(&port, false);
+        // SAFETY: the run loop has exited, so the callback can't run any more.
+        drop(unsafe { Box::from_raw(state) });
+    }
+
+    unsafe extern "C-unwind" fn callback(
+        _proxy: CGEventTapProxy,
+        ty: CGEventType,
+        event: NonNull<CGEvent>,
+        user_info: *mut c_void,
+    ) -> *mut CGEvent {
+        // SAFETY: `user_info` is the tap thread's `Seen`, and this runs on that thread.
+        let seen = unsafe { &*user_info.cast::<Seen>() };
+        // SAFETY: Quartz passes a valid event for the duration of the callback.
+        let ev = unsafe { event.as_ref() };
+        let tag = CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData);
+        if ty == CGEventType::KeyDown && tag == legato_macos::INJECTED_TAG {
+            let code = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventKeycode);
+            seen.lock()
+                .unwrap()
+                .push((code, CGEvent::flags(Some(ev)).0));
+        }
+        event.as_ptr()
+    }
+}
+
+/// A Mac keyboard marks arrows (and F keys, Home, End…) as function keys, and arrows and
+/// the keypad as keypad keys. macOS's Control-← and Control-→ (moving between spaces) are
+/// defined with the function-key mark, so typed from a PC without it they didn't switch
+/// spaces (0.3.0-alpha.18 and earlier).
+#[test]
+#[ignore = "types keys, and may switch spaces"]
+fn typed_keys_carry_the_marks_a_mac_keyboard_puts_on_them() {
+    use legato_core::keymap::usage;
+    use objc2_core_graphics::{CGEventFlags, CGEventSourceStateID};
+
+    require_permissions();
+    let tap = key_tap::KeyTap::start();
+    let mut injector = Injector::new().unwrap();
+    let key = |injector: &mut Injector, usage: u16, down: bool| {
+        injector.apply(&Inject::Key {
+            usage,
+            down,
+            repeat: false,
+        });
+        std::thread::sleep(Duration::from_millis(30));
+    };
+    let press = |injector: &mut Injector, usage: u16| {
+        key(injector, usage, true);
+        key(injector, usage, false);
+    };
+    const LEFT: u16 = 0x50;
+    const RIGHT: u16 = 0x4f;
+    const A: u16 = 0x04;
+    const KEYPAD_1: u16 = 0x59;
+    const F13: u16 = 0x68;
+    for u in [LEFT, A, KEYPAD_1, F13] {
+        press(&mut injector, u);
+    }
+    // Control-←, then Control-→ to come back: macOS's shortcuts for the spaces either side.
+    key(&mut injector, usage::LEFT_CTRL, true);
+    press(&mut injector, LEFT);
+    std::thread::sleep(Duration::from_millis(500));
+    press(&mut injector, RIGHT);
+    key(&mut injector, usage::LEFT_CTRL, false);
+    // For comparison, Control-← the way earlier versions typed it: Control alone.
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).unwrap();
+    CGEventSource::set_user_data(Some(&source), legato_macos::INJECTED_TAG);
+    for down in [true, false] {
+        let e = CGEvent::new_keyboard_event(Some(&source), 0x7b, down).unwrap();
+        CGEvent::set_flags(Some(&e), CGEventFlags::MaskControl);
+        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let seen = tap.seen.lock().unwrap().clone();
+    drop(tap);
+    for (code, flags) in &seen {
+        eprintln!("key {code:#04x}, flags {flags:#08x}");
+    }
+
+    let (func, pad, ctrl) = (
+        CGEventFlags::MaskSecondaryFn.0,
+        CGEventFlags::MaskNumericPad.0,
+        CGEventFlags::MaskControl.0,
+    );
+    let marks = |code: i64, with_ctrl: bool| {
+        seen.iter()
+            .find(|&&(c, f)| c == code && (f & ctrl != 0) == with_ctrl)
+            .map(|&(_, f)| f & (func | pad))
+    };
+    assert_eq!(marks(0x7b, false), Some(func | pad), "←");
+    assert_eq!(marks(0x00, false), Some(0), "A");
+    assert_eq!(marks(0x53, false), Some(pad), "keypad 1");
+    assert_eq!(marks(0x69, false), Some(func), "F13");
+    // Control-← with the function-key mark is macOS's shortcut, which may take it before
+    // the session sees it. Only the comparison may lack the mark.
+    let control_left: Vec<u64> = seen
+        .iter()
+        .filter(|&&(c, f)| c == 0x7b && f & ctrl != 0)
+        .map(|&(_, f)| f)
+        .collect();
+    let unmarked = control_left.iter().filter(|&&f| f & func == 0).count();
+    eprintln!(
+        "Control-←: {} reached the session marked as a function key, {unmarked} unmarked (the \
+         comparison)",
+        control_left.len() - unmarked
+    );
+    assert!(
+        unmarked <= 1,
+        "Control-← was typed without the function-key mark"
+    );
+}

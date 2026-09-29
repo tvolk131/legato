@@ -84,6 +84,20 @@ pub fn is_modifier(usage: u16) -> bool {
     (usage::LEFT_CTRL..=usage::RIGHT_GUI).contains(&usage)
 }
 
+/// Keys a Mac keyboard marks as function keys on their events: the F keys, and the
+/// navigation keys (Help, Forward Delete, Home, End, Page Up, Page Down and the arrows).
+/// Some macOS shortcuts include the mark, like Control-← and Control-→ for moving between
+/// spaces, so a key typed without it doesn't match them.
+pub fn is_mac_function_key(usage: u16) -> bool {
+    matches!(usage, 0x3a..=0x45 | 0x49..=0x52 | 0x68..=0x73)
+}
+
+/// Keys a Mac keyboard marks as on the numeric keypad: the keypad's own keys, and the
+/// arrows.
+pub fn is_mac_keypad_key(usage: u16) -> bool {
+    matches!(usage, 0x4f..=0x63 | 0x67)
+}
+
 /// Keys that the receiving side should auto-repeat while held.
 pub fn repeats(usage: u16) -> bool {
     !is_modifier(usage) && usage != usage::CAPS_LOCK
@@ -158,6 +172,24 @@ mod tests {
 
     const A: u16 = 0x04;
     const RETURN: u16 = 0x28;
+
+    #[test]
+    fn a_mac_keyboard_marks_arrows_as_function_and_keypad_keys() {
+        const LEFT: u16 = 0x50;
+        const F5: u16 = 0x3e;
+        const HOME: u16 = 0x4a;
+        const KEYPAD_1: u16 = 0x59;
+        assert!(is_mac_function_key(LEFT) && is_mac_keypad_key(LEFT));
+        assert!(is_mac_function_key(F5) && !is_mac_keypad_key(F5));
+        assert!(is_mac_function_key(HOME) && !is_mac_keypad_key(HOME));
+        assert!(!is_mac_function_key(KEYPAD_1) && is_mac_keypad_key(KEYPAD_1));
+        for plain in [A, RETURN, usage::LEFT_CTRL, usage::CAPS_LOCK, 0x2c] {
+            assert!(
+                !is_mac_function_key(plain) && !is_mac_keypad_key(plain),
+                "{plain:#x}"
+            );
+        }
+    }
 
     #[test]
     fn common_keys_map_between_windows_and_mac() {

@@ -125,7 +125,7 @@ Suggested workspace:
 
 | OS | API | Gotchas |
 |---|---|---|
-| macOS | `CGEventPost(kCGHIDEventTap, …)` | Needs Accessibility permission. While a button is held, send the `*MouseDragged` event types instead of plain moves. Double-clicks need `kCGMouseEventClickState`, which you compute yourself. Set modifier flags on every event. |
+| macOS | `CGEventPost(kCGHIDEventTap, …)` | Needs Accessibility permission. While a button is held, send the `*MouseDragged` event types instead of plain moves. Double-clicks need `kCGMouseEventClickState`, which you compute yourself. Set modifier flags on every event, including the marks a Mac keyboard puts on a key's own events: *function key* (`kCGEventFlagMaskSecondaryFn`) on arrows, F keys, Home, End, Page Up/Down, Forward Delete and Help, and *keypad* (`kCGEventFlagMaskNumericPad`) on arrows and keypad keys. macOS's Control-arrow shortcuts (spaces, Mission Control) are defined as Control + function key (`0x840000`, per `CGSGetSymbolicHotKeyValue`), so without the mark they don't match. |
 | Windows | `SendInput` | `MOUSEEVENTF_MOVE` (relative) goes through the user's pointer-acceleration settings, up to about 4×. Use `ABSOLUTE \| VIRTUALDESK` (coordinates normalised to 0–65535) or `SetCursorPos`. Injection silently fails into elevated windows (UIPI) unless you run elevated or with `uiAccess`. A PC with no physical mouse may hide the cursor entirely (a known lan-mouse issue). |
 | X11 | XTest `FakeMotion` / `FakeButton` | Scrolling is buttons 4–7, which may mean no smooth scrolling. |
 | Wayland (GNOME/KDE) | RemoteDesktop portal → libei sender (`ashpd` + `reis`) | Shows a user consent dialog; persist the restore token so it isn't asked every time. |
