@@ -2,6 +2,8 @@
 
 Researched 2026-09-24. Versions are the latest on crates.io on that date. The code in `spikes/` was compiled and run on macOS arm64 only. Nothing has been built or run on Windows or Linux yet.
 
+The spikes were removed on 2026-09-30, once the real crates covered what they tested. The paths below are in git history, up to commit `53bc624`.
+
 ---
 
 ## Decisions so far (2026-09-24)
