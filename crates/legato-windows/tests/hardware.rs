@@ -18,6 +18,59 @@ use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
 
 const PEER: MachineId = MachineId(1);
 
+/// A peer with one display of `width` × `height` points, placed to the right of this PC's
+/// rightmost display, which is returned too.
+fn peer_to_the_right(local: &Screens, width: f64, height: f64) -> (Layout, Rect) {
+    let rightmost = (0..local.displays.len())
+        .max_by(|&a, &b| {
+            local.displays[a]
+                .bounds
+                .right()
+                .total_cmp(&local.displays[b].bounds.right())
+        })
+        .unwrap();
+    let mut layout = Layout::new(local.clone());
+    let peer = Screens {
+        displays: vec![Display {
+            id: 1,
+            bounds: Rect::new(0.0, 0.0, width, height),
+            pixel_scale: 2.0,
+            ui_scale: 1.0,
+            primary: true,
+            name: "peer".into(),
+        }],
+        native_per_desk: 1.0,
+    };
+    assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
+    (layout, local.displays[rightmost].bounds)
+}
+
+/// Crossing without having to push past the edge.
+fn no_push() -> ControllerConfig {
+    ControllerConfig {
+        push_distance: 0.0,
+        ..Default::default()
+    }
+}
+
+/// Captures this PC's input, taking the test's injected input as the user's own. The
+/// controller's actions arrive on the receiver.
+fn start_capture(config: ControllerConfig, layout: Layout) -> (Capture, mpsc::Receiver<Action>) {
+    let (tx, rx) = mpsc::channel();
+    let capture = Capture::start(
+        Controller::new(config, layout),
+        CaptureOptions {
+            accept_injected: true,
+        },
+        move |action| {
+            let _ = tx.send(action);
+        },
+        |_| {},
+    )
+    .unwrap();
+    (capture, rx)
+}
+
 fn cursor() -> POINT {
     let mut p = POINT::default();
     unsafe { GetCursorPos(&mut p).unwrap() };
@@ -80,47 +133,8 @@ fn reports_displays() {
 #[ignore = "moves the cursor"]
 fn crossing_an_edge_captures_forwards_input_and_a_yield_parks() {
     let local = screens();
-    let rightmost = (0..local.displays.len())
-        .max_by(|&a, &b| {
-            local.displays[a]
-                .bounds
-                .right()
-                .total_cmp(&local.displays[b].bounds.right())
-        })
-        .unwrap();
-    let edge = local.displays[rightmost].bounds;
-    let mut layout = Layout::new(local.clone());
-    let peer = Screens {
-        displays: vec![Display {
-            id: 1,
-            bounds: Rect::new(0.0, 0.0, 1000.0, 800.0),
-            pixel_scale: 2.0,
-            ui_scale: 1.0,
-            primary: true,
-            name: "peer".into(),
-        }],
-        native_per_desk: 1.0,
-    };
-    assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
-    let controller = Controller::new(
-        ControllerConfig {
-            push_distance: 0.0,
-            ..Default::default()
-        },
-        layout,
-    );
-    let (tx, rx) = mpsc::channel();
-    let capture = Capture::start(
-        controller,
-        CaptureOptions {
-            accept_injected: true,
-        },
-        move |action| {
-            let _ = tx.send(action);
-        },
-        |_| {},
-    )
-    .unwrap();
+    let (layout, edge) = peer_to_the_right(&local, 1000.0, 800.0);
+    let (capture, rx) = start_capture(no_push(), layout);
 
     let start = POINT {
         x: edge.right() as i32 - 3,
@@ -563,39 +577,8 @@ fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
 
     let local = screens();
     let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
-    let rightmost = (0..local.displays.len())
-        .max_by(|&a, &b| {
-            local.displays[a]
-                .bounds
-                .right()
-                .total_cmp(&local.displays[b].bounds.right())
-        })
-        .unwrap();
-    let mut layout = Layout::new(local.clone());
-    let peer = Screens {
-        displays: vec![Display {
-            id: 1,
-            bounds: Rect::new(0.0, 0.0, 1512.0, 982.0),
-            pixel_scale: 2.0,
-            ui_scale: 1.0,
-            primary: true,
-            name: "peer".into(),
-        }],
-        native_per_desk: 1.0,
-    };
-    assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
-    let (tx, rx) = mpsc::channel();
-    let capture = Capture::start(
-        Controller::new(ControllerConfig::default(), layout),
-        CaptureOptions {
-            accept_injected: true,
-        },
-        move |action| {
-            let _ = tx.send(action);
-        },
-        |_| {},
-    )
-    .unwrap();
+    let (layout, _) = peer_to_the_right(&local, 1512.0, 982.0);
+    let (capture, rx) = start_capture(ControllerConfig::default(), layout);
 
     let (w, h) = (640, 360);
     let (x, y) = (
@@ -900,30 +883,7 @@ fn keys_go_through_the_portal_to_a_focused_winit_viewer() {
 
     let local = screens();
     let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
-    let rightmost = (0..local.displays.len())
-        .max_by(|&a, &b| {
-            local.displays[a]
-                .bounds
-                .right()
-                .total_cmp(&local.displays[b].bounds.right())
-        })
-        .unwrap();
-    let layout = || {
-        let mut layout = Layout::new(local.clone());
-        let peer = Screens {
-            displays: vec![Display {
-                id: 1,
-                bounds: Rect::new(0.0, 0.0, 1512.0, 982.0),
-                pixel_scale: 2.0,
-                ui_scale: 1.0,
-                primary: true,
-                name: "peer".into(),
-            }],
-            native_per_desk: 1.0,
-        };
-        assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
-        layout
-    };
+    let layout = || peer_to_the_right(&local, 1512.0, 982.0).0;
     let (w, h) = (640, 360);
     let (x, y) = (
         primary.center().x as i32 - w / 2,
@@ -935,18 +895,7 @@ fn keys_go_through_the_portal_to_a_focused_winit_viewer() {
     // window is `hwnd`, or opened by `open` once sharing has started.
     type Open = dyn Fn() -> viewer::Viewer;
     let try_typing = |what: &str, hwnd: Option<windows::Win32::Foundation::HWND>, open: &Open| {
-        let (tx, rx) = mpsc::channel();
-        let capture = Capture::start(
-            Controller::new(ControllerConfig::default(), layout()),
-            CaptureOptions {
-                accept_injected: true,
-            },
-            move |action| {
-                let _ = tx.send(action);
-            },
-            |_| {},
-        )
-        .unwrap();
+        let (capture, rx) = start_capture(ControllerConfig::default(), layout());
         let late = hwnd.is_none().then(open);
         let hwnd = hwnd.or(late.as_ref().map(|v| v.hwnd)).unwrap();
         capture.send(Command::SetPortal(Some(Portal {
@@ -1157,43 +1106,8 @@ fn the_cursor_shows_when_the_peer_takes_over() {
 
     let local = screens();
     let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
-    let rightmost = (0..local.displays.len())
-        .max_by(|&a, &b| {
-            local.displays[a]
-                .bounds
-                .right()
-                .total_cmp(&local.displays[b].bounds.right())
-        })
-        .unwrap();
-    let edge = local.displays[rightmost].bounds;
-    let mut layout = Layout::new(local.clone());
-    let peer = Screens {
-        displays: vec![Display {
-            id: 1,
-            bounds: Rect::new(0.0, 0.0, 1000.0, 800.0),
-            pixel_scale: 2.0,
-            ui_scale: 1.0,
-            primary: true,
-            name: "peer".into(),
-        }],
-        native_per_desk: 1.0,
-    };
-    assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
-    let capture = Capture::start(
-        Controller::new(
-            ControllerConfig {
-                push_distance: 0.0,
-                ..Default::default()
-            },
-            layout,
-        ),
-        CaptureOptions {
-            accept_injected: true,
-        },
-        |_| {},
-        |_| {},
-    )
-    .unwrap();
+    let (layout, edge) = peer_to_the_right(&local, 1000.0, 800.0);
+    let (capture, _actions) = start_capture(no_push(), layout);
     let mut injector = legato_windows::Injector::new();
     // Where the peer puts the pointer when it takes over (the receiver's `MoveTo`).
     let target =
@@ -1298,46 +1212,8 @@ fn the_pcs_cursor_follows_the_macs_own_pointer_on_its_display() {
 
     let local = screens();
     let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
-    let rightmost = (0..local.displays.len())
-        .max_by(|&a, &b| {
-            local.displays[a]
-                .bounds
-                .right()
-                .total_cmp(&local.displays[b].bounds.right())
-        })
-        .unwrap();
-    let edge = local.displays[rightmost].bounds;
-    let mut layout = Layout::new(local.clone());
-    let peer = Screens {
-        displays: vec![Display {
-            id: 1,
-            bounds: Rect::new(0.0, 0.0, 1512.0, 982.0),
-            pixel_scale: 2.0,
-            ui_scale: 1.0,
-            primary: true,
-            name: "peer".into(),
-        }],
-        native_per_desk: 1.0,
-    };
-    assert!(layout.place_next_to_local(PEER, peer, rightmost, Side::Right, Align::Center, 0.0));
-    let (tx, rx) = mpsc::channel();
-    let capture = Capture::start(
-        Controller::new(
-            ControllerConfig {
-                push_distance: 0.0,
-                ..Default::default()
-            },
-            layout,
-        ),
-        CaptureOptions {
-            accept_injected: true,
-        },
-        move |action| {
-            let _ = tx.send(action);
-        },
-        |_| {},
-    )
-    .unwrap();
+    let (layout, edge) = peer_to_the_right(&local, 1512.0, 982.0);
+    let (capture, rx) = start_capture(no_push(), layout);
     let (w, h) = (640, 360);
     let (x, y) = (
         primary.center().x as i32 - w / 2,
