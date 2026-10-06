@@ -228,6 +228,8 @@ pub struct ExtendRequest {
     /// (dragging, scrolling), on its own video track. `0` for none.
     pub moving_width: u32,
     pub moving_height: u32,
+    /// The display's refresh rate. The Mac sends up to that many frames a second, as
+    /// many as it can encode at the size it sends.
     pub fps: u32,
     /// Bits per second.
     pub bitrate: u32,

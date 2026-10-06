@@ -505,6 +505,16 @@ const FIXED_SIZES: [(u32, u32, &str); 3] = [
     (1920, 1080, "1080p"),
 ];
 
+fn quality_name(quality: legato_engine::config::Quality) -> &'static str {
+    use legato_engine::config::Quality;
+    match quality {
+        Quality::Adaptive => "Adaptive",
+        Quality::Sharpest => "Sharpest",
+        Quality::Balanced => "Balanced",
+        Quality::Fastest => "Fastest",
+    }
+}
+
 /// One choice of a few, as a connected group of toggle buttons: (chosen, label, what
 /// choosing it sends). Choices that send nothing are disabled.
 fn choices<'a>(
@@ -596,7 +606,7 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
     // Which display (and its size) is in the size note, under the next choice.
     let where_note = (!full).then(|| "A window you can move and resize.".to_string());
 
-    // Size: what "match" means depends on where it's shown.
+    // The Mac's display: its size ("match" depends on where it's shown) and refresh rate.
     let shown = if full { display_size } else { None };
     let size = match o.resolution {
         Resolution::Match => shown,
@@ -619,99 +629,120 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
             )
         })),
     );
-    let size_note = match (o.resolution, shown) {
-        (Resolution::Match, Some((w, h))) if displays.len() > 1 => {
-            format!("The same size as display {display} (counted from the left): {w}×{h}.")
+    let refresh_choice = choices(legato_core::extend::FRAME_RATES.map(|rate| {
+        (
+            rate == o.fps,
+            format!("{rate} Hz"),
+            Some(change(&move |o| o.fps = rate)),
+        )
+    }));
+    let hz = o.fps;
+    let display_note = match (o.resolution, shown) {
+        (Resolution::Match, Some((w, h))) if displays.len() > 1 => format!(
+            "A {w}×{h} display at {hz} Hz: the size of display {display}, counted from the left."
+        ),
+        (Resolution::Match, Some((w, h))) => {
+            format!("A {w}×{h} display at {hz} Hz: the size of the screen.")
         }
-        (Resolution::Match, Some((w, h))) => format!("The same size as the screen: {w}×{h}."),
         (Resolution::Match, None) => {
-            "The window's size, updated when you finish resizing it.".to_string()
+            format!("The window's size, updated when you finish resizing it, at {hz} Hz.")
         }
-        (Resolution::Fixed, _) => format!("Always {}×{}.", o.fixed.0, o.fixed.1),
+        (Resolution::Fixed, _) => format!("A {}×{} display at {hz} Hz.", o.fixed.0, o.fixed.1),
     };
 
+    // The stream: how it gets here, and so what you see.
     let quality_choice = choices(
         [
-            (Quality::Adaptive, "Adaptive"),
-            (Quality::Sharpest, "Sharpest"),
-            (Quality::Balanced, "Balanced"),
-            (Quality::Fastest, "Fastest"),
+            Quality::Adaptive,
+            Quality::Sharpest,
+            Quality::Balanced,
+            Quality::Fastest,
         ]
-        .map(|(q, label)| {
+        .map(|q| {
             (
                 o.quality == q,
-                label.to_string(),
+                quality_name(q).to_string(),
                 Some(change(&move |o| o.quality = q)),
             )
         }),
     );
-    let quality_note = match o.quality {
-        Quality::Adaptive => "Full resolution, and smaller while things move.",
-        Quality::Sharpest => "Full resolution, always.",
-        Quality::Balanced => "Up to 2560×1440: about twice as quick at 4K.",
-        Quality::Fastest => "Up to 1920×1080: the quickest.",
-    }
-    .to_string();
-    let moving_choice = choices(
-        [
-            (MovingSize::Hd, "Up to 1080p"),
-            (MovingSize::Qhd, "Up to 1440p"),
-        ]
-        .map(|(size, label)| {
-            (
-                o.while_moving == size,
-                label.to_string(),
-                Some(change(&move |o| o.while_moving = size)),
-            )
-        }),
-    );
-
-    // What the Mac would be asked for at the fastest rate: encoding sets the pace.
-    let fastest = *legato_core::extend::FRAME_RATES.last().unwrap_or(&60);
-    let request = size.map(|(w, h)| {
-        let mut extend = m.config.extend.clone();
-        o.save_to(&mut extend);
-        extend.fps = fastest;
-        extend.request_for(w, h)
-    });
-    let max = match (request, o.quality) {
-        (Some(r), _) => Some(r.fps),
-        // In a window of any size, moving pictures are at most this big.
-        (None, Quality::Adaptive) => {
-            let (w, h) = o.while_moving.cap();
-            Some(legato_core::extend::max_fps(w, h))
-        }
-        (None, _) => None,
+    let moving_choice = row![
+        typography("While things move", TypeScale::LabelLarge),
+        choices(
+            [
+                (MovingSize::Hd, "1080p (quicker)"),
+                (MovingSize::Qhd, "1440p (sharper)"),
+            ]
+            .map(|(size, label)| {
+                (
+                    o.while_moving == size,
+                    label.to_string(),
+                    Some(change(&move |o| o.while_moving = size)),
+                )
+            }),
+        ),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+    // What the Mac would send for these choices.
+    let request_with = |quality: Quality| {
+        size.map(|(w, h)| {
+            let mut extend = m.config.extend.clone();
+            o.save_to(&mut extend);
+            extend.quality = quality;
+            extend.request_for(w, h)
+        })
     };
-    let fps = max.map_or(o.fps, |max| o.fps.min(max));
-    // Rates the Mac can't keep up with stay visible, but can't be chosen.
-    let rate_choice = choices(legato_core::extend::FRAME_RATES.map(|rate| {
-        (
-            rate == fps,
-            rate.to_string(),
-            max.is_none_or(|max| rate <= max)
-                .then(|| change(&move |o| o.fps = rate)),
-        )
-    }));
-    let rate_note = match request {
-        Some(r) if r.moving_width > 0 => format!(
-            "Up to {} fps: sent at {}×{} while things move, {}×{} when still.",
-            r.fps, r.moving_width, r.moving_height, r.stream_width, r.stream_height
-        ),
-        Some(r) => format!(
-            "Up to {} fps: sent at {}×{}. Smaller sizes can go faster.",
-            r.fps, r.stream_width, r.stream_height
-        ),
-        None if o.quality == Quality::Adaptive => {
-            let (w, h) = o.while_moving.cap();
-            format!(
-                "Up to {} fps: sent at up to {w}×{h} while things move.",
-                max.unwrap_or(fastest)
-            )
+    let stream_note = match request_with(o.quality) {
+        Some(r) => {
+            let sent = legato_core::extend::frames_sent(&r);
+            let mut note = if r.moving_width > 0 {
+                format!(
+                    "You'll see {}×{} when still and {}×{} while things move, at up to \
+                     {sent} fps.",
+                    r.stream_width, r.stream_height, r.moving_width, r.moving_height
+                )
+            } else {
+                format!(
+                    "You'll see {}×{} at up to {sent} fps.",
+                    r.stream_width, r.stream_height
+                )
+            };
+            if sent < hz {
+                // Which quality would keep up with the display, if any.
+                let quicker = [Quality::Balanced, Quality::Fastest]
+                    .into_iter()
+                    .filter(|&q| q != o.quality)
+                    .find(|&q| {
+                        request_with(q).is_some_and(|r| legato_core::extend::frames_sent(&r) >= hz)
+                    });
+                note.push_str(" The Mac can't encode it any faster");
+                note.push_str(&match quicker {
+                    Some(q) => format!("; {} keeps up with {hz} Hz.", quality_name(q)),
+                    None => ".".to_string(),
+                });
+            }
+            note
         }
-        None => {
-            "Limited by the window's size: 60 fps at 4K, 120 at 1440p, 144 at 1080p.".to_string()
-        }
+        // In a window, sizes follow the window.
+        None => match (o.quality, o.quality.cap()) {
+            (Quality::Adaptive, _) => {
+                let (w, h) = o.while_moving.cap();
+                format!(
+                    "You'll see the window's full size when still and up to {w}×{h} while \
+                     things move, at up to {} fps.",
+                    hz.min(legato_core::extend::max_fps(w, h))
+                )
+            }
+            (_, Some((w, h))) => format!(
+                "You'll see up to {w}×{h}, at up to {} fps.",
+                hz.min(legato_core::extend::max_fps(w, h))
+            ),
+            (_, None) => format!(
+                "You'll see the window's full size, at up to {hz} fps if the Mac can encode \
+                 it that fast: 60 at 4K, 120 at 1440p, 144 at 1080p."
+            ),
+        },
     };
 
     let content = column![
@@ -720,16 +751,18 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
             TypeScale::HeadlineSmall
         ),
         field("Where", where_, where_note),
-        field("Size", size_choice, Some(size_note)),
-        // Adaptive quality's size while things move, under it like the display under Where.
         field(
-            "Stream quality",
+            "The Mac's display",
+            column![size_choice, refresh_choice].spacing(6),
+            Some(display_note)
+        ),
+        field(
+            "Stream",
             column![quality_choice]
                 .push((o.quality == Quality::Adaptive).then_some(moving_choice))
                 .spacing(6),
-            Some(quality_note)
+            Some(stream_note)
         ),
-        field("Frame rate", rate_choice, Some(rate_note)),
     ]
     .spacing(12);
     dialog(scrollable(content).height(Length::Shrink))

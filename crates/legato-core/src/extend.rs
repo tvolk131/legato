@@ -25,6 +25,18 @@ pub fn max_fps(width: u32, height: u32) -> u32 {
         .unwrap_or(FRAME_RATES[0])
 }
 
+/// How many frames a second the Mac sends for `request`: the display's refresh rate, or
+/// fewer if it can't encode that many at the size it sends while things move (or at
+/// all, without a moving size).
+pub fn frames_sent(request: &legato_proto::ExtendRequest) -> u32 {
+    let pace = if request.moving_width > 0 {
+        (request.moving_width, request.moving_height)
+    } else {
+        (request.stream_width, request.stream_height)
+    };
+    request.fps.clamp(1, max_fps(pace.0, pace.1))
+}
+
 /// Whether a display of this size should run in Retina mode (looking like half its
 /// pixel size). Smaller ones would look tiny, so they run at 1×.
 pub fn prefers_hidpi(width: u32, height: u32) -> bool {

@@ -119,8 +119,9 @@ pub struct Extend {
     /// Run in Retina mode when it's at least 2560×1440, so it looks like half its pixel
     /// size (3840×2160 looks like 1920×1080, sharp on a 4K monitor).
     pub hidpi: bool,
-    /// Frames per second, as fast as the Mac can encode at the size (see
-    /// [`legato_core::extend::max_fps`]).
+    /// The display's refresh rate. The stream sends up to that many frames a second, as
+    /// many as the Mac can encode at the size it sends (see
+    /// [`legato_core::extend::frames_sent`]).
     pub fps: u32,
     /// Video quality, in megabits per second.
     pub bitrate_mbps: u32,
@@ -150,7 +151,7 @@ impl Extend {
     /// What to ask the Mac for to show a display of about `width`×`height` pixels: a
     /// size the pipeline takes, and no faster than the Mac can encode at that size.
     pub fn request_for(&self, width: u32, height: u32) -> legato_proto::ExtendRequest {
-        use legato_core::extend::{fit_within, max_fps, prefers_hidpi, usable_size};
+        use legato_core::extend::{fit_within, prefers_hidpi, usable_size};
         let (width, height) = usable_size(width, height);
         let stream = self.quality.stream_size((width, height));
         let moving = match self.quality {
@@ -159,8 +160,6 @@ impl Extend {
             }
             _ => None,
         };
-        // Encoding sets the pace, at the size sent while things move.
-        let pace = moving.unwrap_or(stream);
         let (moving_width, moving_height) = moving.unwrap_or((0, 0));
         legato_proto::ExtendRequest {
             width,
@@ -170,7 +169,10 @@ impl Extend {
             stream_height: stream.1,
             moving_width,
             moving_height,
-            fps: self.fps.clamp(1, max_fps(pace.0, pace.1)),
+            // The display runs at the chosen rate; the Mac sends what it can encode.
+            fps: self
+                .fps
+                .clamp(1, *legato_core::extend::FRAME_RATES.last().unwrap_or(&60)),
             bitrate: self.bitrate_mbps.clamp(2, 200) * 1_000_000,
         }
     }
@@ -371,19 +373,22 @@ mod tests {
     }
 
     #[test]
-    fn extra_display_requests_stay_within_what_the_mac_can_encode() {
+    fn the_display_runs_at_the_chosen_rate_and_the_stream_at_what_the_mac_can_encode() {
+        use legato_core::extend::frames_sent;
         let extend = Extend {
             fps: 144,
             quality: Quality::Sharpest,
             ..Extend::default()
         };
         let r = extend.request_for(3840, 2160);
-        assert_eq!((r.width, r.height, r.fps, r.hidpi), (3840, 2160, 60, true));
+        assert_eq!((r.width, r.height, r.fps, r.hidpi), (3840, 2160, 144, true));
+        assert_eq!(frames_sent(&r), 60, "4K encodes at up to 60 fps");
         let r = extend.request_for(1921, 1081);
         assert_eq!(
             (r.width, r.height, r.fps, r.hidpi),
             (1920, 1080, 144, false)
         );
+        assert_eq!(frames_sent(&r), 144);
         assert_eq!(r.bitrate, 40_000_000);
         assert_eq!((r.stream_width, r.stream_height), (1920, 1080));
     }
@@ -401,7 +406,8 @@ mod tests {
             (3840, 2160, true),
             "still a 4K display"
         );
-        assert_eq!((r.stream_width, r.stream_height, r.fps), (2560, 1440, 120));
+        assert_eq!((r.stream_width, r.stream_height), (2560, 1440));
+        assert_eq!(legato_core::extend::frames_sent(&r), 120);
         assert_eq!((r.moving_width, r.moving_height), (0, 0), "one size only");
     }
 
@@ -415,7 +421,11 @@ mod tests {
         let r = extend.request_for(3840, 2160);
         assert_eq!((r.stream_width, r.stream_height), (3840, 2160));
         assert_eq!((r.moving_width, r.moving_height), (1920, 1080));
-        assert_eq!(r.fps, 144, "moving is what needs the frame rate");
+        assert_eq!(
+            legato_core::extend::frames_sent(&r),
+            144,
+            "moving is what needs the frame rate"
+        );
         extend.while_moving = MovingSize::Qhd;
         let r = extend.request_for(2560, 1440);
         assert_eq!(
@@ -430,7 +440,8 @@ mod tests {
             "same shape"
         );
         let r = extend.request_for(5120, 2880);
-        assert_eq!((r.moving_width, r.moving_height, r.fps), (2560, 1440, 120));
+        assert_eq!((r.moving_width, r.moving_height), (2560, 1440));
+        assert_eq!(legato_core::extend::frames_sent(&r), 120);
     }
 
     #[test]

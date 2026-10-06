@@ -524,26 +524,31 @@ fn with_display_options(placement: legato_engine::config::Placement) -> Model {
 }
 
 #[test]
-fn display_options_offer_each_screen_and_limit_the_frame_rate() {
+fn display_options_separate_the_display_from_the_stream() {
     use legato_engine::config::{MovingSize, Placement, Quality, Resolution};
+    fn window(m: &Model, height: f32) -> iced_test::Simulator<'_, Message, Theme> {
+        iced_test::Simulator::with_size(
+            iced::Settings::default(),
+            (1024.0, height),
+            crate::view::root(m),
+        )
+    }
     // Adaptive quality, the default: full size when still, 1920×1080 while moving.
     let m = with_display_options(Placement::FullScreen);
-    let mut ui = iced_test::Simulator::with_size(
-        iced::Settings::default(),
-        (1024.0, 1800.0),
-        crate::view::root(&m),
-    );
+    let mut ui = window(&m, 1800.0);
     snapshot(&mut ui, "display-options");
     assert!(
-        ui.find("The same size as display 2 (counted from the left): 3840×2160.")
+        ui.find("A 3840×2160 display at 60 Hz: the size of display 2, counted from the left.")
             .is_ok()
     );
     assert!(
-        ui.find("Up to 144 fps: sent at 1920×1080 while things move, 3840×2160 when still.")
-            .is_ok()
+        ui.find(
+            "You'll see 3840×2160 when still and 1920×1080 while things move, at up to 60 fps."
+        )
+        .is_ok()
     );
-    ui.click("Up to 1440p").unwrap();
-    ui.click("144").unwrap();
+    ui.click("1440p (sharper)").unwrap();
+    ui.click("144 Hz").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(
         m,
@@ -555,73 +560,71 @@ fn display_options_offer_each_screen_and_limit_the_frame_rate() {
             .any(|m| matches!(m, Message::DisplayOptionsChanged(o) if o.fps == 144))
     );
 
-    // Always full size: 60 fps at 4K.
+    // Full 4K at 120 Hz: the display runs at 120, but the Mac encodes 4K at 60 fps.
     let mut m = with_display_options(Placement::FullScreen);
     if let Some(o) = &mut m.display_options {
         o.quality = Quality::Sharpest;
+        o.fps = 120;
     }
-    let mut ui = iced_test::Simulator::with_size(
-        iced::Settings::default(),
-        (1024.0, 1600.0),
-        crate::view::root(&m),
-    );
-    assert!(ui.find("Up to 1080p").is_err(), "adaptive only");
+    let mut ui = window(&m, 1600.0);
+    assert!(ui.find("1080p (quicker)").is_err(), "adaptive only");
     assert!(
-        ui.find("Up to 60 fps: sent at 3840×2160. Smaller sizes can go faster.")
-            .is_ok()
+        ui.find(
+            "You'll see 3840×2160 at up to 60 fps. The Mac can't encode it any faster; \
+             Balanced keeps up with 120 Hz."
+        )
+        .is_ok()
     );
-    // 120 fps is more than the Mac can encode at 4K: choosing it does nothing.
-    ui.click("120").unwrap();
     ui.click("1440p").unwrap();
+    ui.click("90 Hz").unwrap();
     ui.click("In a window").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::DisplayOptionsChanged(o) if o.fps == 120)),
-        "{messages:?}"
-    );
     assert!(messages.iter().any(|m| matches!(
         m,
         Message::DisplayOptionsChanged(o) if o.resolution == Resolution::Fixed && o.fixed == (2560, 1440)
     )));
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::DisplayOptionsChanged(o) if o.fps == 90))
+    );
     assert!(messages.iter().any(|m| matches!(
         m,
         Message::DisplayOptionsChanged(o) if o.placement == Placement::Window
     )));
 
-    // A 4K display sent at 2560×1440 can go at 120 fps.
+    // Balanced sends 4K as 2560×1440, which keeps up with 120.
     let mut m = with_display_options(Placement::FullScreen);
     if let Some(o) = &mut m.display_options {
-        o.quality = legato_engine::config::Quality::Balanced;
+        o.quality = Quality::Balanced;
+        o.fps = 120;
     }
-    let mut ui = iced_test::Simulator::with_size(
-        iced::Settings::default(),
-        (1024.0, 1600.0),
-        crate::view::root(&m),
-    );
+    let mut ui = window(&m, 1600.0);
+    assert!(ui.find("You'll see 2560×1440 at up to 120 fps.").is_ok());
+
+    // In a window, sizes follow the window.
+    let m = with_display_options(Placement::Window);
+    let mut ui = window(&m, 1600.0);
     assert!(
-        ui.find("Up to 120 fps: sent at 2560×1440. Smaller sizes can go faster.")
+        ui.find("The window's size, updated when you finish resizing it, at 60 Hz.")
             .is_ok()
     );
-    ui.click("120").unwrap();
     assert!(
-        ui.into_messages()
-            .any(|m| matches!(m, Message::DisplayOptionsChanged(o) if o.fps == 120))
+        ui.find(
+            "You'll see the window's full size when still and up to 1920×1080 while things \
+             move, at up to 60 fps."
+        )
+        .is_ok()
     );
 
-    // At 2560×1440, 120 fps is fine.
+    // Choosing and showing.
     let mut m = with_display_options(Placement::FullScreen);
     if let Some(o) = &mut m.display_options {
         o.resolution = Resolution::Fixed;
         o.fixed = (2560, 1440);
     }
-    let mut ui = iced_test::Simulator::with_size(
-        iced::Settings::default(),
-        (1024.0, 1600.0),
-        crate::view::root(&m),
-    );
-    ui.click("120").unwrap();
+    let mut ui = window(&m, 1600.0);
+    ui.click("120 Hz").unwrap();
     ui.click("Show").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(
