@@ -534,17 +534,16 @@ fn display_options_offer_each_screen_and_limit_the_frame_rate() {
         crate::view::root(&m),
     );
     snapshot(&mut ui, "display-options");
-    assert!(ui.find("Full screen on display 2 (3840×2160)").is_ok());
     assert!(
-        ui.find(
-            "Sent at 1920×1080 while things move, the Mac can keep up with 144 fps. When \
-             still, it's sent at the full 3840×2160."
-        )
-        .is_ok()
+        ui.find("The same size as display 2 (counted from the left): 3840×2160.")
+            .is_ok()
     );
-    ui.click("Up to 2560×1440: sharper, a little slower")
-        .unwrap();
-    ui.click("144 fps").unwrap();
+    assert!(
+        ui.find("Up to 144 fps: sent at 1920×1080 while things move, 3840×2160 when still.")
+            .is_ok()
+    );
+    ui.click("Up to 1440p").unwrap();
+    ui.click("144").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(
         m,
@@ -566,17 +565,14 @@ fn display_options_offer_each_screen_and_limit_the_frame_rate() {
         (1024.0, 1600.0),
         crate::view::root(&m),
     );
+    assert!(ui.find("Up to 1080p").is_err(), "adaptive only");
     assert!(
-        ui.find("Up to 1920×1080: the quickest").is_err(),
-        "adaptive only"
-    );
-    assert!(
-        ui.find("Sent at 3840×2160, the Mac can keep up with 60 fps. Smaller sizes can go faster.")
+        ui.find("Up to 60 fps: sent at 3840×2160. Smaller sizes can go faster.")
             .is_ok()
     );
     // 120 fps is more than the Mac can encode at 4K: choosing it does nothing.
-    ui.click("120 fps").unwrap();
-    ui.click("Always 2560×1440").unwrap();
+    ui.click("120").unwrap();
+    ui.click("1440p").unwrap();
     ui.click("In a window").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(
@@ -605,12 +601,10 @@ fn display_options_offer_each_screen_and_limit_the_frame_rate() {
         crate::view::root(&m),
     );
     assert!(
-        ui.find(
-            "Sent at 2560×1440, the Mac can keep up with 120 fps. Smaller sizes can go faster."
-        )
-        .is_ok()
+        ui.find("Up to 120 fps: sent at 2560×1440. Smaller sizes can go faster.")
+            .is_ok()
     );
-    ui.click("120 fps").unwrap();
+    ui.click("120").unwrap();
     assert!(
         ui.into_messages()
             .any(|m| matches!(m, Message::DisplayOptionsChanged(o) if o.fps == 120))
@@ -627,7 +621,7 @@ fn display_options_offer_each_screen_and_limit_the_frame_rate() {
         (1024.0, 1600.0),
         crate::view::root(&m),
     );
-    ui.click("120 fps").unwrap();
+    ui.click("120").unwrap();
     ui.click("Show").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(
@@ -640,6 +634,34 @@ fn display_options_offer_each_screen_and_limit_the_frame_rate() {
             .iter()
             .any(|m| matches!(m, Message::DisplayOptionsDone(true)))
     );
+}
+
+#[test]
+fn with_many_displays_the_display_is_picked_from_a_list() {
+    use legato_engine::config::Placement;
+    let mut m = with_display_options(Placement::FullScreen);
+    m.local
+        .displays
+        .push(display(7680.0, 3840.0, 2160.0, false));
+    m.local
+        .displays
+        .push(display(11520.0, 3840.0, 2160.0, false));
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        (1024.0, 1600.0),
+        crate::view::root(&m),
+    );
+    // Five displays don't fit as buttons: the chosen one shows in a closed list.
+    assert!(ui.find("Display 2").is_ok());
+    assert!(ui.find("Display 5").is_err());
+    // With three, each is a button.
+    let m = with_display_options(Placement::FullScreen);
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        (1024.0, 1600.0),
+        crate::view::root(&m),
+    );
+    assert!(ui.find("Display 3").is_ok());
 }
 
 #[test]
@@ -672,14 +694,13 @@ fn display_options_are_saved_to_the_settings() {
 fn display_options_fit_the_default_window() {
     use legato_engine::config::Placement;
     let m = with_display_options(Placement::FullScreen);
-    // The main window's default size, where the dialog has to scroll.
+    // The main window's default size: every choice should fit without scrolling.
     let mut ui = iced_test::Simulator::with_size(
         iced::Settings::default(),
         (920.0, 640.0),
         crate::view::root(&m),
     );
-    let theme = crate::app_theme(false);
-    ui.snapshot(&theme).unwrap();
+    snapshot(&mut ui, "display-options-default-window");
     assert!(ui.find("Show").is_ok());
 }
 

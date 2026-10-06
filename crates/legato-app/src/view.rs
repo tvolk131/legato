@@ -4,9 +4,9 @@ use iced::widget::{Space, canvas, column, container, row, scrollable};
 use iced::{Alignment, Length};
 use iced_m3::dialog::{dialog, modal};
 use iced_m3::{
-    ButtonVariant, Element, MenuItem, NavigationItem, TypeScale, app_bar, badged, button,
-    button_group, card, icon, icon_button, list, list_item, loading_indicator, navigation_rail,
-    slider, snackbar, split_button, switch, typography,
+    ButtonSize, ButtonVariant, Element, MenuItem, NavigationItem, TypeScale, app_bar, badged,
+    button, button_group, card, icon, icon_button, list, list_item, loading_indicator,
+    navigation_rail, slider, snackbar, split_button, switch, typography,
 };
 use legato_core::Layout;
 use legato_engine::arrange::{self, ConnectedPeer};
@@ -498,128 +498,174 @@ fn control_mode(m: &Model) -> Element<'_, Message> {
     .into()
 }
 
-/// Fixed sizes offered for the Mac's display.
-const FIXED_SIZES: [(u32, u32); 3] = [(3840, 2160), (2560, 1440), (1920, 1080)];
+/// Fixed sizes offered for the Mac's display, with their short labels.
+const FIXED_SIZES: [(u32, u32, &str); 3] = [
+    (3840, 2160, "4K"),
+    (2560, 1440, "1440p"),
+    (1920, 1080, "1080p"),
+];
+
+/// One choice of a few, as a connected group of toggle buttons: (chosen, label, what
+/// choosing it sends). Choices that send nothing are disabled.
+fn choices<'a>(
+    items: impl IntoIterator<Item = (bool, String, Option<Message>)>,
+) -> Element<'a, Message> {
+    button_group(items.into_iter().map(|(chosen, label, message)| {
+        button(label)
+            .size(ButtonSize::ExtraSmall)
+            .variant(ButtonVariant::Tonal)
+            .selected(chosen)
+            .on_press_maybe(message)
+    }))
+    .connected(true)
+    .into()
+}
+
+/// A labelled choice, with a line about the current choice under it (if any).
+fn field<'a>(
+    label: &'static str,
+    choice: impl Into<Element<'a, Message>>,
+    note: Option<String>,
+) -> Element<'a, Message> {
+    column![typography(label, TypeScale::TitleSmall), choice.into()]
+        .push(note.map(|note| typography(note, TypeScale::BodySmall)))
+        .spacing(6)
+        .into()
+}
 
 fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
-    use iced_m3::{RadioOption, radio_group};
+    use crate::model::DisplayOptions;
+    use iced_m3::{SelectOption, select};
     use legato_engine::config::{MovingSize, Placement, Quality, Resolution};
     let Some(o) = m.display_options.clone() else {
         return dialog(column![]);
     };
     let name = m.name_of(&o.peer);
     let displays = m.displays();
-    let changed = |o: crate::model::DisplayOptions| Message::DisplayOptionsChanged(o);
+    // What choosing something sends: these options with that one thing changed.
+    let change = |set: &dyn Fn(&mut DisplayOptions)| {
+        let mut o = o.clone();
+        set(&mut o);
+        Message::DisplayOptionsChanged(o)
+    };
+    let display = o.display.clamp(1, displays.len().max(1));
+    let display_size = displays
+        .get(display - 1)
+        .map(|d| (d.bounds.width as u32, d.bounds.height as u32));
 
-    let mut places: Vec<RadioOption<(Placement, usize)>> = displays
-        .iter()
-        .enumerate()
-        .map(|(i, d)| {
-            RadioOption::new(
-                (Placement::FullScreen, i + 1),
-                format!(
-                    "Full screen on display {} ({}×{})",
-                    i + 1,
-                    d.bounds.width as u32,
-                    d.bounds.height as u32
-                ),
+    // Where: full screen or a window, then (for full screen) which display.
+    let full = o.placement == Placement::FullScreen;
+    let mut where_ = column![choices([
+        (
+            full,
+            "Full screen".to_string(),
+            Some(change(&|o| o.placement = Placement::FullScreen)),
+        ),
+        (
+            !full,
+            "In a window".to_string(),
+            Some(change(&|o| o.placement = Placement::Window)),
+        ),
+    ])]
+    .spacing(8);
+    if full && displays.len() > 1 {
+        where_ = where_.push(if displays.len() <= 4 {
+            choices((1..=displays.len()).map(|i| {
+                (
+                    i == display,
+                    format!("Display {i}"),
+                    Some(change(&move |o| o.display = i)),
+                )
+            }))
+        } else {
+            let o = o.clone();
+            select(
+                "Display",
+                (1..=displays.len()).map(|i| SelectOption::new(i, format!("Display {i}"))),
+                Some(display),
             )
-        })
-        .collect();
-    places.push(RadioOption::new((Placement::Window, 0), "In a window"));
-    let place = match o.placement {
-        Placement::FullScreen => (Placement::FullScreen, o.display.min(displays.len()).max(1)),
-        Placement::Window => (Placement::Window, 0),
-    };
-    let where_ = {
-        let o = o.clone();
-        radio_group(places, Some(place)).on_select(move |(placement, display)| {
-            changed(crate::model::DisplayOptions {
-                placement,
-                display: display.max(1),
-                ..o.clone()
+            .on_select(move |display| {
+                Message::DisplayOptionsChanged(DisplayOptions {
+                    display,
+                    ..o.clone()
+                })
             })
-        })
-    };
+            .into()
+        });
+    }
+    // Which display (and its size) is in the size note, under the next choice.
+    let where_note = (!full).then(|| "A window you can move and resize.".to_string());
 
-    // What "match" means here, for the frame-rate limit.
-    let shown = match o.placement {
-        Placement::FullScreen => displays
-            .get(o.display.saturating_sub(1))
-            .map(|d| (d.bounds.width as u32, d.bounds.height as u32)),
-        Placement::Window => None,
-    };
+    // Size: what "match" means depends on where it's shown.
+    let shown = if full { display_size } else { None };
     let size = match o.resolution {
         Resolution::Match => shown,
         Resolution::Fixed => Some(o.fixed),
     };
-    let mut sizes = vec![RadioOption::new(
-        (Resolution::Match, (0, 0)),
-        match o.placement {
-            Placement::FullScreen => "Match the screen".to_string(),
-            Placement::Window => "Match the window (changes when you finish resizing)".to_string(),
-        },
-    )];
-    sizes.extend(
-        FIXED_SIZES.iter().map(|&(w, h)| {
-            RadioOption::new((Resolution::Fixed, (w, h)), format!("Always {w}×{h}"))
-        }),
+    let size_choice = choices(
+        std::iter::once((
+            o.resolution == Resolution::Match,
+            "Match".to_string(),
+            Some(change(&|o| o.resolution = Resolution::Match)),
+        ))
+        .chain(FIXED_SIZES.iter().map(|&(w, h, label)| {
+            (
+                o.resolution == Resolution::Fixed && o.fixed == (w, h),
+                label.to_string(),
+                Some(change(&move |o| {
+                    o.resolution = Resolution::Fixed;
+                    o.fixed = (w, h);
+                })),
+            )
+        })),
     );
-    let resolution = match o.resolution {
-        Resolution::Match => (Resolution::Match, (0, 0)),
-        Resolution::Fixed => (Resolution::Fixed, o.fixed),
-    };
-    let size_choice = {
-        let o = o.clone();
-        radio_group(sizes, Some(resolution)).on_select(move |(resolution, fixed)| {
-            changed(crate::model::DisplayOptions {
-                resolution,
-                fixed: if resolution == Resolution::Fixed {
-                    fixed
-                } else {
-                    o.fixed
-                },
-                ..o.clone()
-            })
-        })
+    let size_note = match (o.resolution, shown) {
+        (Resolution::Match, Some((w, h))) if displays.len() > 1 => {
+            format!("The same size as display {display} (counted from the left): {w}×{h}.")
+        }
+        (Resolution::Match, Some((w, h))) => format!("The same size as the screen: {w}×{h}."),
+        (Resolution::Match, None) => {
+            "The window's size, updated when you finish resizing it.".to_string()
+        }
+        (Resolution::Fixed, _) => format!("Always {}×{}.", o.fixed.0, o.fixed.1),
     };
 
-    let qualities = [
-        (
-            Quality::Adaptive,
-            "Adaptive: full resolution, smaller while things move",
-        ),
-        (Quality::Sharpest, "Sharpest: full resolution"),
-        (
-            Quality::Balanced,
-            "Balanced: up to 2560×1440, about twice as quick at 4K",
-        ),
-        (Quality::Fastest, "Fastest: up to 1920×1080"),
-    ]
-    .map(|(q, label)| RadioOption::new(q, label));
-    let quality_choice = {
-        let o = o.clone();
-        radio_group(qualities, Some(o.quality)).on_select(move |quality| {
-            changed(crate::model::DisplayOptions {
-                quality,
-                ..o.clone()
-            })
-        })
-    };
-    let moving_sizes = [
-        (MovingSize::Hd, "Up to 1920×1080: the quickest"),
-        (MovingSize::Qhd, "Up to 2560×1440: sharper, a little slower"),
-    ]
-    .map(|(size, label)| RadioOption::new(size, label));
-    let moving_choice = {
-        let o = o.clone();
-        radio_group(moving_sizes, Some(o.while_moving)).on_select(move |while_moving| {
-            changed(crate::model::DisplayOptions {
-                while_moving,
-                ..o.clone()
-            })
-        })
-    };
+    let quality_choice = choices(
+        [
+            (Quality::Adaptive, "Adaptive"),
+            (Quality::Sharpest, "Sharpest"),
+            (Quality::Balanced, "Balanced"),
+            (Quality::Fastest, "Fastest"),
+        ]
+        .map(|(q, label)| {
+            (
+                o.quality == q,
+                label.to_string(),
+                Some(change(&move |o| o.quality = q)),
+            )
+        }),
+    );
+    let quality_note = match o.quality {
+        Quality::Adaptive => "Full resolution, and smaller while things move.",
+        Quality::Sharpest => "Full resolution, always.",
+        Quality::Balanced => "Up to 2560×1440: about twice as quick at 4K.",
+        Quality::Fastest => "Up to 1920×1080: the quickest.",
+    }
+    .to_string();
+    let moving_choice = choices(
+        [
+            (MovingSize::Hd, "Up to 1080p"),
+            (MovingSize::Qhd, "Up to 1440p"),
+        ]
+        .map(|(size, label)| {
+            (
+                o.while_moving == size,
+                label.to_string(),
+                Some(change(&move |o| o.while_moving = size)),
+            )
+        }),
+    );
+
     // What the Mac would be asked for at the fastest rate: encoding sets the pace.
     let fastest = *legato_core::extend::FRAME_RATES.last().unwrap_or(&60);
     let request = size.map(|(w, h)| {
@@ -637,35 +683,35 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
         }
         (None, _) => None,
     };
-    let rates = legato_core::extend::FRAME_RATES.map(|fps| {
-        RadioOption::new(fps, format!("{fps} fps")).disabled(max.is_some_and(|max| fps > max))
-    });
     let fps = max.map_or(o.fps, |max| o.fps.min(max));
-    let rate_choice = {
-        let o = o.clone();
-        radio_group(rates, Some(fps))
-            .on_select(move |fps| changed(crate::model::DisplayOptions { fps, ..o.clone() }))
-    };
+    // Rates the Mac can't keep up with stay visible, but can't be chosen.
+    let rate_choice = choices(legato_core::extend::FRAME_RATES.map(|rate| {
+        (
+            rate == fps,
+            rate.to_string(),
+            max.is_none_or(|max| rate <= max)
+                .then(|| change(&move |o| o.fps = rate)),
+        )
+    }));
     let rate_note = match request {
         Some(r) if r.moving_width > 0 => format!(
-            "Sent at {}×{} while things move, the Mac can keep up with {} fps. When still, \
-             it's sent at the full {}×{}.",
-            r.moving_width, r.moving_height, r.fps, r.stream_width, r.stream_height
+            "Up to {} fps: sent at {}×{} while things move, {}×{} when still.",
+            r.fps, r.moving_width, r.moving_height, r.stream_width, r.stream_height
         ),
         Some(r) => format!(
-            "Sent at {}×{}, the Mac can keep up with {} fps. Smaller sizes can go faster.",
-            r.stream_width, r.stream_height, r.fps
+            "Up to {} fps: sent at {}×{}. Smaller sizes can go faster.",
+            r.fps, r.stream_width, r.stream_height
         ),
         None if o.quality == Quality::Adaptive => {
             let (w, h) = o.while_moving.cap();
             format!(
-                "Sent at up to {w}×{h} while things move, so up to {} fps.",
+                "Up to {} fps: sent at up to {w}×{h} while things move.",
                 max.unwrap_or(fastest)
             )
         }
-        None => "Limited to what the Mac can keep up with at the window's size: 60 fps at 4K, \
-              120 at 2560×1440, 144 at 1920×1080."
-            .to_string(),
+        None => {
+            "Limited by the window's size: 60 fps at 4K, 120 at 1440p, 144 at 1080p.".to_string()
+        }
     };
 
     let content = column![
@@ -673,23 +719,19 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
             format!("Show \"{name}\" as a display"),
             TypeScale::HeadlineSmall
         ),
-        heading("Where"),
-        where_,
-        heading("Size"),
-        size_choice,
-        heading("Stream quality"),
-        quality_choice,
+        field("Where", where_, where_note),
+        field("Size", size_choice, Some(size_note)),
+        // Adaptive quality's size while things move, under it like the display under Where.
+        field(
+            "Stream quality",
+            column![quality_choice]
+                .push((o.quality == Quality::Adaptive).then_some(moving_choice))
+                .spacing(6),
+            Some(quality_note)
+        ),
+        field("Frame rate", rate_choice, Some(rate_note)),
     ]
-    .spacing(8);
-    let content = if o.quality == Quality::Adaptive {
-        content.push(heading("While moving")).push(moving_choice)
-    } else {
-        content
-    };
-    let content = content
-        .push(heading("Frame rate"))
-        .push(rate_choice)
-        .push(body(rate_note));
+    .spacing(12);
     dialog(scrollable(content).height(Length::Shrink))
         .actions(
             row![
