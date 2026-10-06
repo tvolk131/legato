@@ -131,7 +131,7 @@ Neither can reproduce a real Wi-Fi switch, which leaves the old connection silen
 
 ### UI snapshots
 
-The app's UI tests drive the real views headlessly with `iced_test` and compare each screen, pixel for pixel, with a golden image in `crates/legato-app/src/snapshots/`. These screens are covered: devices, the expanded navigation rail, pairing dialog, arrangement, settings, and the display viewer while it waits. They're drawn with the app's own theme (`app_theme`), which uses iced-m3's Expressive springs and shape feedback. The goldens show each screen at rest.
+The app's UI tests drive the real views headlessly with `iced_test` and compare each screen, pixel for pixel, with a golden image in `crates/legato-app/src/snapshots/`. These screens are covered: devices, the expanded navigation rail, the "Add a device" dialog, pairing dialog, arrangement, settings, and the display viewer while it waits. They're drawn with the app's own theme (`app_theme`), which uses iced-m3's Expressive springs and shape feedback. The goldens show each screen at rest.
 - They're rendered with tiny-skia on the CPU. `.cargo/config.toml` sets `ICED_TEST_BACKEND=tiny-skia` so local runs match CI.
 - Device ids in the sample data are fixed, so nothing on screen changes between runs.
 - On a mismatch, the test writes the new rendering and a diff (changed pixels in red) to `target/snapshots/`. CI uploads them as an artifact.

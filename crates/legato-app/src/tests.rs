@@ -87,6 +87,7 @@ fn model(page: Page) -> Model {
         }],
         pairing: None,
         pairing_open: false,
+        add_device_open: false,
         config,
         local: Screens {
             displays: vec![
@@ -213,13 +214,43 @@ fn snapshot(ui: &mut iced_test::Simulator<'_, Message, Theme>, name: &str) {
 }
 
 #[test]
-fn devices_page_lists_paired_and_nearby_devices() {
+fn devices_page_lists_paired_devices_and_offers_to_add_one() {
     let m = model(Page::Devices);
-    let jane = m.nearby[0].id;
     let mut ui = simulator(crate::view::root(&m));
     snapshot(&mut ui, "devices");
     assert!(ui.find("Tommy's MacBook Pro").is_ok());
     assert!(ui.find("macOS · Connected · 2 ms").is_ok());
+    // Unpaired devices nearby are in the dialog (the badge counts them), so nothing on
+    // the page keeps animating.
+    assert!(ui.find("Jane's Laptop").is_err());
+    assert!(ui.find("Looking for Legato on this network…").is_err());
+    ui.click("Add a device…").unwrap();
+    assert!(
+        ui.into_messages()
+            .any(|m| matches!(m, Message::AddDevice(true)))
+    );
+}
+
+#[test]
+fn with_nothing_paired_the_page_points_to_adding_a_device() {
+    let mut m = model(Page::Devices);
+    m.paired.clear();
+    let mut ui = simulator(crate::view::root(&m));
+    assert!(ui.find("None yet.").is_ok());
+    ui.click("Add a device…").unwrap();
+    assert!(
+        ui.into_messages()
+            .any(|m| matches!(m, Message::AddDevice(true)))
+    );
+}
+
+#[test]
+fn the_add_device_dialog_lists_unpaired_devices_nearby() {
+    let mut m = model(Page::Devices);
+    m.add_device_open = true;
+    let jane = m.nearby[0].id;
+    let mut ui = simulator(crate::view::root(&m));
+    snapshot(&mut ui, "add-device");
     assert!(ui.find("Jane's Laptop").is_ok());
     ui.click("Pair").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
@@ -228,6 +259,15 @@ fn devices_page_lists_paired_and_nearby_devices() {
             .iter()
             .any(|m| matches!(m, Message::Pair(id) if *id == jane)),
         "{messages:?}"
+    );
+    // With none nearby, it says it's looking (the only spinner, while it's open).
+    m.nearby.clear();
+    let mut ui = simulator(crate::view::root(&m));
+    assert!(ui.find("Looking for Legato on this network…").is_ok());
+    ui.click("Close").unwrap();
+    assert!(
+        ui.into_messages()
+            .any(|m| matches!(m, Message::AddDevice(false)))
     );
 }
 

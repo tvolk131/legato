@@ -11,7 +11,7 @@ Use one keyboard and mouse across your computers over the network. Your cursor m
 
 ## Quick start
 
-Open **Legato** on both machines. Each lists the other under "Nearby"; pick it on either side and check that both show the same 6-digit code. Then drag the other machine's screens to where they sit in the arrangement editor.
+Open **Legato** on both machines. On either one, choose **Add a device…** and pick the other machine, then check that both show the same 6-digit code. Then drag the other machine's screens to where they sit in the arrangement editor.
 
 Or from the command line, on both machines unless noted:
 
