@@ -1040,6 +1040,35 @@ fn pushing_past_a_full_screen_portals_edge_towards_the_mac_crosses_to_it() {
     assert_eq!(h.c.active_peer(), Some(MAC));
 }
 
+#[test]
+fn caps_lock_stays_on_the_machine_its_pressed_on() {
+    let mut h = Harness::new();
+    h.cross_to_mac(1920.0);
+    h.take();
+    // Driving the Mac: Caps Lock toggles this machine, and the shared state carries it
+    // over, so it isn't sent as a key (which would toggle the Mac twice).
+    assert_eq!(h.step(0, key(usage::CAPS_LOCK, true)), Verdict::Pass);
+    assert_eq!(h.step(30, key(usage::CAPS_LOCK, false)), Verdict::Pass);
+    assert!(h.take().is_empty());
+    assert_eq!(
+        h.c.active_peer(),
+        Some(MAC),
+        "and it doesn't take the pointer back"
+    );
+    // Remapped to another key on the Mac, it's that key.
+    let mut remap = KeyRemap::identity();
+    remap.set(usage::CAPS_LOCK, usage::LEFT_CTRL);
+    h.c.set_remap(MAC, remap);
+    assert_eq!(h.step(0, key(usage::CAPS_LOCK, true)), Verdict::Swallow);
+    assert_eq!(
+        sent(&h.take()),
+        [Control::Key {
+            usage: usage::LEFT_CTRL,
+            down: true
+        }]
+    );
+}
+
 /// Where `actions` report this machine's pointer to `to`.
 fn reported_to(actions: &[Action], to: MachineId) -> Vec<Point> {
     actions

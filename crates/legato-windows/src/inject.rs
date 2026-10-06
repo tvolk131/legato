@@ -169,6 +169,25 @@ fn key(scancode: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     }
 }
 
+/// Presses and releases Caps Lock, as Legato's own input: Windows toggles it, and the
+/// keyboards' lights, as for a real press.
+pub(crate) fn press_caps_lock() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_CAPITAL;
+    let press = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_CAPITAL,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: INJECTED_TAG,
+            },
+        },
+    };
+    send(&[press(KEYBD_EVENT_FLAGS(0)), press(KEYEVENTF_KEYUP)]);
+}
+
 fn send(inputs: &[INPUT]) {
     if inputs.is_empty() {
         return;

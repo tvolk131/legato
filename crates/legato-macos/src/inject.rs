@@ -21,7 +21,6 @@ pub struct Injector {
     cursor: Point,
     buttons: [bool; 5],
     modifiers: Vec<u16>,
-    caps_lock: bool,
     /// Sub-line wheel movement carried over between events (x, y).
     wheel_remainder: (f64, f64),
     /// Flip wheel direction (for users who want "natural" scrolling from a Windows mouse).
@@ -40,7 +39,6 @@ impl Injector {
             cursor: crate::cursor_position(),
             buttons: [false; 5],
             modifiers: Vec::new(),
-            caps_lock: false,
             wheel_remainder: (0.0, 0.0),
             invert_wheel: false,
         })
@@ -128,17 +126,24 @@ impl Injector {
             tracing::debug!("no macOS key for HID usage {hid:#04x}");
             return;
         };
+        if hid == usage::CAPS_LOCK {
+            // Only sent when another key is remapped to it: toggle the real one, which
+            // connected machines share.
+            if down && let Err(e) = crate::set_caps_lock(!crate::caps_lock()) {
+                tracing::warn!("{e}");
+            }
+            return;
+        }
         let Some(event) = CGEvent::new_keyboard_event(Some(&self.source), keycode, down) else {
             return;
         };
-        let mut marks = CGEventFlags::empty();
-        if hid == usage::CAPS_LOCK {
-            if !down {
-                return;
-            }
-            self.caps_lock = !self.caps_lock;
-            CGEvent::set_type(Some(&event), CGEventType::FlagsChanged);
-        } else if keymap::is_modifier(hid) {
+        // Typed with this Mac's own Caps Lock, as its keyboard would.
+        let mut marks = if crate::caps_lock() {
+            CGEventFlags::MaskAlphaShift
+        } else {
+            CGEventFlags::empty()
+        };
+        if keymap::is_modifier(hid) {
             if down {
                 if !self.modifiers.contains(&hid) {
                     self.modifiers.push(hid);
@@ -148,7 +153,7 @@ impl Injector {
             }
             CGEvent::set_type(Some(&event), CGEventType::FlagsChanged);
         } else {
-            marks = key_flags(hid);
+            marks |= key_flags(hid);
             if repeat {
                 CGEvent::set_integer_value_field(
                     Some(&event),
@@ -205,9 +210,6 @@ impl Injector {
                 usage::LEFT_GUI | usage::RIGHT_GUI => CGEventFlags::MaskCommand,
                 _ => CGEventFlags::empty(),
             };
-        }
-        if self.caps_lock {
-            flags |= CGEventFlags::MaskAlphaShift;
         }
         flags
     }

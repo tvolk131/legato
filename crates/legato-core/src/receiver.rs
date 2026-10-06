@@ -141,7 +141,8 @@ impl Receiver {
             | Control::ExtendStop { .. }
             | Control::Keyframe { .. }
             | Control::ExtendResize(_)
-            | Control::ExtendArrange { .. } => {}
+            | Control::ExtendArrange { .. }
+            | Control::CapsLock { .. } => {}
         }
     }
 

@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
@@ -210,6 +210,12 @@ pub enum Control {
     ExtendArrange {
         origin: Point,
         picture: Rect,
+    },
+    /// The sender's Caps Lock is `on`, as of its change number `clock`: connected
+    /// machines share one Caps Lock, and the newest change wins.
+    CapsLock {
+        on: bool,
+        clock: u64,
     },
 }
 
@@ -506,6 +512,7 @@ mod tests {
                 origin: Point::new(-96.0, -1080.0),
                 picture: Rect::new(0.0, 0.0, 3840.0, 2160.0),
             },
+            Control::CapsLock { on: true, clock: 7 },
         ];
         for msg in msgs {
             let frame = encode_frame(&msg);

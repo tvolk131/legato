@@ -36,6 +36,8 @@ struct TapState {
     on_activity: Box<dyn FnMut() + Send>,
     moved: f64,
     last_move: Option<Instant>,
+    /// Modifier flags as last seen, to tell which one changed.
+    flags: u64,
 }
 
 impl ActivityMonitor {
@@ -84,6 +86,7 @@ fn run_tap(
         on_activity,
         moved: 0.0,
         last_move: None,
+        flags: 0,
     }));
     let events = mask(&[
         CGEventType::LeftMouseDown,
@@ -161,6 +164,15 @@ unsafe extern "C-unwind" fn callback(
     }
     if CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData) == INJECTED_TAG {
         return event.as_ptr();
+    }
+    if ty == CGEventType::FlagsChanged {
+        let flags = CGEvent::flags(Some(ev)).0;
+        let changed = flags ^ std::mem::replace(&mut state.flags, flags);
+        // Caps Lock alone is shared by connected machines, and set to match a peer's:
+        // it isn't this Mac being used.
+        if changed == objc2_core_graphics::CGEventFlags::MaskAlphaShift.0 {
+            return event.as_ptr();
+        }
     }
 
     let deliberate = if ty == CGEventType::MouseMoved

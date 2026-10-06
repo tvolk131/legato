@@ -10,6 +10,7 @@ pub mod controller;
 pub mod extend;
 pub mod keymap;
 pub mod layout;
+pub mod locks;
 pub mod receiver;
 
 pub use activity::{ActivityFilter, LocalInput};
