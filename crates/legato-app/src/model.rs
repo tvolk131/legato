@@ -62,6 +62,8 @@ pub struct Model {
     /// The dialog stays mounted while closing, so its content is kept here.
     pub pairing: Option<Pairing>,
     pub pairing_open: bool,
+    /// The "Add a device" dialog, listing unpaired devices nearby, is open.
+    pub add_device_open: bool,
     pub config: Config,
     pub local: Screens,
     pub known: HashMap<EndpointId, Screens>,

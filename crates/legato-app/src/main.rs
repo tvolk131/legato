@@ -76,6 +76,8 @@ pub enum Message {
     Sharing(Result<(), String>),
     Status(Status),
     Nearby(NearbyEvent),
+    /// Open or close the "Add a device" dialog.
+    AddDevice(bool),
     Pair(EndpointId),
     PairStarted(Result<Attempt, String>),
     IncomingPair(Attempt),
@@ -197,6 +199,7 @@ impl App {
             nearby: Vec::new(),
             pairing: None,
             pairing_open: false,
+            add_device_open: false,
             config: engine.config(),
             local: legato_engine::local_screens(),
             known: engine.known_screens(),
@@ -356,7 +359,10 @@ impl App {
                 }
                 NearbyEvent::Lost(id) => self.model.nearby.retain(|n| n.id != id),
             },
+            Message::AddDevice(open) => self.model.add_device_open = open,
             Message::Pair(id) => {
+                // On to checking the code, in its own dialog.
+                self.model.add_device_open = false;
                 let name = self.model.name_of(&id);
                 self.model.pairing = Some(Pairing {
                     name,

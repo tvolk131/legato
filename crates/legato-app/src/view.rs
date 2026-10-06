@@ -4,9 +4,9 @@ use iced::widget::{Space, canvas, column, container, row, scrollable};
 use iced::{Alignment, Length};
 use iced_m3::dialog::{dialog, modal};
 use iced_m3::{
-    ButtonVariant, Element, MenuItem, NavigationItem, TypeScale, app_bar, button, button_group,
-    card, icon, icon_button, list, list_item, loading_indicator, navigation_rail, slider, snackbar,
-    split_button, switch, typography,
+    ButtonVariant, Element, MenuItem, NavigationItem, TypeScale, app_bar, badged, button,
+    button_group, card, icon, icon_button, list, list_item, loading_indicator, navigation_rail,
+    slider, snackbar, split_button, switch, typography,
 };
 use legato_core::Layout;
 use legato_engine::arrange::{self, ConnectedPeer};
@@ -54,6 +54,7 @@ pub fn root(m: &Model) -> Element<'_, Message> {
                 .on_dismiss(Message::DismissNotice)
         }),
     );
+    let main = modal(main, add_device_dialog(m), m.add_device_open);
     let main = modal(main, display_options_dialog(m), m.display_options_open);
     iced_m3::focus::scope(modal(main, pairing_dialog(m), m.pairing_open))
 }
@@ -186,7 +187,7 @@ fn devices(m: &Model) -> Element<'_, Message> {
     .width(Length::Fill);
 
     let paired: Element<'_, Message> = if m.paired.is_empty() {
-        body("None yet. Pair with a device below.")
+        body("None yet.")
     } else {
         list(m.paired.iter().map(|p| {
             let status = match (&p.connection, m.active == Some(p.device.id)) {
@@ -241,12 +242,42 @@ fn devices(m: &Model) -> Element<'_, Message> {
         .into()
     };
 
-    let unpaired: Vec<_> = m
-        .nearby
-        .iter()
-        .filter(|n| m.paired(&n.id).is_none())
-        .collect();
-    let nearby: Element<'_, Message> = if unpaired.is_empty() {
+    // Adding one is the way forward until something's paired. The badge counts unpaired
+    // devices nearby, so a new one gets noticed without anything animating on the page.
+    let add = button("Add a device…")
+        .variant(if m.paired.is_empty() {
+            ButtonVariant::Filled
+        } else {
+            ButtonVariant::Tonal
+        })
+        .on_press(Message::AddDevice(true));
+    let add: Element<'_, Message> = match unpaired(m).count() {
+        0 => add.into(),
+        n => badged(add, Some(n as u32)),
+    };
+
+    column![
+        heading("This device"),
+        this,
+        heading("Paired devices"),
+        paired,
+        container(add).padding([8, 0]),
+        body("Drop files on this window to send them to the device you're using."),
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// Legato devices on this network that aren't paired with this one.
+fn unpaired(m: &Model) -> impl Iterator<Item = &crate::model::Device> {
+    m.nearby.iter().filter(|n| m.paired(&n.id).is_none())
+}
+
+/// Unpaired devices nearby, to pair with. While none are found it shows a spinner: the
+/// only one in the main window that can run for long, and only while this is open.
+fn add_device_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
+    let found: Vec<_> = unpaired(m).collect();
+    let found: Element<'_, Message> = if found.is_empty() {
         row![
             container(loading_indicator()).width(32).height(32),
             body("Looking for Legato on this network…"),
@@ -255,7 +286,7 @@ fn devices(m: &Model) -> Element<'_, Message> {
         .align_y(Alignment::Center)
         .into()
     } else {
-        list(unpaired.into_iter().map(|n| {
+        list(found.into_iter().map(|n| {
             list_item(n.name.clone())
                 .supporting_text(os_name(n.os))
                 .trailing(button("Pair").on_press(Message::Pair(n.id)))
@@ -263,18 +294,26 @@ fn devices(m: &Model) -> Element<'_, Message> {
         }))
         .into()
     };
-
-    column![
-        heading("This device"),
-        this,
-        heading("Paired devices"),
-        paired,
-        heading("Nearby"),
-        nearby,
-        body("Other devices appear here while Legato is open on them. Drop files on this window to send them to the device you're using."),
-    ]
-    .spacing(8)
-    .into()
+    dialog(
+        column![
+            typography("Add a device", TypeScale::HeadlineSmall),
+            body(
+                "Open Legato on the other device. It shows up here while it's on the same \
+                 network as this one."
+            ),
+            found,
+        ]
+        .spacing(16),
+    )
+    .actions(
+        row![
+            button("Close")
+                .variant(ButtonVariant::Text)
+                .on_press(Message::AddDevice(false)),
+        ]
+        .spacing(8),
+    )
+    .on_dismiss(Message::AddDevice(false))
 }
 
 /// The editor's view of this machine and its paired peers, positioned by the settings.
