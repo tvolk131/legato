@@ -44,13 +44,7 @@ impl Harness {
 
     /// Pushes down against the bottom of the middle monitor at native x.
     fn push_down(&mut self, x: f64, dy: f64) -> Verdict {
-        self.step(
-            8,
-            Event::LocalMotion {
-                pos: Point::new(x, 2159.0),
-                attempted: Point::new(0.0, dy),
-            },
-        )
+        self.step(8, local_at(x, 2159.0, 0.0, dy))
     }
 
     /// Crosses onto the Mac at native Windows x (1.5 native px per desk unit).
@@ -64,6 +58,29 @@ impl Harness {
     fn take(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.out)
     }
+}
+
+/// The pointer moved by `(dx, dy)` while captured.
+fn captured(dx: f64, dy: f64) -> Event {
+    Event::CapturedMotion {
+        delta: Point::new(dx, dy),
+    }
+}
+
+/// The local pointer is at `(x, y)`, having tried to move by `(dx, dy)`.
+fn local_at(x: f64, y: f64, dx: f64, dy: f64) -> Event {
+    Event::LocalMotion {
+        pos: Point::new(x, y),
+        attempted: Point::new(dx, dy),
+    }
+}
+
+fn button(button: Button, down: bool) -> Event {
+    Event::Button { button, down }
+}
+
+fn key(usage: u16, down: bool) -> Event {
+    Event::Key { usage, down }
 }
 
 fn sent(actions: &[Action]) -> Vec<Control> {
@@ -106,13 +123,7 @@ fn moving_along_the_taskbar_never_crosses() {
     for i in 0..100 {
         // At the bottom edge but moving sideways, with a tiny downward wobble below the
         // threshold each time, separated by long pauses.
-        let v = h.step(
-            300,
-            Event::LocalMotion {
-                pos: Point::new(1000.0 + i as f64, 2159.0),
-                attempted: Point::new(20.0, 2.0),
-            },
-        );
+        let v = h.step(300, local_at(1000.0 + i as f64, 2159.0, 20.0, 2.0));
         assert_eq!(v, Verdict::Pass);
     }
     assert_eq!(h.c.active_peer(), None);
@@ -122,13 +133,7 @@ fn moving_along_the_taskbar_never_crosses() {
 fn slow_separated_pushes_reset() {
     let mut h = Harness::new();
     for _ in 0..10 {
-        h.step(
-            400,
-            Event::LocalMotion {
-                pos: Point::new(1920.0, 2159.0),
-                attempted: Point::new(0.0, 20.0),
-            },
-        );
+        h.step(400, local_at(1920.0, 2159.0, 0.0, 20.0));
     }
     assert_eq!(h.c.active_peer(), None);
 }
@@ -141,13 +146,7 @@ fn bottom_edges_without_a_neighbour_are_walls() {
     });
     // Left monitor, and the parts of the middle monitor beyond the Mac's width.
     for x in [-2000.0, 100.0, 3700.0] {
-        let v = h.step(
-            8,
-            Event::LocalMotion {
-                pos: Point::new(x, 2159.0),
-                attempted: Point::new(0.0, 50.0),
-            },
-        );
+        let v = h.step(8, local_at(x, 2159.0, 0.0, 50.0));
         assert_eq!(v, Verdict::Pass, "x = {x}");
     }
     assert_eq!(h.c.active_peer(), None);
@@ -183,14 +182,7 @@ fn the_macs_own_pointer_on_its_shown_display_is_reported_to_the_viewer() {
     let mut out = vec![];
     let mut motion = |c: &mut Controller, x: f64, y: f64, dy: f64, out: &mut Vec<Action>| {
         now += Duration::from_millis(8);
-        c.handle(
-            now,
-            Event::LocalMotion {
-                pos: Point::new(x, y),
-                attempted: Point::new(0.0, dy),
-            },
-            out,
-        )
+        c.handle(now, local_at(x, y, 0.0, dy), out)
     };
     // On the shown display: the Mac keeps its pointer, and the PC hears where it is.
     assert_eq!(motion(&mut c, 500.0, -300.0, -3.0, &mut out), Verdict::Pass);
@@ -261,28 +253,14 @@ fn a_mac_cursor_on_its_extra_display_is_not_at_an_edge() {
         (-1080.0, -6.0),
     ] {
         now += Duration::from_millis(8);
-        let v = c.handle(
-            now,
-            Event::LocalMotion {
-                pos: Point::new(700.0, y),
-                attempted: Point::new(1.0, dy),
-            },
-            &mut out,
-        );
+        let v = c.handle(now, local_at(700.0, y, 1.0, dy), &mut out);
         assert_eq!(v, Verdict::Pass, "at y {y}");
     }
     assert_eq!(c.active_peer(), None);
     assert!(out.is_empty(), "{out:?}");
     // Pushing up from the MacBook's own top edge still crosses.
     now += Duration::from_millis(8);
-    let v = c.handle(
-        now,
-        Event::LocalMotion {
-            pos: Point::new(700.0, 0.0),
-            attempted: Point::new(0.0, -6.0),
-        },
-        &mut out,
-    );
+    let v = c.handle(now, local_at(700.0, 0.0, 0.0, -6.0), &mut out);
     assert_eq!(v, Verdict::Swallow);
     assert_eq!(c.active_peer(), Some(PC));
 }
@@ -293,12 +271,7 @@ fn captured_motion_moves_the_mac_cursor_in_its_units() {
     h.cross_to_mac(1920.0);
     h.take();
     // 30 native Windows px right, 15 down = 20 × 10 desk units = 20 × 10 Mac points.
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(30.0, 15.0),
-        },
-    );
+    h.step(8, captured(30.0, 15.0));
     assert_eq!(
         h.take(),
         [Action::Datagram {
@@ -315,12 +288,7 @@ fn captured_motion_moves_the_mac_cursor_in_its_units() {
 fn cursor_is_clamped_to_the_mac_screen() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(99999.0, 99999.0),
-        },
-    );
+    h.step(8, captured(99999.0, 99999.0));
     let Some(Action::Datagram {
         msg: Datagram::Motion { pos, .. },
         ..
@@ -335,33 +303,19 @@ fn cursor_is_clamped_to_the_mac_screen() {
 fn pushing_up_from_the_mac_returns_to_windows() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(0.0, 300.0),
-        },
-    ); // down into the Mac
+    h.step(8, captured(0.0, 300.0)); // down into the Mac
     h.take();
     // Up to the top edge, then keep pushing until the resistance is overcome.
     let mut actions = vec![];
     for _ in 0..10 {
-        h.step(
-            8,
-            Event::CapturedMotion {
-                delta: Point::new(0.0, -150.0),
-            },
-        );
+        h.step(8, captured(0.0, -150.0));
         actions.extend(h.take());
         if h.c.active_peer().is_none() {
             break;
         }
     }
     assert_eq!(h.c.active_peer(), None);
-    let release = actions.iter().rev().find_map(|a| match a {
-        Action::Release { warp } => Some(*warp),
-        _ => None,
-    });
-    let warp = release.expect("released capture");
+    let warp = released(&actions).expect("released capture");
     assert!(
         (warp.x - 1920.0).abs() < 1e-9,
         "same horizontal position: {warp:?}"
@@ -378,18 +332,8 @@ fn touching_the_mac_menu_bar_does_not_cross_back() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);
     // Reach the top edge and nudge a little: less than the push distance.
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(0.0, -10.0),
-        },
-    );
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(0.0, -15.0),
-        },
-    );
+    h.step(8, captured(0.0, -10.0));
+    h.step(8, captured(0.0, -15.0));
     assert_eq!(h.c.active_peer(), Some(MAC));
 }
 
@@ -397,60 +341,15 @@ fn touching_the_mac_menu_bar_does_not_cross_back() {
 fn keys_follow_the_cursor_and_releases_follow_their_press() {
     let mut h = Harness::new();
     // Shift pressed on Windows, then the cursor moves to the Mac while it's held.
-    assert_eq!(
-        h.step(
-            0,
-            Event::Key {
-                usage: usage::LEFT_SHIFT,
-                down: true
-            }
-        ),
-        Verdict::Pass
-    );
+    assert_eq!(h.step(0, key(usage::LEFT_SHIFT, true)), Verdict::Pass);
     h.cross_to_mac(1920.0);
     h.take();
-    assert_eq!(
-        h.step(
-            0,
-            Event::Key {
-                usage: A,
-                down: true
-            }
-        ),
-        Verdict::Swallow
-    );
+    assert_eq!(h.step(0, key(A, true)), Verdict::Swallow);
     // Windows' auto-repeat is swallowed and not forwarded; the Mac repeats by itself.
-    assert_eq!(
-        h.step(
-            30,
-            Event::Key {
-                usage: A,
-                down: true
-            }
-        ),
-        Verdict::Swallow
-    );
-    assert_eq!(
-        h.step(
-            0,
-            Event::Key {
-                usage: A,
-                down: false
-            }
-        ),
-        Verdict::Swallow
-    );
+    assert_eq!(h.step(30, key(A, true)), Verdict::Swallow);
+    assert_eq!(h.step(0, key(A, false)), Verdict::Swallow);
     // Shift was pressed locally, so its release goes to Windows.
-    assert_eq!(
-        h.step(
-            0,
-            Event::Key {
-                usage: usage::LEFT_SHIFT,
-                down: false
-            }
-        ),
-        Verdict::Pass
-    );
+    assert_eq!(h.step(0, key(usage::LEFT_SHIFT, false)), Verdict::Pass);
     assert_eq!(
         sent(&h.take()),
         [
@@ -472,20 +371,8 @@ fn remap_applies_to_keys_sent_to_the_mac() {
     h.c.set_remap(MAC, KeyRemap::windows_keyboard_on_mac());
     h.cross_to_mac(1920.0);
     h.take();
-    h.step(
-        0,
-        Event::Key {
-            usage: usage::LEFT_ALT,
-            down: true,
-        },
-    );
-    h.step(
-        0,
-        Event::Key {
-            usage: usage::LEFT_ALT,
-            down: false,
-        },
-    );
+    h.step(0, key(usage::LEFT_ALT, true));
+    h.step(0, key(usage::LEFT_ALT, false));
     assert_eq!(
         sent(&h.take()),
         [
@@ -506,16 +393,7 @@ fn clicks_carry_the_shared_cursor_position() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);
     h.take();
-    assert_eq!(
-        h.step(
-            0,
-            Event::Button {
-                button: Button::Left,
-                down: true
-            }
-        ),
-        Verdict::Swallow
-    );
+    assert_eq!(h.step(0, button(Button::Left, true)), Verdict::Swallow);
     assert_eq!(
         sent(&h.take()),
         [Control::Button {
@@ -532,22 +410,10 @@ fn no_switching_while_a_button_is_held() {
         push_distance: 0.0,
         ..Default::default()
     });
-    h.step(
-        0,
-        Event::Button {
-            button: Button::Left,
-            down: true,
-        },
-    );
+    h.step(0, button(Button::Left, true));
     assert_eq!(h.push_down(1920.0, 50.0), Verdict::Pass);
     assert_eq!(h.c.active_peer(), None);
-    h.step(
-        0,
-        Event::Button {
-            button: Button::Left,
-            down: false,
-        },
-    );
+    h.step(0, button(Button::Left, false));
     assert_eq!(h.push_down(1920.0, 50.0), Verdict::Swallow);
 }
 
@@ -561,40 +427,17 @@ fn carried_files_cross_with_the_button_held_and_drop_on_release() {
     assert_eq!(h.c.neighbor_at_edge(Point::new(1920.0, 2159.0)), Some(MAC));
     assert_eq!(h.c.neighbor_at_edge(Point::new(100.0, 2159.0)), None);
     // Left button down on a file, drag starts, the backend spots the files.
-    assert_eq!(
-        h.step(
-            0,
-            Event::Button {
-                button: Button::Left,
-                down: true
-            }
-        ),
-        Verdict::Pass
-    );
+    assert_eq!(h.step(0, button(Button::Left, true)), Verdict::Pass);
     h.step(0, Event::Carrying(Some(files.clone())));
     assert_eq!(
         h.push_down(1920.0, 10.0),
         Verdict::Swallow,
         "crosses despite the held button"
     );
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(30.0, 300.0),
-        },
-    );
+    h.step(8, captured(30.0, 300.0));
     h.take();
     // Releasing on the Mac drops the files there; Windows still sees its own release.
-    assert_eq!(
-        h.step(
-            0,
-            Event::Button {
-                button: Button::Left,
-                down: false
-            }
-        ),
-        Verdict::Pass
-    );
+    assert_eq!(h.step(0, button(Button::Left, false)), Verdict::Pass);
     assert_eq!(h.take(), [Action::Drop { to: MAC, files }]);
     assert!(!h.c.is_carrying());
 }
@@ -602,21 +445,9 @@ fn carried_files_cross_with_the_button_held_and_drop_on_release() {
 #[test]
 fn releasing_carried_files_back_home_drops_nothing() {
     let mut h = Harness::new();
-    h.step(
-        0,
-        Event::Button {
-            button: Button::Left,
-            down: true,
-        },
-    );
+    h.step(0, button(Button::Left, true));
     h.step(0, Event::Carrying(Some(vec!["a".into()])));
-    h.step(
-        0,
-        Event::Button {
-            button: Button::Left,
-            down: false,
-        },
-    );
+    h.step(0, button(Button::Left, false));
     assert!(h.take().is_empty());
     assert!(!h.c.is_carrying());
 }
@@ -630,6 +461,14 @@ fn mac_pointer(seq: u32, x: f64, y: f64) -> Event {
     }
 }
 
+/// Where the last release in `actions` puts the local cursor.
+fn released(actions: &[Action]) -> Option<Point> {
+    actions.iter().rev().find_map(|a| match a {
+        Action::Release { warp } => Some(*warp),
+        _ => None,
+    })
+}
+
 fn entered_at(actions: &[Action]) -> Option<Point> {
     sent(actions).into_iter().find_map(|m| match m {
         Control::Enter { pos, .. } => Some(pos),
@@ -641,19 +480,8 @@ fn entered_at(actions: &[Action]) -> Option<Point> {
 fn a_yield_parks_the_pointer_on_the_mac() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);
-    h.step(
-        0,
-        Event::Key {
-            usage: A,
-            down: true,
-        },
-    );
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(300.0, 300.0),
-        },
-    );
+    h.step(0, key(A, true));
+    h.step(8, captured(300.0, 300.0));
     h.take();
     h.step(0, Event::PeerYield(MAC));
     // The Mac's own trackpad has it: nothing goes back to Windows, and nothing is sent
@@ -661,16 +489,7 @@ fn a_yield_parks_the_pointer_on_the_mac() {
     assert_eq!(h.c.active_peer(), Some(MAC), "still over there, parked");
     assert!(h.take().is_empty());
     // The held key's release is swallowed and goes nowhere, and doesn't take over.
-    assert_eq!(
-        h.step(
-            0,
-            Event::Key {
-                usage: A,
-                down: false
-            }
-        ),
-        Verdict::Swallow
-    );
+    assert_eq!(h.step(0, key(A, false)), Verdict::Swallow);
     assert!(h.take().is_empty());
 }
 
@@ -687,12 +506,7 @@ fn parked_it_carries_on_from_where_the_macs_own_trackpad_left_the_pointer() {
     h.step(8, mac_pointer(1, 50.0, 50.0));
     assert!(h.take().is_empty());
     // Windows' mouse moves: it takes the pointer back from there, no jump.
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(15.0, 0.0),
-        },
-    );
+    h.step(8, captured(15.0, 0.0));
     let out = h.take();
     assert_eq!(entered_at(&out), Some(Point::new(500.0, 600.0)), "{out:?}");
     assert!(
@@ -710,14 +524,8 @@ fn parked_it_carries_on_from_where_the_macs_own_trackpad_left_the_pointer() {
 #[test]
 fn parked_a_key_or_click_takes_the_pointer_back_first() {
     for event in [
-        Event::Key {
-            usage: A,
-            down: true,
-        },
-        Event::Button {
-            button: Button::Left,
-            down: true,
-        },
+        key(A, true),
+        button(Button::Left, true),
         Event::Scroll(Scroll::Wheel { x: 0.0, y: -120.0 }),
     ] {
         let mut h = Harness::new();
@@ -769,13 +577,7 @@ fn after_taking_over_this_machine_reports_its_own_pointer_to_the_one_it_took_ove
     let mut h = Harness::new();
     // The Mac drove Windows, and Windows' own mouse took over.
     h.step(0, Event::YieldedTo(MAC));
-    h.step(
-        8,
-        Event::LocalMotion {
-            pos: Point::new(1000.0, 700.0),
-            attempted: Point::new(5.0, 0.0),
-        },
-    );
+    h.step(8, local_at(1000.0, 700.0, 5.0, 0.0));
     let out = h.take();
     assert!(
         matches!(
@@ -789,26 +591,14 @@ fn after_taking_over_this_machine_reports_its_own_pointer_to_the_one_it_took_ove
     );
     // Once the Mac drives Windows again it knows where the pointer is.
     h.step(0, Event::PeerEntered { peer: MAC, seq: 1 });
-    h.step(
-        8,
-        Event::LocalMotion {
-            pos: Point::new(1010.0, 700.0),
-            attempted: Point::new(5.0, 0.0),
-        },
-    );
+    h.step(8, local_at(1010.0, 700.0, 5.0, 0.0));
     assert!(h.take().is_empty());
 }
 
 #[test]
 fn a_report_of_the_macs_pointer_on_its_own_screen_parks_this_machine() {
     let mut h = Harness::new();
-    h.step(
-        8,
-        Event::LocalMotion {
-            pos: Point::new(1000.0, 700.0),
-            attempted: Point::new(1.0, 0.0),
-        },
-    );
+    h.step(8, local_at(1000.0, 700.0, 1.0, 0.0));
     // The Mac's own trackpad has the pointer, on the MacBook.
     h.step(8, mac_pointer(1, 300.0, 400.0));
     assert_eq!(h.c.active_peer(), Some(MAC));
@@ -817,12 +607,7 @@ fn a_report_of_the_macs_pointer_on_its_own_screen_parks_this_machine() {
         [Action::Capture],
         "hidden: there's one pointer, over there"
     );
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(0.0, 3.0),
-        },
-    );
+    h.step(8, captured(0.0, 3.0));
     assert_eq!(entered_at(&h.take()), Some(Point::new(300.0, 400.0)));
     // Reports from nowhere on the Mac's screens (out of date) are ignored.
     let mut h = Harness::new();
@@ -850,12 +635,7 @@ fn the_macs_pointer_on_its_extra_display_shows_on_the_portal() {
     // cursor hides, and this machine's mouse carries on from there.
     h.step(8, mac_pointer(2, 300.0, 400.0));
     assert_eq!(h.take(), [Action::Capture]);
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(0.0, 3.0),
-        },
-    );
+    h.step(8, captured(0.0, 3.0));
     assert_eq!(entered_at(&h.take()), Some(Point::new(300.0, 400.0)));
     // Parked on the Mac, its pointer moving onto the extra display brings it here.
     let mut h = with_portal();
@@ -907,12 +687,7 @@ fn motion_seq_increases_across_visits() {
     let mut seqs = vec![];
     for _ in 0..2 {
         h.cross_to_mac(1920.0);
-        h.step(
-            8,
-            Event::CapturedMotion {
-                delta: Point::new(3.0, 3.0),
-            },
-        );
+        h.step(8, captured(3.0, 3.0));
         h.step(0, Event::PeerYield(MAC));
         for a in h.take() {
             match a {
@@ -983,11 +758,11 @@ proptest! {
             let verdict = match op {
                 Op::PushDown(dy) => h.push_down(1920.0, dy),
                 Op::Move(x, y) if h.c.active_peer().is_some() => {
-                    h.step(8, Event::CapturedMotion { delta: Point::new(x, y) })
+                    h.step(8, captured(x, y))
                 }
                 Op::Move(..) => Verdict::Pass,
                 Op::Key(k, down) => {
-                    let v = h.step(1, Event::Key { usage: k, down });
+                    let v = h.step(1, key(k, down));
                     if v == Verdict::Pass {
                         if down {
                             local_down.insert(k);
@@ -997,7 +772,7 @@ proptest! {
                     }
                     v
                 }
-                Op::Button(down) => h.step(1, Event::Button { button: Button::Left, down }),
+                Op::Button(down) => h.step(1, button(Button::Left, down)),
                 Op::Yield => h.step(1, Event::PeerYield(MAC)),
                 Op::Lost => h.step(1, Event::PeerLost(MAC)),
                 Op::Wait(ms) => {
@@ -1035,7 +810,7 @@ proptest! {
         let mut h = Harness::new();
         h.cross_to_mac(1920.0);
         for (x, y) in moves {
-            h.step(8, Event::CapturedMotion { delta: Point::new(x, y) });
+            h.step(8, captured(x, y));
             for a in h.take() {
                 if let Action::Datagram { msg: Datagram::Motion { pos, .. }, .. } = a {
                     prop_assert!((0.0..1728.0).contains(&pos.x) && (0.0..1117.0).contains(&pos.y), "{pos:?}");
@@ -1103,64 +878,28 @@ fn input_over_the_portal_goes_to_the_mac_and_leaving_ends_it() {
     let mut h = with_portal();
     h.step(8, portal_at(Point::new(0.1, 0.1)));
     h.take();
-    let v = h.step(
-        0,
-        Event::Button {
-            button: Button::Left,
-            down: true,
-        },
-    );
+    let v = h.step(0, button(Button::Left, true));
     assert_eq!(v, Verdict::Swallow);
     assert!(matches!(
         &sent(&h.take())[..],
         [Control::Button { button: Button::Left, down: true, pos }] if *pos == Point::new(-1728.0, 108.0)
     ));
-    h.step(
-        0,
-        Event::Button {
-            button: Button::Left,
-            down: false,
-        },
-    );
-    let v = h.step(
-        0,
-        Event::Key {
-            usage: A,
-            down: true,
-        },
-    );
+    h.step(0, button(Button::Left, false));
+    let v = h.step(0, key(A, true));
     assert_eq!(v, Verdict::Swallow);
     h.take();
 
     // Off the picture (not dragging): the Mac is told, and this machine gets its input
     // back.
-    let v = h.step(
-        8,
-        Event::LocalMotion {
-            pos: Point::new(100.0, 100.0),
-            attempted: Point::new(-5.0, 0.0),
-        },
-    );
+    let v = h.step(8, local_at(100.0, 100.0, -5.0, 0.0));
     assert_eq!(v, Verdict::Pass);
     assert_eq!(sent(&h.take()), [Control::Leave]);
     assert_eq!(h.c.active_peer(), None);
     // What was pressed over the portal was released by the Mac; the releases go nowhere.
-    let v = h.step(
-        0,
-        Event::Key {
-            usage: A,
-            down: false,
-        },
-    );
+    let v = h.step(0, key(A, false));
     assert_eq!(v, Verdict::Swallow);
     assert!(h.take().is_empty());
-    let v = h.step(
-        0,
-        Event::Key {
-            usage: A,
-            down: true,
-        },
-    );
+    let v = h.step(0, key(A, true));
     assert_eq!(v, Verdict::Pass, "new keys are local");
 }
 
@@ -1225,22 +964,10 @@ fn dragging_off_the_portal_carries_on_on_the_mac() {
     let mut h = with_portal();
     // Near the right edge of the extra display, which is left of the MacBook's screen.
     h.step(8, portal_at(Point::new(0.99, 0.5)));
-    h.step(
-        0,
-        Event::Button {
-            button: Button::Left,
-            down: true,
-        },
-    );
+    h.step(0, button(Button::Left, true));
     h.take();
     // The pointer leaves the portal window while the button is held.
-    let v = h.step(
-        8,
-        Event::LocalMotion {
-            pos: Point::new(-1000.0, 1080.0),
-            attempted: Point::new(20.0, 0.0),
-        },
-    );
+    let v = h.step(8, local_at(-1000.0, 1080.0, 20.0, 0.0));
     assert_eq!(v, Verdict::Swallow);
     let out = h.take();
     assert!(out.contains(&Action::Capture), "{out:?}");
@@ -1255,13 +982,7 @@ fn dragging_off_the_portal_carries_on_on_the_mac() {
     );
     assert_eq!(h.c.active_peer(), Some(MAC));
     // Letting go drops it on the MacBook's screen.
-    let v = h.step(
-        0,
-        Event::Button {
-            button: Button::Left,
-            down: false,
-        },
-    );
+    let v = h.step(0, button(Button::Left, false));
     assert_eq!(v, Verdict::Swallow);
     assert!(matches!(
         &sent(&h.take())[..],
@@ -1277,21 +998,10 @@ fn dragging_off_the_portal_carries_on_on_the_mac() {
 fn moving_onto_the_extra_display_from_the_macbook_enters_the_portal() {
     let mut h = with_portal();
     h.cross_to_mac(1920.0);
-    h.step(
-        0,
-        Event::Button {
-            button: Button::Left,
-            down: true,
-        },
-    );
+    h.step(0, button(Button::Left, true));
     h.take();
     // Far enough left to leave the MacBook's screen for the extra display beside it.
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(-1500.0, 0.0),
-        },
-    );
+    h.step(8, captured(-1500.0, 0.0));
     let out = h.take();
     let at = out.iter().find_map(|a| match a {
         Action::EnterPortal { at } => Some(*at),
@@ -1302,16 +1012,7 @@ fn moving_onto_the_extra_display_from_the_macbook_enters_the_portal() {
     assert!(!sent(&out).contains(&Control::Leave));
     assert_eq!(h.c.active_peer(), Some(MAC));
     // The drag is still the Mac's.
-    assert_eq!(
-        h.step(
-            0,
-            Event::Button {
-                button: Button::Left,
-                down: false
-            }
-        ),
-        Verdict::Swallow
-    );
+    assert_eq!(h.step(0, button(Button::Left, false)), Verdict::Swallow);
 }
 
 #[test]
@@ -1357,51 +1058,23 @@ fn reported_to(actions: &[Action], to: MachineId) -> Vec<Point> {
 fn coming_home_from_the_mac_tells_it_where_the_pointer_went() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);
-    h.step(
-        8,
-        Event::CapturedMotion {
-            delta: Point::new(0.0, 300.0),
-        },
-    );
+    h.step(8, captured(0.0, 300.0));
     h.take();
     let mut actions = vec![];
     while h.c.active_peer().is_some() {
-        h.step(
-            8,
-            Event::CapturedMotion {
-                delta: Point::new(0.0, -150.0),
-            },
-        );
+        h.step(8, captured(0.0, -150.0));
         actions.extend(h.take());
     }
-    let warp = actions
-        .iter()
-        .find_map(|a| match a {
-            Action::Release { warp } => Some(*warp),
-            _ => None,
-        })
-        .unwrap();
+    let warp = released(&actions).unwrap();
     // Right away, so the Mac parks, and then as this machine's own mouse moves it: the
     // Mac's trackpad carries on from here, not from where this machine left its pointer.
     assert_eq!(reported_to(&actions, MAC), [warp]);
-    h.step(
-        8,
-        Event::LocalMotion {
-            pos: Point::new(-2000.0, 700.0),
-            attempted: Point::new(-3.0, 0.0),
-        },
-    );
+    h.step(8, local_at(-2000.0, 700.0, -3.0, 0.0));
     assert_eq!(reported_to(&h.take(), MAC), [Point::new(-2000.0, 700.0)]);
     // Until the Mac comes across again: then it knows.
     h.step(0, Event::PeerEntered { peer: MAC, seq: 50 });
     h.take();
-    h.step(
-        8,
-        Event::LocalMotion {
-            pos: Point::new(-2100.0, 700.0),
-            attempted: Point::new(-3.0, 0.0),
-        },
-    );
+    h.step(8, local_at(-2100.0, 700.0, -3.0, 0.0));
     assert!(reported_to(&h.take(), MAC).is_empty());
 }
 
@@ -1411,13 +1084,7 @@ fn off_the_portal_or_after_showing_the_macs_pointer_this_machines_mouse_is_repor
     let mut h = with_portal();
     h.step(8, portal_at(Point::new(0.5, 0.5)));
     h.take();
-    h.step(
-        8,
-        Event::LocalMotion {
-            pos: Point::new(100.0, 700.0),
-            attempted: Point::new(3.0, 0.0),
-        },
-    );
+    h.step(8, local_at(100.0, 700.0, 3.0, 0.0));
     let actions = h.take();
     assert!(sent(&actions).contains(&Control::Leave), "{actions:?}");
     assert_eq!(reported_to(&actions, MAC), [Point::new(100.0, 700.0)]);
@@ -1426,13 +1093,7 @@ fn off_the_portal_or_after_showing_the_macs_pointer_this_machines_mouse_is_repor
     let mut h = with_portal();
     h.step(8, mac_pointer(1, EXTRA.x + 100.0, EXTRA.y + 100.0));
     assert!(matches!(h.take()[..], [Action::ShowOnPortal { .. }]));
-    h.step(
-        8,
-        Event::LocalMotion {
-            pos: Point::new(100.0, 700.0),
-            attempted: Point::new(3.0, 0.0),
-        },
-    );
+    h.step(8, local_at(100.0, 700.0, 3.0, 0.0));
     assert_eq!(reported_to(&h.take(), MAC), [Point::new(100.0, 700.0)]);
 }
 
@@ -1492,13 +1153,7 @@ mod the_macs_extra_display {
     }
 
     fn push(h: &mut Harness, x: f64, y: f64, dx: f64, dy: f64) -> Verdict {
-        h.step(
-            8,
-            Event::LocalMotion {
-                pos: Point::new(x, y),
-                attempted: Point::new(dx, dy),
-            },
-        )
+        h.step(8, local_at(x, y, dx, dy))
     }
 
     fn near(p: Point, x: f64, y: f64) -> bool {
@@ -1553,30 +1208,14 @@ mod the_macs_extra_display {
         push(&mut h, DISPLAY.x, -540.0, -5.0, 0.0);
         h.take();
         // A little further onto the left monitor, then back.
-        h.step(
-            8,
-            Event::CapturedMotion {
-                delta: Point::new(-20.0, 0.0),
-            },
-        );
+        h.step(8, captured(-20.0, 0.0));
         assert_eq!(h.c.active_peer(), Some(PC));
         h.take();
-        h.step(
-            8,
-            Event::CapturedMotion {
-                delta: Point::new(25.0, 0.0),
-            },
-        );
+        h.step(8, captured(25.0, 0.0));
         assert_eq!(h.c.active_peer(), None);
         let actions = h.take();
         assert!(sent(&actions).contains(&Control::Leave), "{actions:?}");
-        let warp = actions
-            .iter()
-            .find_map(|a| match a {
-                Action::Release { warp } => Some(*warp),
-                _ => None,
-            })
-            .unwrap();
+        let warp = released(&actions).unwrap();
         // It entered just off the picture's edge, so it's 4⅓ desk units onto the picture:
         // 6.5 of the PC's pixels, 3.25 of the display's points.
         assert!(near(warp, DISPLAY.x + 3.25, -540.0), "{warp:?}");
@@ -1588,33 +1227,11 @@ mod the_macs_extra_display {
     fn dragging_on_the_pc_carries_on_across_the_picture() {
         let mut h = mac(Some(FULL_SCREEN));
         push(&mut h, DISPLAY.x, -540.0, -5.0, 0.0);
-        h.step(
-            8,
-            Event::Button {
-                button: Button::Left,
-                down: true,
-            },
-        );
-        h.step(
-            8,
-            Event::CapturedMotion {
-                delta: Point::new(40.0, 0.0),
-            },
-        );
+        h.step(8, button(Button::Left, true));
+        h.step(8, captured(40.0, 0.0));
         assert_eq!(h.c.active_peer(), Some(PC), "the drag was dropped");
-        h.step(
-            8,
-            Event::Button {
-                button: Button::Left,
-                down: false,
-            },
-        );
-        h.step(
-            8,
-            Event::CapturedMotion {
-                delta: Point::new(1.0, 0.0),
-            },
-        );
+        h.step(8, button(Button::Left, false));
+        h.step(8, captured(1.0, 0.0));
         assert_eq!(
             h.c.active_peer(),
             None,

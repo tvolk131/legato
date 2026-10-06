@@ -79,7 +79,7 @@ Table-driven tests on these fixtures check:
 
 ## 2. In-process network tests
 
-- Run two real iroh endpoints in one test, as in `spikes/iroh-probe`: a scripted fake `Capture` on one side and a recording fake `Emulate` on the other. Assert that the emulator received the exact expected sequence.
+- Run two real iroh endpoints in one test, as `legato-net`'s tests do: a scripted fake `Capture` on one side and a recording fake `Emulate` on the other. Assert that the emulator received the exact expected sequence.
 - **Fault injection** through an in-memory `Transport`:
   - drop, duplicate, reorder and delay datagrams
   - add jitter

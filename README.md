@@ -28,7 +28,6 @@ Push the cursor across the shared edge, and keep pushing a little past it. Touch
 
 - [RESEARCH.md](RESEARCH.md): feasibility research, architecture and decisions
 - [TESTING.md](TESTING.md): testing strategy
-- [spikes/](spikes/README.md): throwaway prototypes that verified the iroh and iced APIs
 
 ## License
 
