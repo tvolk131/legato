@@ -272,6 +272,9 @@ mod host {
             stream_width: stream.0,
             stream_height: stream.1,
             moving,
+            refresh: request
+                .fps
+                .clamp(1, *legato_core::extend::FRAME_RATES.last().unwrap_or(&60)),
             fps: request.fps.clamp(1, max_fps(pace.0, pace.1)),
             sharp_fps: max_fps(stream.0, stream.1),
             bitrate: request.bitrate.clamp(1_000_000, 200_000_000),
@@ -709,7 +712,7 @@ mod tests {
         let c = super::host::stream_config(request);
         assert_eq!((c.stream_width, c.stream_height), (3840, 2160));
         assert_eq!(c.moving, Some((1920, 1080)));
-        assert_eq!((c.fps, c.sharp_fps), (144, 60));
+        assert_eq!((c.refresh, c.fps, c.sharp_fps), (144, 144, 60));
         // A moving size no smaller than the stream is no moving track at all.
         let c = super::host::stream_config(legato_proto::ExtendRequest {
             stream_width: 1920,
@@ -722,6 +725,6 @@ mod tests {
             moving_height: 0,
             ..request
         });
-        assert_eq!((c.moving, c.fps), (None, 60));
+        assert_eq!((c.moving, c.refresh, c.fps), (None, 144, 60));
     }
 }

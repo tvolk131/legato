@@ -28,7 +28,10 @@ pub struct StreamConfig {
     pub stream_height: u32,
     /// Adaptive quality: the smaller size sent while much of the screen moves.
     pub moving: Option<(u32, u32)>,
-    /// The display's refresh rate, and the most frames sent a second.
+    /// The display's refresh rate.
+    pub refresh: u32,
+    /// The most frames sent a second: the refresh rate, or less if encoding can't keep
+    /// up at the stream size.
     pub fps: u32,
     /// With `moving`: the most frames a second at the stream size (it's slower to
     /// encode than the display runs).
@@ -42,7 +45,7 @@ impl StreamConfig {
             width: self.width,
             height: self.height,
             hidpi: self.hidpi,
-            refresh: self.fps as f64,
+            refresh: self.refresh as f64,
         }
     }
 }

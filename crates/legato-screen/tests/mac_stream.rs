@@ -46,6 +46,7 @@ fn a_virtual_display_streams_as_h264_on_one_track_or_two() {
         stream_width: 2560,
         stream_height: 1440,
         moving: Some((1280, 720)),
+        refresh: 60,
         fps: 60,
         sharp_fps: 30,
         bitrate: 20_000_000,
