@@ -3,6 +3,7 @@
 //! See Microsoft's "Supporting Direct3D 11 Video Decoding in Media Foundation".
 
 use anyhow::{Context, Result, ensure};
+use std::time::Instant;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::*;
@@ -15,6 +16,7 @@ use windows::core::Interface;
 
 use super::decode::{Layout, copy_nv12};
 use crate::Nv12;
+use crate::decode_timing::Timings;
 
 pub(super) struct Gpu {
     pub name: String,
@@ -72,7 +74,12 @@ impl Gpu {
         }
     }
 
-    pub fn read(&mut self, buffer: &IMFDXGIBuffer, layout: Layout) -> Result<Nv12> {
+    pub fn read(
+        &mut self,
+        buffer: &IMFDXGIBuffer,
+        layout: Layout,
+        timings: &mut Timings,
+    ) -> Result<Nv12> {
         // SAFETY: GetResource adds a reference for the requested texture interface.
         // The sample (held by the caller) keeps its array slice alive until the GPU
         // copy and blocking Map have finished. No surface is retained by the viewer.
@@ -124,11 +131,16 @@ impl Gpu {
                 ));
             }
             let staging = &self.staging.as_ref().unwrap().2;
+            // This is CPU wall time. Map can wait for queued video decoding as well
+            // as the staging copy; no extra Flush/query/wait changes the pipeline.
+            let started = Instant::now();
             self.context
                 .CopySubresourceRegion(staging, 0, 0, 0, 0, &texture, subresource, None);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.context
                 .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            timings.gpu_wait += started.elapsed();
+            let started = Instant::now();
             let result = (|| {
                 ensure!(!mapped.pData.is_null(), "empty hardware readback");
                 ensure!(mapped.RowPitch >= desc.Width, "invalid hardware row pitch");
@@ -148,6 +160,7 @@ impl Gpu {
                     desc.Height,
                 )
             })();
+            timings.cpu_copy += started.elapsed();
             self.context.Unmap(staging, 0);
             result
         }
