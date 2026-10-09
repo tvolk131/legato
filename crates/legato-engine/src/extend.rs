@@ -545,10 +545,13 @@ mod viewer {
                         Err(e) => {
                             tracing::debug!("{e:#}; asking for a keyframe");
                             synced = false;
-                            session.send(Control::Keyframe { track });
-                            if let Ok(fresh) = Decoder::new() {
-                                decoder = fresh;
+                            if let Err(reset) = decoder.reset_after_error(&e) {
+                                session.send(Control::ExtendStop {
+                                    reason: format!("couldn't restart video decoding: {reset:#}"),
+                                });
+                                break;
                             }
+                            session.send(Control::Keyframe { track });
                         }
                     }
                 }
