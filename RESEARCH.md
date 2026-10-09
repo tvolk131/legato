@@ -422,6 +422,10 @@ Built in `legato-screen` as planned below, with these choices:
 - **Desk matching:** the Mac moves its extra display, with `CGConfigureDisplayOrigin`, to the side of the MacBook where the viewer sits on the shared desk.
 - **Dragging between the Mac's screens:** moving between the viewer and the Mac's own screens is one continuous visit to the Mac, with held buttons kept held. Leaving the picture while dragging continues on the MacBook's screen, moving onto the extra display from the MacBook brings the Windows pointer out in the viewer, and a full-screen viewer can be pushed past its screen's edge towards the MacBook.
 - **Whose cursor you see:** always the one belonging to the machine whose screen it's on. The extra display is physically the PC's, so the PC's cursor shows on it even when the Mac's own trackpad moves the pointer there. The Mac reports its pointer's position (`Datagram::Pointer`), and the PC puts its own cursor at the same spot on the picture. That's a network hop behind, not the picture's latency. The picture still leaves the Mac's cursor out, so there's never a second, laggy one. The Mac's clicks and keys stay on the Mac.
+- **Newest picture only (0.3.0-alpha.26):** encoding used to run in ScreenCaptureKit's callback, with a capture queue of 5.
+  - At full 4K the encoder needs about 16 ms a frame, out of 16.7 at 60 fps. The queue filled, and every picture waited behind about 5 others: the viewer's stats showed the Mac's part steady at 84–88 ms, with 54 fps.
+  - Now capture only leaves the newest picture for an encoder thread, replacing one it hasn't taken yet, so nothing queues behind the encoder.
+  - The Mac logs each stage every 5 s while streaming: captured after appearing, waited for the encoder, encoded in, and skipped.
 - **Stats:** each frame carries the Mac's time on it, from appearing on screen to being sent. The viewer adds network, decode and display time and shows the total.
 
 The original plan:
