@@ -18,6 +18,7 @@ mod editor;
 mod icons;
 mod model;
 mod platform;
+mod restart;
 mod snap;
 mod tray;
 mod view;
@@ -1077,6 +1078,7 @@ pub(crate) fn app_theme(dark: bool) -> Theme {
 }
 
 fn main() -> iced::Result {
+    restart::wait_for_crashed_instance();
     platform::prefer_low_latency_presentation();
     let filter = tracing_subscriber::EnvFilter::try_from_env("LEGATO_LOG").unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(
@@ -1091,7 +1093,10 @@ fn main() -> iced::Result {
         .or_else(|| legato_net::store::default_dir().ok())
         .and_then(|dir| {
             std::fs::create_dir_all(&dir).ok()?;
-            std::fs::File::create(dir.join("legato-app.log")).ok()
+            // Keep the last run's log: after a crash, it's the one that says why.
+            let log = dir.join("legato-app.log");
+            let _ = std::fs::rename(&log, dir.join("legato-app.previous.log"));
+            std::fs::File::create(log).ok()
         });
     match log_file {
         Some(file) => tracing_subscriber::fmt()
@@ -1110,7 +1115,16 @@ fn main() -> iced::Result {
             thread.name().unwrap_or("unnamed")
         );
         report(info);
+        if thread.name() == Some("main") {
+            // That ends the app; start it again, so sharing carries on.
+            restart::after_crash();
+        }
     }));
+    // Debug builds only: crash here, for the restart test (tests/restart.rs).
+    if cfg!(debug_assertions) && std::env::var_os("LEGATO_TEST_CRASH").is_some() {
+        panic!("crashing for the restart test");
+    }
+    platform::log_gpus();
     platform::init();
 
     let engine = match runtime().block_on(Engine::start(home, VERSION)) {

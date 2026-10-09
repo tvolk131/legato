@@ -29,13 +29,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT,
     GetAncestor, GetCursorPos, GetForegroundWindow, GetMessageW, HHOOK, HWND_TOPMOST,
     KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG,
-    MSLLHOOKSTRUCT, PostThreadMessageW, RegisterClassW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    SetCursor, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL,
-    WINDOW_EX_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint, XBUTTON1,
+    MSLLHOOKSTRUCT, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostThreadMessageW, RegisterClassW,
+    SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetCursorPos, SetLayeredWindowAttributes,
+    SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_POWERBROADCAST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_XBUTTONDOWN,
+    WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP, WindowFromPoint, XBUTTON1,
 };
 use windows::core::w;
 
@@ -747,6 +748,16 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: default handling with the unchanged arguments.
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
+        }
+        // For the log: trouble after waking is easier to place.
+        WM_POWERBROADCAST => {
+            match wparam.0 as u32 {
+                PBT_APMSUSPEND => tracing::info!("This PC is going to sleep."),
+                PBT_APMRESUMEAUTOMATIC => tracing::info!("This PC woke from sleep."),
+                _ => {}
+            }
+            // SAFETY: default handling with the unchanged arguments.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_INPUT => {
             if let Some((dx, dy)) = read_raw_motion(HRAWINPUT(lparam.0 as *mut _)) {

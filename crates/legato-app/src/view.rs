@@ -56,7 +56,15 @@ pub fn root(m: &Model) -> Element<'_, Message> {
     );
     let main = modal(main, add_device_dialog(m), m.add_device_open);
     let main = modal(main, display_options_dialog(m), m.display_options_open);
-    iced_m3::focus::scope(modal(main, pairing_dialog(m), m.pairing_open))
+    let main = iced_m3::focus::scope(modal(main, pairing_dialog(m), m.pairing_open));
+    // Draws nothing; see `GpuErrors`. A layer on top, so it doesn't move anything.
+    iced::widget::stack![
+        main,
+        iced::widget::shader(crate::viewer::GpuErrors)
+            .width(1)
+            .height(1)
+    ]
+    .into()
 }
 
 /// The stats shown over the Mac's display: what's streaming, how far behind it is, and

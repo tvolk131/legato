@@ -29,6 +29,57 @@ pub fn take_worst_display_latency() -> Duration {
     Duration::from_micros(DISPLAY_MAX_US.swap(0, Ordering::Relaxed))
 }
 
+/// Logs GPU errors instead of crashing on them. wgpu treats an error nobody asked to
+/// handle as fatal, and iced doesn't ask; but some are recoverable, like a window's
+/// surface failing to resize while a PC that just woke is short on memory (iced then
+/// tries again on a later frame). iced only lets the app reach its GPU device from a
+/// shader, so this one draws nothing: its pipeline is made once per device, when it's
+/// first drawn, and that's when the handler goes in. It's in the main window, which is
+/// drawn before a viewer can be opened.
+pub struct GpuErrors;
+
+impl<Message> shader::Program<Message> for GpuErrors {
+    type State = ();
+    type Primitive = GpuErrorsPrimitive;
+
+    fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> Self::Primitive {
+        GpuErrorsPrimitive
+    }
+}
+
+#[derive(Debug)]
+pub struct GpuErrorsPrimitive;
+
+impl shader::Primitive for GpuErrorsPrimitive {
+    type Pipeline = GpuErrorsPipeline;
+
+    fn prepare(
+        &self,
+        _pipeline: &mut GpuErrorsPipeline,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _bounds: &Rectangle,
+        _viewport: &Viewport,
+    ) {
+    }
+}
+
+pub struct GpuErrorsPipeline;
+
+impl shader::Pipeline for GpuErrorsPipeline {
+    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, _format: wgpu::TextureFormat) -> Self {
+        log_gpu_errors(device);
+        Self
+    }
+}
+
+/// See [`GpuErrors`].
+fn log_gpu_errors(device: &wgpu::Device) {
+    device.on_uncaptured_error(std::sync::Arc::new(|error| {
+        tracing::error!("GPU error, carrying on: {error}");
+    }));
+}
+
 /// Draws the newest picture from its source, letterboxed into the widget's bounds.
 pub struct Picture(pub Source);
 
@@ -198,6 +249,8 @@ impl Textures {
 
 impl shader::Pipeline for Pipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        // In case no main window was drawn first (see [`GpuErrors`]).
+        log_gpu_errors(device);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("legato nv12"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),

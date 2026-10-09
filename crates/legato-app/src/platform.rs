@@ -32,6 +32,32 @@ pub fn show_in_dock(visible: bool) {
     let _ = visible;
 }
 
+/// Logs the graphics adapters Legato can draw with (name, kind, driver), for reports of
+/// drawing trouble.
+pub fn log_gpus() {
+    use iced::wgpu;
+    let backends = if cfg!(windows) {
+        wgpu::Backends::DX12
+    } else {
+        wgpu::Backends::METAL
+    };
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends,
+        ..Default::default()
+    });
+    for adapter in instance.enumerate_adapters(backends) {
+        let info = adapter.get_info();
+        tracing::info!(
+            "GPU: {} ({:?}, {:?}), driver {} {}",
+            info.name,
+            info.device_type,
+            info.backend,
+            info.driver,
+            info.driver_info
+        );
+    }
+}
+
 /// Shows each new frame at the next screen refresh, replacing any frame still waiting
 /// ("mailbox"), instead of queueing behind it as vsync does. It never tears. DirectX 12
 /// supports it on every Windows 10+ GPU, so it's used when there's a DX12 adapter;
