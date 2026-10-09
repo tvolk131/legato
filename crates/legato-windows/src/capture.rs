@@ -28,15 +28,15 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT,
     GetAncestor, GetCursorPos, GetForegroundWindow, GetMessageW, HHOOK, HWND_TOPMOST,
-    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG,
+    KBDLLHOOKSTRUCT, KillTimer, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG,
     MSLLHOOKSTRUCT, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostThreadMessageW, RegisterClassW,
     SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetCursorPos, SetLayeredWindowAttributes,
-    SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
+    SetTimer, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
     WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_POWERBROADCAST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_XBUTTONDOWN,
-    WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP, WindowFromPoint, XBUTTON1,
+    WM_POWERBROADCAST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WindowFromPoint, XBUTTON1,
 };
 use windows::core::w;
 
@@ -690,17 +690,32 @@ fn apply(effects: Vec<Effect>) {
 /// case the event passes through untouched.
 fn with_state(f: impl FnOnce(&mut State) -> (Verdict, Vec<Effect>)) -> Verdict {
     let result = STATE.with(|cell| match cell.try_borrow_mut() {
-        Ok(mut state) => state.as_mut().map(f),
+        Ok(mut state) => state.as_mut().map(|state| {
+            let done = f(state);
+            (
+                done,
+                state.controller.report_waiting().then_some(state.window),
+            )
+        }),
         Err(_) => None,
     });
     match result {
-        Some((verdict, effects)) => {
+        Some(((verdict, effects), report_timer)) => {
             apply(effects);
+            if let Some(window) = report_timer {
+                // (Re)started with every move, so it fires once moves stop.
+                // SAFETY: a timer on our own window.
+                unsafe { SetTimer(Some(window), REPORT_TIMER, 20, None) };
+            }
             verdict
         }
         None => Verdict::Pass,
     }
 }
+
+/// The timer that sends a pointer report the controller held back (see
+/// [`Controller::tick`]).
+const REPORT_TIMER: usize = 1;
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
@@ -750,6 +765,15 @@ unsafe extern "system" fn window_proc(
             }
         }
         // For the log: trouble after waking is easier to place.
+        WM_TIMER if wparam.0 == REPORT_TIMER => {
+            // SAFETY: our own timer on our own window.
+            let _ = unsafe { KillTimer(Some(hwnd), REPORT_TIMER) };
+            with_state(|s| {
+                s.controller.tick(Instant::now(), &mut s.out);
+                (Verdict::Pass, s.drain())
+            });
+            LRESULT(0)
+        }
         WM_POWERBROADCAST => {
             match wparam.0 as u32 {
                 PBT_APMSUSPEND => tracing::info!("This PC is going to sleep."),
