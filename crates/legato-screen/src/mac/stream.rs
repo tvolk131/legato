@@ -773,13 +773,22 @@ mod tests {
             wake: Condvar::new(),
             stages: outlet.stages.clone(),
         });
+        let pictures: Vec<_> = (0..8).map(|n| picture(w, h, n)).collect();
+        // A cold VideoToolbox start can take most of the measurement window on a
+        // hosted Mac. Complete its first encode before measuring steady-state
+        // backlog, and exclude that startup delay from the early/late comparison.
+        shared.on_picture(pictures[0].clone(), Instant::now(), 0.5);
+        assert!(
+            !delays.lock().unwrap().is_empty(),
+            "warm-up produced no frame"
+        );
+        delays.lock().unwrap().clear();
         let encoder = {
             let shared = shared.clone();
             std::thread::spawn(move || shared.encode_loop())
         };
         // Pictures prepared beforehand, then handed over every 2 ms (500 a second), each
         // stamped as appearing when it was due, as capture stamps them.
-        let pictures: Vec<_> = (0..8).map(|n| picture(w, h, n)).collect();
         let started = Instant::now();
         for n in 0..400u32 {
             let due = started + Duration::from_millis(2) * n;
