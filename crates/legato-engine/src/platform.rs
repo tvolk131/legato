@@ -44,6 +44,14 @@ mod imp {
     pub fn window_area(_window: u64) -> Option<legato_proto::Rect> {
         None
     }
+
+    pub use legato_macos::caps_lock;
+
+    pub fn set_caps_lock(on: bool) {
+        if let Err(e) = legato_macos::set_caps_lock(on) {
+            tracing::warn!("{e}");
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -80,6 +88,8 @@ mod imp {
     }
 
     pub use legato_windows::client_area as window_area;
+
+    pub use legato_windows::{caps_lock, set_caps_lock};
 }
 
 pub fn check_permissions() -> Result<()> {
@@ -97,6 +107,16 @@ pub fn clipboard_change_count() -> u64 {
 /// How the cursor looks to the OS, for the log (Windows only).
 pub fn cursor_state() -> Option<String> {
     imp::cursor_state()
+}
+
+/// Whether this machine's Caps Lock is on.
+pub fn caps_lock() -> bool {
+    imp::caps_lock()
+}
+
+/// Turns this machine's Caps Lock on or off, keyboard lights and all.
+pub fn set_caps_lock(on: bool) {
+    imp::set_caps_lock(on);
 }
 
 /// Where a window's contents are on the screen (native coordinates), where the OS says

@@ -160,6 +160,13 @@ This behaves like plugging the keyboard into the client. The client's own layout
 
 Rules for correctness:
 - **Modifier and lock sync.** The `Enter` message carries the server's modifier state and Caps/Num Lock, and the client reconciles its own state.
+  - What Legato does (0.3.0-alpha.23): connected machines share one Caps Lock, whether or not either is driving the other (`legato_core::locks`).
+  - Each machine reads its real Caps Lock ten times a second and tells its peers when it changes (`Control::CapsLock`). A machine that hears of a newer change sets its own, which updates its keyboard's light too.
+  - Changes carry a Lamport clock, so crossing changes end the same on both, with ties going to the lower endpoint id. On connecting, each announces its state.
+  - The Caps Lock key itself is never forwarded: it toggles the machine it's pressed on, and the sync carries it over.
+  - On macOS, the state is read from `CGEventSourceFlagsState` and set with IOKit's `IOHIDSetModifierLockState`. The activity tap ignores Caps-Lock-only flag changes, so a synced change doesn't count as the Mac being used.
+  - On Windows, the state is read with `GetKeyState` and set with a tagged Caps Lock press.
+  - Num Lock and Scroll Lock have no Mac counterpart, so they aren't shared.
 - **Auto-repeat has one owner.** The server drops OS-generated repeat events. Clients repeat held keys themselves:
   - macOS and Windows: injected held keys don't auto-repeat, so run a timer using the client's own repeat delay and rate (lan-mouse uses 500 ms / 32 ms).
   - X11 and Wayland: the display server or compositor already handles repeat.

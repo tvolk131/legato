@@ -969,6 +969,15 @@ impl Controller {
     }
 
     fn key(&mut self, usage: u16, down: bool, out: &mut Vec<Action>) -> Verdict {
+        // Caps Lock toggles the machine it's pressed on, and connected machines share it
+        // (see `crate::locks`): it isn't sent along, unless remapped to another key there.
+        let remapped = match self.current_route() {
+            Route::Peer(peer) => self.remaps.get(&peer).map_or(usage, |r| r.apply(usage)),
+            Route::Local | Route::Dropped => usage,
+        };
+        if usage == crate::keymap::usage::CAPS_LOCK && remapped == usage {
+            return Verdict::Pass;
+        }
         if down && !self.keys.contains_key(&usage) {
             self.resume(out);
         }

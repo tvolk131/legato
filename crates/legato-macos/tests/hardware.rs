@@ -482,3 +482,31 @@ fn typed_keys_carry_the_marks_a_mac_keyboard_puts_on_them() {
         "Control-← was typed without the function-key mark"
     );
 }
+
+/// Connected machines share Caps Lock: Legato reads this Mac's about ten times a second
+/// and sets it (light and all) to match a peer's.
+#[test]
+#[ignore = "toggles Caps Lock"]
+fn caps_lock_is_read_and_set() {
+    use legato_macos::{caps_lock, set_caps_lock};
+    let before = caps_lock();
+    let wait_for = |want: bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        // Read on another thread, as the engine does.
+        while std::time::Instant::now() < deadline {
+            if std::thread::spawn(caps_lock).join().unwrap() == want {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+    let set = set_caps_lock(!before);
+    let changed = set.is_ok() && wait_for(!before);
+    let _ = set_caps_lock(before);
+    let restored = wait_for(before);
+    eprintln!("Caps Lock was {before}; setting it: {set:?}, seen: {changed}, back: {restored}");
+    assert!(set.is_ok(), "{set:?}");
+    assert!(changed, "Caps Lock didn't turn {}", !before);
+    assert!(restored, "Caps Lock didn't turn back");
+}

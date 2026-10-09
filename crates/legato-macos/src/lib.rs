@@ -8,12 +8,14 @@ mod activity;
 mod capture;
 mod displays;
 mod inject;
+mod locks;
 mod permissions;
 
 pub use activity::ActivityMonitor;
 pub use capture::Capture;
 pub use displays::{cursor_position, screens};
 pub use inject::Injector;
+pub use locks::{caps_lock, set_caps_lock};
 pub use permissions::{Permissions, request_accessibility, request_missing};
 
 /// Written into the source-user-data field of every event we post, so our own event taps

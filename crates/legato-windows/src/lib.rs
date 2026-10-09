@@ -59,6 +59,21 @@ pub fn client_area(window: u64) -> Option<legato_proto::Rect> {
     }
 }
 
+/// Whether Caps Lock is on.
+pub fn caps_lock() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CAPITAL};
+    // SAFETY: no preconditions.
+    let state = unsafe { GetKeyState(i32::from(VK_CAPITAL.0)) };
+    state & 1 != 0
+}
+
+/// Turns Caps Lock on or off, lights and all, by pressing it if it isn't already.
+pub fn set_caps_lock(on: bool) {
+    if caps_lock() != on {
+        inject::press_caps_lock();
+    }
+}
+
 /// The window in front, which gets typing (for the log).
 pub fn foreground_app() -> Option<String> {
     // SAFETY: no preconditions.

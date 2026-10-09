@@ -129,7 +129,13 @@ pub(crate) async fn run(
     mut stop: oneshot::Receiver<()>,
 ) -> Result<()> {
     platform::check_permissions()?;
-    let own_id = ctx.engine.net().id().to_string();
+    let me = ctx.engine.net().id();
+    let own_id = me.to_string();
+    // Connected machines share one Caps Lock: watch this machine's, and set it to match
+    // a peer's newer change.
+    let mut caps = legato_core::locks::CapsLock::new(platform::caps_lock());
+    let mut caps_check = tokio::time::interval(std::time::Duration::from_millis(100));
+    caps_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut config = ctx.config.borrow_and_update().clone();
 
     // Being driven: inject on a thread of its own.
@@ -294,6 +300,13 @@ pub(crate) async fn run(
     loop {
         tokio::select! {
             _ = &mut stop => break,
+            _ = caps_check.tick() => {
+                if let Some(msg) = caps.local(platform::caps_lock()) {
+                    for p in peers.values() {
+                        p.session.send(msg.clone());
+                    }
+                }
+            }
             changed = ctx.config.changed() => {
                 if changed.is_err() {
                     break;
@@ -436,6 +449,7 @@ pub(crate) async fn run(
                             screens: session.remote.screens.clone(),
                         });
                         session.send(Control::ControlMode(control_mode(&config)));
+                        session.send(caps.announce());
                         sessions.write().unwrap().insert(machine, session.clone());
                         by_peer.write().unwrap().insert(session.peer, session.clone());
                         peers.insert(machine, Peer {
@@ -473,6 +487,13 @@ pub(crate) async fn run(
                                 }
                                 ctx.status(Status::PeerPlacedUs { id: peer, offset });
                                 layout_now = relayout(&peers, &config, &ctx);
+                            }
+                            Control::CapsLock { on, clock } => {
+                                // Ties go to the machine with the lower id.
+                                let peer_first = peer.as_bytes() < me.as_bytes();
+                                if let Some(on) = caps.remote(on, clock, peer_first) {
+                                    platform::set_caps_lock(on);
+                                }
                             }
                             Control::ControlMode(mode) => {
                                 if mode.updated_at > config.control.updated_at {

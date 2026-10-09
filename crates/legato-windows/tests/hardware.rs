@@ -1328,3 +1328,55 @@ fn the_pcs_cursor_follows_the_macs_own_pointer_on_its_display() {
     drop(capture);
     drop(viewer);
 }
+
+/// Connected machines share Caps Lock: Legato reads this PC's on a background thread that
+/// handles no input itself, about ten times a second, and sets it to match a peer's.
+/// Both have to see and change the real, system-wide state.
+#[test]
+#[ignore = "toggles Caps Lock"]
+fn caps_lock_is_read_and_set_system_wide() {
+    use legato_windows::{caps_lock, set_caps_lock};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let before = caps_lock();
+    // A long-lived reader, like the engine's checks.
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel();
+    let reader = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                let _ = tx.send(caps_lock());
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+    let wait_for = |want: bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if rx.recv_timeout(Duration::from_millis(100)) == Ok(want) {
+                return true;
+            }
+        }
+        false
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    set_caps_lock(!before);
+    let changed = wait_for(!before);
+    set_caps_lock(before);
+    let restored = wait_for(before);
+    stop.store(true, Ordering::SeqCst);
+    let _ = reader.join();
+    eprintln!("Caps Lock was {before}; the reader saw it change: {changed}, and back: {restored}");
+    assert!(
+        changed,
+        "a background reader didn't see Caps Lock turn {}",
+        !before
+    );
+    assert!(
+        restored,
+        "a background reader didn't see Caps Lock turn back"
+    );
+    assert_eq!(caps_lock(), before);
+}
