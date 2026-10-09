@@ -1108,6 +1108,39 @@ fn coming_home_from_the_mac_tells_it_where_the_pointer_went() {
 }
 
 #[test]
+fn reports_to_the_machine_taken_over_from_keep_pace_and_end_with_the_latest() {
+    let mut h = Harness::new();
+    h.step(0, Event::YieldedTo(MAC));
+    // A 1000 Hz mouse: a move every millisecond, for 40 ms.
+    let mut reports = vec![];
+    for i in 0..40 {
+        h.step(1, local_at(-2000.0 + f64::from(i), 700.0, 1.0, 0.0));
+        reports.extend(reported_to(&h.take(), MAC));
+    }
+    assert!(
+        (2..=3).contains(&reports.len()),
+        "about one every 16 ms: {reports:?}"
+    );
+    assert!(h.c.report_waiting());
+    // Not due yet: nothing.
+    h.c.tick(h.now, &mut h.out);
+    assert!(h.take().is_empty());
+    // Once due, the latest position: where the pointer stopped.
+    h.now += Duration::from_millis(16);
+    h.c.tick(h.now, &mut h.out);
+    assert_eq!(reported_to(&h.take(), MAC), [Point::new(-1961.0, 700.0)]);
+    assert!(!h.c.report_waiting());
+    // If the Mac came across meanwhile, it knows where the pointer is: nothing is sent.
+    h.step(1, local_at(-1900.0, 700.0, 1.0, 0.0));
+    h.step(1, local_at(-1899.0, 700.0, 1.0, 0.0));
+    h.step(0, Event::PeerEntered { peer: MAC, seq: 99 });
+    h.take();
+    h.now += Duration::from_millis(20);
+    h.c.tick(h.now, &mut h.out);
+    assert!(reported_to(&h.take(), MAC).is_empty());
+}
+
+#[test]
 fn off_the_portal_or_after_showing_the_macs_pointer_this_machines_mouse_is_reported() {
     // Leaving the picture: the pointer's back on this machine.
     let mut h = with_portal();

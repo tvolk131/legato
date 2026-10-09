@@ -290,7 +290,16 @@ pub struct Controller {
     last_local: Point,
     /// The local pointer was last on the shown display.
     on_shown: bool,
+    /// When this machine's pointer was last reported to its [`Self::watcher`].
+    last_report: Option<Instant>,
+    /// A report to the watcher held back to keep to [`REPORT_EVERY`], for [`Self::tick`].
+    report_waiting: Option<(MachineId, Point)>,
 }
+
+/// How often, at most, this machine's pointer is reported to the machine it took over
+/// from. That one only needs it current when someone picks up its mouse, so this needn't
+/// keep up with a 1000 Hz mouse; the latest position follows when moves stop.
+const REPORT_EVERY: Duration = Duration::from_millis(16);
 
 impl Controller {
     pub fn new(config: ControllerConfig, layout: Layout) -> Self {
@@ -310,6 +319,8 @@ impl Controller {
             pointer_seq: HashMap::new(),
             last_local: Point::default(),
             on_shown: false,
+            last_report: None,
+            report_waiting: None,
         }
     }
 
@@ -620,24 +631,30 @@ impl Controller {
         let on_shown = self.shown.filter(|s| s.display.contains(pos));
         // Just off it, the peer that shows it hears once more, to stop showing it.
         let left_shown = std::mem::replace(&mut self.on_shown, on_shown.is_some());
-        // Tell the peer that shows this display, and the one this machine last took over
-        // from, where this machine's own pointer is: it's theirs to show, or to carry on
-        // from.
-        let told: Vec<MachineId> = on_shown
+        // The peer that shows this display hears where this machine's own pointer is on it
+        // with every move: it shows its cursor there.
+        let shown_peer = on_shown
             .or(self.shown.filter(|_| left_shown))
-            .map(|s| s.peer)
-            .into_iter()
-            .chain(self.watcher)
-            .collect();
-        for (i, &to) in told.iter().enumerate() {
-            if told[..i].contains(&to) {
-                continue;
+            .map(|s| s.peer);
+        if let Some(to) = shown_peer {
+            self.report(to, pos, out);
+        }
+        // The one this machine last took over from hears too, to carry on from here; at
+        // most every REPORT_EVERY, the latest following from `tick`.
+        match self.watcher.filter(|&w| Some(w) != shown_peer) {
+            Some(to)
+                if self
+                    .last_report
+                    .is_some_and(|t| now.saturating_duration_since(t) < REPORT_EVERY) =>
+            {
+                self.report_waiting = Some((to, pos));
             }
-            self.seq = self.seq.wrapping_add(1);
-            out.push(Action::Datagram {
-                to,
-                msg: Datagram::Pointer { seq: self.seq, pos },
-            });
+            Some(to) => {
+                self.report(to, pos, out);
+                self.last_report = Some(now);
+                self.report_waiting = None;
+            }
+            None => self.report_waiting = None,
         }
         if let Some(shown) = on_shown {
             // On a display a peer shows: the pointer stays this machine's, unless it's
@@ -784,11 +801,41 @@ impl Controller {
         self.watcher = Some(peer);
         self.last_local = pos;
         self.on_shown = self.shown.is_some_and(|s| s.display.contains(pos));
+        self.report(peer, pos, out);
+    }
+
+    /// Tells `to` where this machine's own pointer is (`pos`, local native).
+    fn report(&mut self, to: MachineId, pos: Point, out: &mut Vec<Action>) {
         self.seq = self.seq.wrapping_add(1);
         out.push(Action::Datagram {
-            to: peer,
+            to,
             msg: Datagram::Pointer { seq: self.seq, pos },
         });
+    }
+
+    /// Whether a report is being held back, for [`Self::tick`]: the backend should call
+    /// it within about 20 ms.
+    pub fn report_waiting(&self) -> bool {
+        self.report_waiting.is_some()
+    }
+
+    /// Sends a report held back to keep to [`REPORT_EVERY`], once it's due: the latest
+    /// position, after moves stop. Dropped if the pointer has since changed hands.
+    pub fn tick(&mut self, now: Instant, out: &mut Vec<Action>) {
+        let Some((to, pos)) = self.report_waiting else {
+            return;
+        };
+        if self
+            .last_report
+            .is_some_and(|t| now.saturating_duration_since(t) < REPORT_EVERY)
+        {
+            return;
+        }
+        self.report_waiting = None;
+        if self.watcher == Some(to) && matches!(self.state, State::Local) {
+            self.last_report = Some(now);
+            self.report(to, pos, out);
+        }
     }
 
     /// Whether a mouse button pressed on `peer` is still held (e.g. dragging a window).

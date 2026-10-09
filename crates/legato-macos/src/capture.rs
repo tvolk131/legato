@@ -502,6 +502,11 @@ fn run(state: TapState, ready: mpsc::Sender<Result<SendRunLoop, &'static str>>) 
 unsafe extern "C-unwind" fn timer_callback(_timer: *mut CFRunLoopTimer, info: *mut c_void) {
     // SAFETY: `info` is the TapState, used only on this thread.
     let state = unsafe { &mut *info.cast::<TapState>() };
+    // A pointer report held back to keep pace, now due (see `Controller::tick`).
+    if state.controller.report_waiting() {
+        state.controller.tick(Instant::now(), &mut state.out);
+        state.apply();
+    }
     if !state.drain_commands() {
         state.set_hidden(false);
         if let Some(rl) = CFRunLoop::current() {

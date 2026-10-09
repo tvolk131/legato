@@ -1380,3 +1380,65 @@ fn caps_lock_is_read_and_set_system_wide() {
     );
     assert_eq!(caps_lock(), before);
 }
+
+/// After this PC's own mouse takes over from the Mac, the Mac hears where this PC's
+/// pointer is: about 60 times a second however fast the mouse reports, and where it
+/// stopped once it stops (sent by a timer, as no move comes after the last).
+#[test]
+#[ignore = "moves the cursor"]
+fn this_pcs_pointer_is_reported_at_a_pace_ending_where_it_stopped() {
+    let local = screens();
+    let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
+    let (layout, _) = peer_to_the_right(&local, 1512.0, 982.0);
+    let (capture, rx) = start_capture(ControllerConfig::default(), layout);
+    capture.send(Command::Event(Event::YieldedTo(PEER)));
+    unsafe { SetCursorPos(primary.center().x as i32, primary.center().y as i32).unwrap() };
+    mouse_move(1, 0);
+    std::thread::sleep(Duration::from_millis(100));
+    let _ = rx.try_iter().count();
+
+    // 50 moves at once, as a fast mouse sends them.
+    let moves: Vec<INPUT> = (0..50)
+        .map(|_| INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 2,
+                    dy: 0,
+                    dwFlags: MOUSEEVENTF_MOVE,
+                    ..Default::default()
+                },
+            },
+        })
+        .collect();
+    send(&moves);
+    std::thread::sleep(Duration::from_millis(200));
+    let stopped = cursor();
+    let reports: Vec<legato_proto::Point> = rx
+        .try_iter()
+        .filter_map(|a| match a {
+            Action::Datagram {
+                to: PEER,
+                msg: legato_proto::Datagram::Pointer { pos, .. },
+            } => Some(pos),
+            _ => None,
+        })
+        .collect();
+    drop(capture);
+    eprintln!(
+        "50 moves, {} reports, the last {:?}; stopped at {stopped:?}",
+        reports.len(),
+        reports.last()
+    );
+    assert!(
+        !reports.is_empty() && reports.len() < 10,
+        "{} reports for 50 moves",
+        reports.len()
+    );
+    let last = reports.last().unwrap();
+    assert!(
+        (last.x - f64::from(stopped.x)).abs() <= 1.0
+            && (last.y - f64::from(stopped.y)).abs() <= 1.0,
+        "the last report {last:?} isn't where the pointer stopped, {stopped:?}"
+    );
+}
