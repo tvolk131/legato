@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -53,6 +53,13 @@ impl StreamConfig {
 /// Where encoded frames go, whichever encoder made them.
 type Sink = Arc<Mutex<Box<dyn FnMut(EncodedFrame) + Send>>>;
 
+/// Where encoders' frames go, and where their timings are counted.
+#[derive(Clone)]
+struct Outlet {
+    sink: Sink,
+    stages: Arc<Mutex<Stages>>,
+}
+
 /// Overlap frames when they're expected to take more than this share of their budget
 /// (about 2 ns per pixel on Apple silicon: 4K at 60 fps, 1440p at 120).
 const OVERLAP_ABOVE: f64 = 0.6;
@@ -87,9 +94,10 @@ struct Encoding {
     last_encode: Option<Instant>,
     /// The encoder's dropped-frame count already reported.
     dropped_seen: u32,
-    /// When each picture handed to the encoder appeared on the display, by timestamp:
-    /// with frames overlapping, the one coming out isn't the one just handed in.
-    shown_at: Arc<Mutex<VecDeque<(Duration, Instant)>>>,
+    /// When each picture handed to the encoder appeared on the display, and when it was
+    /// handed in, by timestamp: with frames overlapping, the one coming out isn't the one
+    /// just handed in.
+    shown_at: Arc<Mutex<VecDeque<(Duration, Instant, Instant)>>>,
 }
 
 impl Encoding {
@@ -101,11 +109,12 @@ impl Encoding {
         bitrate: u32,
         never_overlap: bool,
         extra: Duration,
-        sink: &Sink,
+        outlet: &Outlet,
     ) -> Result<Self> {
-        let shown_at: Arc<Mutex<VecDeque<(Duration, Instant)>>> = Arc::default();
+        let shown_at: Arc<Mutex<VecDeque<(Duration, Instant, Instant)>>> = Arc::default();
         let encoder = {
-            let (sink, shown_at) = (sink.clone(), shown_at.clone());
+            let (sink, shown_at, stages) =
+                (outlet.sink.clone(), shown_at.clone(), outlet.stages.clone());
             Encoder::new(
                 EncoderConfig {
                     width,
@@ -116,13 +125,14 @@ impl Encoding {
                 move |frame| match frame {
                     Ok(mut frame) => {
                         let mut shown = shown_at.lock().unwrap();
-                        while let Some(&(pts, at)) = shown.front() {
+                        while let Some(&(pts, at, submitted)) = shown.front() {
                             if pts > frame.pts {
                                 break;
                             }
                             shown.pop_front();
                             if pts == frame.pts {
                                 frame.shown_at = Some(at);
+                                stages.lock().unwrap().encoded(submitted.elapsed());
                             }
                         }
                         drop(shown);
@@ -161,7 +171,10 @@ impl Encoding {
         shown_at: Instant,
         started: Instant,
     ) -> Result<()> {
-        self.shown_at.lock().unwrap().push_back((pts, shown_at));
+        self.shown_at
+            .lock()
+            .unwrap()
+            .push_back((pts, shown_at, Instant::now()));
         let continuous = self.last_encode.is_some_and(|t| {
             started.saturating_duration_since(t) < self.interval.mul_f64(CONTINUOUS)
         });
@@ -242,7 +255,7 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    fn new(config: StreamConfig, sink: &Sink) -> Result<Self> {
+    fn new(config: StreamConfig, outlet: &Outlet) -> Result<Self> {
         let stream_size = (config.stream_width, config.stream_height);
         let (sharp, moving, policy) = match config.moving {
             Some(size) => {
@@ -254,7 +267,7 @@ impl Pipeline {
                     config.bitrate,
                     true,
                     Duration::ZERO,
-                    sink,
+                    outlet,
                 )?;
                 let moving = Moving {
                     encoding: Encoding::new(
@@ -264,7 +277,7 @@ impl Pipeline {
                         config.bitrate,
                         false,
                         SCALE_COST,
-                        sink,
+                        outlet,
                     )?,
                     scaler: Scaler::new(size.0, size.1)?,
                 };
@@ -278,7 +291,7 @@ impl Pipeline {
                     config.bitrate,
                     false,
                     Duration::ZERO,
-                    sink,
+                    outlet,
                 )?;
                 (sharp, None, Policy::fixed())
             }
@@ -314,6 +327,100 @@ struct Shared {
     /// Pictures skipped (or dropped by an encoder) since the viewer last heard.
     missed: AtomicU32,
     stop: AtomicBool,
+    /// The newest captured picture not yet taken by the encoder thread. Capture only
+    /// drops pictures here, so none queue behind the encoder: a newer one replaces one
+    /// still waiting.
+    inbox: Mutex<Option<Waiting>>,
+    /// Wakes the encoder thread for a new picture.
+    wake: Condvar,
+    stages: Arc<Mutex<Stages>>,
+}
+
+/// A captured picture waiting for the encoder thread.
+struct Waiting {
+    image: CFRetained<CVPixelBuffer>,
+    shown_at: Instant,
+    /// How much of the screen changed, since the last picture the encoder took.
+    changed: f64,
+    /// When capture handed it over.
+    arrived: Instant,
+}
+// SAFETY: pixel buffers are reference counted and safe to hand between threads.
+unsafe impl Send for Waiting {}
+
+/// How long pictures spend on each stage on this Mac, logged now and then while
+/// streaming: from appearing on the display to capture handing them over, waiting for
+/// the encoder, and encoding (including any time left in flight).
+#[derive(Debug)]
+struct Stages {
+    since: Instant,
+    captured: Timing,
+    waited: Timing,
+    encoded: Timing,
+    skipped: u32,
+}
+
+/// Total, worst and count of one stage's times.
+#[derive(Debug, Default, Clone, Copy)]
+struct Timing {
+    total: Duration,
+    worst: Duration,
+    count: u32,
+}
+
+impl Timing {
+    fn add(&mut self, time: Duration) {
+        self.total += time;
+        self.worst = self.worst.max(time);
+        self.count += 1;
+    }
+
+    /// "average (worst)", in milliseconds.
+    fn summary(&self) -> String {
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let average = ms(self.total) / f64::from(self.count.max(1));
+        format!("{average:.0} ms (worst {:.0})", ms(self.worst))
+    }
+}
+
+/// How often [`Stages`] are logged.
+const STAGES_EVERY: Duration = Duration::from_secs(5);
+
+impl Stages {
+    fn new() -> Self {
+        Self {
+            since: Instant::now(),
+            captured: Timing::default(),
+            waited: Timing::default(),
+            encoded: Timing::default(),
+            skipped: 0,
+        }
+    }
+
+    fn encoded(&mut self, time: Duration) {
+        self.encoded.add(time);
+    }
+
+    /// Every [`STAGES_EVERY`], a line for the log, if any picture came; starts over.
+    fn report(&mut self) -> Option<String> {
+        if self.since.elapsed() < STAGES_EVERY {
+            return None;
+        }
+        let line = (self.captured.count > 0).then(|| {
+            format!(
+                "Extra display, last {:.0} s: {} pictures. Captured {} after appearing, \
+                 waited {} for the encoder, encoded in {}; {} skipped as newer ones came.",
+                self.since.elapsed().as_secs_f64(),
+                self.captured.count,
+                self.captured.summary(),
+                self.waited.summary(),
+                self.encoded.summary(),
+                self.skipped
+            )
+        });
+        *self = Self::new();
+        line
+    }
 }
 
 impl Shared {
@@ -355,6 +462,61 @@ impl Shared {
             p.sharp.newly_dropped() + p.moving.as_mut().map_or(0, |m| m.encoding.newly_dropped());
         if dropped > 0 {
             self.missed.fetch_add(dropped, Ordering::Relaxed);
+        }
+    }
+
+    /// From capture: leaves the picture for the encoder thread, replacing one it hasn't
+    /// taken yet, and returns at once, so capture never waits on encoding.
+    fn deliver(&self, image: CFRetained<CVPixelBuffer>, shown_at: Instant, changed: f64) {
+        let arrived = Instant::now();
+        let mut stages = self.stages.lock().unwrap();
+        stages
+            .captured
+            .add(arrived.saturating_duration_since(shown_at));
+        let mut inbox = self.inbox.lock().unwrap();
+        let changed = match inbox.take() {
+            Some(older) => {
+                // The encoder hasn't got to it: this newer picture replaces it, and
+                // carries what changed in it, for the adaptive policy.
+                stages.skipped += 1;
+                self.missed.fetch_add(1, Ordering::Relaxed);
+                (older.changed + changed).min(1.0)
+            }
+            None => changed,
+        };
+        *inbox = Some(Waiting {
+            image,
+            shown_at,
+            changed,
+            arrived,
+        });
+        drop((inbox, stages));
+        self.wake.notify_one();
+    }
+
+    /// The encoder thread: encodes the newest picture whenever there is one, and every
+    /// [`TICK`] sends frames left in flight and sharpens a still screen.
+    fn encode_loop(&self) {
+        let mut last_tick = Instant::now();
+        while !self.stop.load(Ordering::Relaxed) {
+            let waiting = {
+                let mut inbox = self.inbox.lock().unwrap();
+                if inbox.is_none() {
+                    inbox = self.wake.wait_timeout(inbox, TICK).unwrap().0;
+                }
+                inbox.take()
+            };
+            if let Some(w) = waiting {
+                self.stages.lock().unwrap().waited.add(w.arrived.elapsed());
+                self.on_picture(w.image, w.shown_at, w.changed);
+            }
+            if last_tick.elapsed() >= TICK {
+                last_tick = Instant::now();
+                self.on_tick();
+            }
+            if let Some(line) = self.stages.lock().unwrap().report() {
+                tracing::info!("{line}");
+            }
         }
     }
 
@@ -405,7 +567,7 @@ pub struct DisplayStream {
     ticker: Option<std::thread::JoinHandle<()>>,
     shared: Arc<Shared>,
     display: VirtualDisplay,
-    sink: Sink,
+    outlet: Outlet,
     config: Mutex<StreamConfig>,
 }
 
@@ -419,12 +581,19 @@ impl DisplayStream {
     ) -> Result<Self> {
         let sink: Sink = Arc::new(Mutex::new(Box::new(on_frame)));
         let display = VirtualDisplay::create(name, config.mode())?;
+        let outlet = Outlet {
+            sink,
+            stages: Arc::new(Mutex::new(Stages::new())),
+        };
         let shared = Arc::new(Shared {
-            pipeline: Mutex::new(Pipeline::new(config, &sink)?),
+            pipeline: Mutex::new(Pipeline::new(config, &outlet)?),
             start: Instant::now(),
             backlogged: [AtomicBool::new(false), AtomicBool::new(false)],
             missed: AtomicU32::new(0),
             stop: AtomicBool::new(false),
+            inbox: Mutex::new(None),
+            wake: Condvar::new(),
+            stages: outlet.stages.clone(),
         });
         let capture = {
             let shared = shared.clone();
@@ -433,26 +602,21 @@ impl DisplayStream {
                 config.stream_width,
                 config.stream_height,
                 config.fps,
-                move |frame| shared.on_picture(frame.image, frame.shown_at, frame.changed),
+                move |frame| shared.deliver(frame.image, frame.shown_at, frame.changed),
             )?
         };
         let ticker = {
             let shared = shared.clone();
             std::thread::Builder::new()
-                .name("legato-encode-tick".into())
-                .spawn(move || {
-                    while !shared.stop.load(Ordering::Relaxed) {
-                        std::thread::sleep(TICK);
-                        shared.on_tick();
-                    }
-                })?
+                .name("legato-encode".into())
+                .spawn(move || shared.encode_loop())?
         };
         Ok(Self {
             capture,
             ticker: Some(ticker),
             shared,
             display,
-            sink,
+            outlet,
             config: Mutex::new(config),
         })
     }
@@ -478,7 +642,7 @@ impl DisplayStream {
         {
             let mut p = self.shared.pipeline.lock().unwrap();
             let last_pts = p.last_pts;
-            *p = Pipeline::new(config, &self.sink)?;
+            *p = Pipeline::new(config, &self.outlet)?;
             p.last_pts = last_pts;
         }
         self.capture
@@ -517,8 +681,143 @@ impl DisplayStream {
 impl Drop for DisplayStream {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.wake.notify_all();
         if let Some(ticker) = self.ticker.take() {
             let _ = ticker.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An NV12 picture backed by an IOSurface, like ScreenCaptureKit's, different for
+    /// each `n`.
+    fn picture(w: usize, h: usize, n: usize) -> CFRetained<CVPixelBuffer> {
+        use objc2_core_foundation::{CFDictionary, CFString, CFType};
+        use objc2_core_video::*;
+        use std::ptr::NonNull;
+        // SAFETY: creates and fills an NV12 buffer of the right size.
+        unsafe {
+            let mut out = std::ptr::null_mut();
+            let empty = CFDictionary::<CFString, CFType>::from_slices(&[], &[]);
+            let attributes = CFDictionary::<CFString, CFType>::from_slices(
+                &[kCVPixelBufferIOSurfacePropertiesKey],
+                &[&**empty.as_opaque()],
+            );
+            let status = CVPixelBufferCreate(
+                None,
+                w,
+                h,
+                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                Some(attributes.as_opaque()),
+                NonNull::from(&mut out),
+            );
+            assert_eq!(status, 0);
+            let buffer = CFRetained::from_raw(NonNull::new(out).unwrap());
+            CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags(0));
+            for (plane, rows) in [(0, h), (1, h / 2)] {
+                let base = CVPixelBufferGetBaseAddressOfPlane(&buffer, plane) as *mut u8;
+                let stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, plane);
+                for row in 0..rows {
+                    let line = std::slice::from_raw_parts_mut(base.add(row * stride), w);
+                    for (x, px) in line.iter_mut().enumerate() {
+                        *px = ((x + row + n * 37) % 220 + 16) as u8;
+                    }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags(0));
+            buffer
+        }
+    }
+
+    /// Capture hands over pictures faster than the encoder can take them: the newest
+    /// replaces any still waiting, so each frame sent is about as fresh as the first,
+    /// rather than ever further behind as pictures queue for the encoder.
+    #[test]
+    fn pictures_never_queue_behind_the_encoder() {
+        let (w, h) = (1920, 1080);
+        let config = StreamConfig {
+            width: w as u32,
+            height: h as u32,
+            hidpi: false,
+            stream_width: w as u32,
+            stream_height: h as u32,
+            moving: None,
+            refresh: 60,
+            fps: 60,
+            sharp_fps: 60,
+            bitrate: 20_000_000,
+        };
+        // How long each frame took from appearing to coming out of the encoder.
+        let delays: Arc<Mutex<Vec<Duration>>> = Arc::default();
+        let outlet = Outlet {
+            sink: {
+                let delays = delays.clone();
+                Arc::new(Mutex::new(Box::new(move |frame: EncodedFrame| {
+                    if let Some(at) = frame.shown_at {
+                        delays.lock().unwrap().push(at.elapsed());
+                    }
+                })))
+            },
+            stages: Arc::new(Mutex::new(Stages::new())),
+        };
+        let shared = Arc::new(Shared {
+            pipeline: Mutex::new(Pipeline::new(config, &outlet).unwrap()),
+            start: Instant::now(),
+            backlogged: [AtomicBool::new(false), AtomicBool::new(false)],
+            missed: AtomicU32::new(0),
+            stop: AtomicBool::new(false),
+            inbox: Mutex::new(None),
+            wake: Condvar::new(),
+            stages: outlet.stages.clone(),
+        });
+        let encoder = {
+            let shared = shared.clone();
+            std::thread::spawn(move || shared.encode_loop())
+        };
+        // Pictures prepared beforehand, then handed over every 2 ms (500 a second), each
+        // stamped as appearing when it was due, as capture stamps them.
+        let pictures: Vec<_> = (0..8).map(|n| picture(w, h, n)).collect();
+        let started = Instant::now();
+        for n in 0..400u32 {
+            let due = started + Duration::from_millis(2) * n;
+            if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
+            }
+            shared.deliver(pictures[n as usize % pictures.len()].clone(), due, 0.5);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        shared.stop.store(true, Ordering::Relaxed);
+        shared.wake.notify_all();
+        encoder.join().unwrap();
+
+        let delays = delays.lock().unwrap().clone();
+        let skipped = shared.missed.load(Ordering::Relaxed);
+        let quarter = delays.len() / 4;
+        let average = |d: &[Duration]| d.iter().sum::<Duration>() / d.len().max(1) as u32;
+        let (early, late) = (
+            average(&delays[..quarter]),
+            average(&delays[delays.len() - quarter..]),
+        );
+        eprintln!(
+            "{} frames encoded of 400 pictures, {skipped} skipped; delay early {early:?}, \
+             late {late:?}",
+            delays.len()
+        );
+        assert!(
+            delays.len() >= 8,
+            "too few frames to judge: {}",
+            delays.len()
+        );
+        assert!(
+            skipped > 0,
+            "the encoder can't take 500 a second: some must be skipped"
+        );
+        assert!(
+            late <= early * 2 + Duration::from_millis(30),
+            "pictures fell further behind: {early:?} early, {late:?} late"
+        );
     }
 }
