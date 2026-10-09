@@ -40,6 +40,13 @@ workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 legato-macos.workspace = true
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-core-video = "0.3.2"
+
+[[test]]
+name = "mac_display_dpi"
+# The real display regression needs AppKit's event loop on the process main thread.
+# Without --ignored this harness exits without creating any display.
+harness = false

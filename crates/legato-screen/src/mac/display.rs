@@ -15,13 +15,17 @@ use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
-use objc2_core_foundation::{CGRect, CGSize};
+use objc2_core_foundation::{
+    CFArray, CFBoolean, CFDictionary, CFRetained, CFString, CGRect, CGSize,
+};
 use std::time::{Duration, Instant};
 
 use objc2_core_graphics::{
     CGBeginDisplayConfiguration, CGCancelDisplayConfiguration, CGCompleteDisplayConfiguration,
-    CGConfigureDisplayOrigin, CGConfigureOption, CGDisplayBounds, CGDisplayCopyDisplayMode,
-    CGDisplayMode, CGDisplayModelNumber, CGDisplayVendorNumber, CGGetActiveDisplayList,
+    CGConfigureDisplayOrigin, CGConfigureDisplayWithDisplayMode, CGConfigureOption,
+    CGDisplayBounds, CGDisplayCopyAllDisplayModes, CGDisplayCopyDisplayMode, CGDisplayMode,
+    CGDisplayModelNumber, CGDisplayVendorNumber, CGGetActiveDisplayList,
+    kCGDisplayShowDuplicateLowResolutionModes,
 };
 use objc2_foundation::{NSArray, NSObject, NSString};
 
@@ -63,6 +67,40 @@ pub struct Mode {
     pub height: u32,
     pub hidpi: bool,
     pub refresh: f64,
+}
+
+/// Pixel dimensions alone don't distinguish 4K Retina from unscaled 4K. Point
+/// dimensions alone don't distinguish 4K Retina from ordinary 1080p.
+#[derive(Debug, Clone, Copy)]
+struct ModeDescription {
+    pixels: (usize, usize),
+    points: (usize, usize),
+    refresh: f64,
+}
+
+impl ModeDescription {
+    fn read(mode: &CGDisplayMode) -> Self {
+        Self {
+            pixels: (
+                CGDisplayMode::pixel_width(Some(mode)),
+                CGDisplayMode::pixel_height(Some(mode)),
+            ),
+            points: (
+                CGDisplayMode::width(Some(mode)),
+                CGDisplayMode::height(Some(mode)),
+            ),
+            refresh: CGDisplayMode::refresh_rate(Some(mode)),
+        }
+    }
+
+    fn matches(self, wanted: Mode) -> bool {
+        let scale = if wanted.hidpi { 2 } else { 1 };
+        self.pixels == (wanted.width as usize, wanted.height as usize)
+            && self.points == ((wanted.width / scale) as usize, (wanted.height / scale) as usize)
+            // Allow the fractional refresh rates CoreGraphics can report (59.94 Hz
+            // for nominal 60 Hz), but never accept the previous 60/120/144 Hz mode.
+            && (self.refresh - wanted.refresh).abs() < 0.5
+    }
 }
 
 /// The largest mode the display can switch to later; fixed when it's created.
@@ -121,25 +159,80 @@ impl VirtualDisplay {
             mode.width >= 640
                 && mode.height >= 480
                 && mode.width <= self.max.0
-                && mode.height <= self.max.1,
-            "unsupported display size {}x{}",
-            mode.width,
-            mode.height
+                && mode.height <= self.max.1
+                && (!mode.hidpi || (mode.width.is_multiple_of(2) && mode.height.is_multiple_of(2)))
+                && mode.refresh.is_finite()
+                && mode.refresh > 0.0,
+            "unsupported virtual display mode {mode:?}"
         );
-        let wanted = (mode.width as usize, mode.height as usize);
-        // macOS applies modes asynchronously, and occasionally drops one: ask again once.
+        // applySettings advertises modes but macOS can restore a remembered 1×
+        // duplicate. Explicitly select the full mode, then wait for it to take effect.
+        // Both publishing and switching are asynchronous; retry once if dropped.
         for _ in 0..2 {
             apply(&self.display, mode)?;
-            if wait_until(Duration::from_secs(2), || self.pixel_size() == wanted) {
-                return Ok(());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut selected = false;
+            loop {
+                if self.current_mode().is_some_and(|m| m.matches(mode)) {
+                    return Ok(());
+                }
+                if !selected {
+                    selected = self.select_mode(mode)?;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
         }
         bail!(
-            "the display didn't switch to {}x{} (it's {:?})",
-            mode.width,
-            mode.height,
-            self.pixel_size()
+            "the display didn't switch to {mode:?} (current {:?}, available {:?})",
+            self.current_mode(),
+            available_modes(self.id)
+                .iter()
+                .map(|m| ModeDescription::read(m))
+                .collect::<Vec<_>>()
         )
+    }
+
+    fn current_mode(&self) -> Option<ModeDescription> {
+        CGDisplayCopyDisplayMode(self.id)
+            .as_deref()
+            .map(ModeDescription::read)
+    }
+
+    /// Returns false while the requested mode hasn't appeared in CoreGraphics yet.
+    fn select_mode(&self, wanted: Mode) -> Result<bool> {
+        let Some(mode) = available_modes(self.id)
+            .into_iter()
+            .find(|m| ModeDescription::read(m).matches(wanted))
+        else {
+            return Ok(false);
+        };
+        tracing::info!(id = self.id, ?wanted, current = ?self.current_mode(), "selecting the virtual display mode");
+        // SAFETY: config is initialized by CoreGraphics, used only for this virtual
+        // display, and cancelled on error. Keep the chosen mode alive through commit.
+        unsafe {
+            let mut config = std::ptr::null_mut();
+            let err = CGBeginDisplayConfiguration(&mut config);
+            ensure!(
+                err.0 == 0,
+                "couldn't begin a display mode switch (error {})",
+                err.0
+            );
+            let err = CGConfigureDisplayWithDisplayMode(config, self.id, Some(&mode), None);
+            if err.0 != 0 {
+                CGCancelDisplayConfiguration(config);
+                bail!("couldn't select the virtual display mode (error {})", err.0);
+            }
+            let err = CGCompleteDisplayConfiguration(config, CGConfigureOption::ForSession);
+            ensure!(
+                err.0 == 0,
+                "couldn't apply the virtual display mode (error {})",
+                err.0
+            );
+        }
+        Ok(true)
     }
 
     /// Moves the display in the Mac's arrangement: its top-left corner goes to `(x, y)`
@@ -228,6 +321,22 @@ fn apply(display: &AnyObject, mode: Mode) -> Result<()> {
     Ok(())
 }
 
+fn available_modes(id: u32) -> Vec<CFRetained<CGDisplayMode>> {
+    // SAFETY: the options contain the documented CFString/CFBoolean entry. The
+    // CoreGraphics array contains retained CGDisplayMode objects, not arbitrary data.
+    unsafe {
+        let options = CFDictionary::<CFString, CFBoolean>::from_slices(
+            &[kCGDisplayShowDuplicateLowResolutionModes],
+            &[CFBoolean::new(true)],
+        );
+        let Some(modes) = CGDisplayCopyAllDisplayModes(id, Some(options.as_opaque())) else {
+            return Vec::new();
+        };
+        let modes: CFRetained<CFArray<CGDisplayMode>> = CFRetained::cast_unchecked(modes);
+        modes.iter().collect()
+    }
+}
+
 /// Polls `done` until it's true or `timeout` passes; returns whether it became true.
 fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
@@ -255,4 +364,63 @@ fn legato_displays() -> Vec<u32> {
             CGDisplayVendorNumber(id) == VENDOR_ID && CGDisplayModelNumber(id) == PRODUCT_ID
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_mode_distinguishes_backing_size_scaling_and_refresh() {
+        let wanted = Mode {
+            width: 3840,
+            height: 2160,
+            hidpi: true,
+            refresh: 60.0,
+        };
+        let correct = ModeDescription {
+            pixels: (3840, 2160),
+            points: (1920, 1080),
+            refresh: 59.94,
+        };
+        assert!(correct.matches(wanted));
+        assert!(
+            !ModeDescription {
+                pixels: (1920, 1080),
+                ..correct
+            }
+            .matches(wanted)
+        );
+        assert!(
+            !ModeDescription {
+                points: (3840, 2160),
+                ..correct
+            }
+            .matches(wanted)
+        );
+        assert!(
+            !ModeDescription {
+                refresh: 120.0,
+                ..correct
+            }
+            .matches(wanted)
+        );
+        assert!(
+            !ModeDescription {
+                refresh: f64::NAN,
+                ..correct
+            }
+            .matches(wanted)
+        );
+        assert!(
+            ModeDescription {
+                points: (3840, 2160),
+                ..correct
+            }
+            .matches(Mode {
+                hidpi: false,
+                ..wanted
+            })
+        );
+    }
 }
