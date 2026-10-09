@@ -2,6 +2,7 @@
 //! comes out for every frame that goes in).
 
 use std::mem::ManuallyDrop;
+use std::time::Instant;
 use std::{marker::PhantomData, rc::Rc};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -23,6 +24,7 @@ use windows::core::Interface;
 
 use super::gpu::Gpu;
 use crate::Nv12;
+use crate::decode_timing::{Profiler, Stream, Timings};
 
 /// How decoded pictures are laid out in the decoder's output buffers.
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +39,7 @@ pub(super) struct Layout {
 pub struct Decoder {
     inner: Transform,
     reported: bool,
+    profiler: Profiler,
 }
 
 impl Decoder {
@@ -67,6 +70,7 @@ impl Decoder {
             Ok(inner) => Ok(Self {
                 inner,
                 reported: false,
+                profiler: Profiler::default(),
             }),
             Err(e) => {
                 tracing::info!("H.264 hardware decoding unavailable: {e:#}; using software");
@@ -80,6 +84,7 @@ impl Decoder {
         Ok(Self {
             inner: Transform::new(false)?,
             reported: false,
+            profiler: Profiler::default(),
         })
     }
 
@@ -107,6 +112,21 @@ impl Decoder {
             }
             self.reported = true;
         }
+        if let Some(layout) = self.inner.layout {
+            let stream = Stream {
+                hardware: self.is_hardware_accelerated(),
+                width: layout.width,
+                height: layout.height,
+            };
+            if let Some(report) = self.profiler.record(
+                stream,
+                self.inner.timings,
+                pictures.len() as u32,
+                Instant::now(),
+            ) {
+                report.log();
+            }
+        }
         Ok(pictures)
     }
 
@@ -128,6 +148,7 @@ struct Transform {
     gpu: Option<Gpu>,
     layout: Option<Layout>,
     time: i64,
+    timings: Timings,
     // Dropped after the COM objects. Keep the decoder on its creating thread so COM
     // initialization/uninitialization remain paired, including probe/fallback errors.
     _runtime: Runtime,
@@ -219,6 +240,7 @@ impl Transform {
                 gpu,
                 layout: None,
                 time: 0,
+                timings: Timings::default(),
                 _runtime: runtime,
             };
             decoder.choose_output()?;
@@ -252,19 +274,27 @@ impl Transform {
 
     /// Decodes one access unit (Annex B), returning the pictures it completes.
     fn decode(&mut self, annex_b: &[u8]) -> Result<Vec<Nv12>> {
+        let started = Instant::now();
+        self.timings = Timings::default();
+        let input_started = Instant::now();
         let sample = self.input_sample(annex_b)?;
         let mut out = Vec::new();
         // SAFETY: feeding a live MFT.
-        match unsafe { self.mft.ProcessInput(0, &sample, 0) } {
+        let result = unsafe { self.mft.ProcessInput(0, &sample, 0) };
+        self.timings.input += input_started.elapsed();
+        match result {
             Ok(()) => {}
             Err(e) if e.code() == MF_E_NOTACCEPTING => {
                 self.drain(&mut out)?;
+                let retry_started = Instant::now();
                 // SAFETY: as above.
                 unsafe { self.mft.ProcessInput(0, &sample, 0)? };
+                self.timings.input += retry_started.elapsed();
             }
             Err(e) => return Err(e).context("the decoder rejected a frame"),
         }
         self.drain(&mut out)?;
+        self.timings.total = started.elapsed();
         Ok(out)
     }
 
@@ -307,7 +337,9 @@ impl Transform {
                     pEvents: ManuallyDrop::new(None),
                 }];
                 let mut status = 0;
+                let started = Instant::now();
                 let result = self.mft.ProcessOutput(0, &mut buffers, &mut status);
+                self.timings.output += started.elapsed();
                 let sample = ManuallyDrop::take(&mut buffers[0].pSample);
                 drop(ManuallyDrop::take(&mut buffers[0].pEvents));
                 match result {
@@ -337,13 +369,14 @@ impl Transform {
                     .GetBufferByIndex(0)?
                     .cast::<IMFDXGIBuffer>()
                     .context("hardware decoder returned a non-DXGI picture")?;
-                return gpu.read(&surface, layout);
+                return gpu.read(&surface, layout, &mut self.timings);
             }
             let buffer = sample.ConvertToContiguousBuffer()?;
             let mut ptr = std::ptr::null_mut();
             let mut len = 0u32;
             buffer.Lock(&mut ptr, None, Some(&mut len))?;
             let bytes = std::slice::from_raw_parts(ptr, len as usize);
+            let started = Instant::now();
             let result = copy_nv12(
                 bytes,
                 layout.width,
@@ -351,6 +384,7 @@ impl Transform {
                 layout.stride,
                 layout.rows,
             );
+            self.timings.cpu_copy += started.elapsed();
             buffer.Unlock()?;
             result
         }
@@ -545,7 +579,7 @@ mod tests {
                             .unwrap()
                             .cast::<IMFDXGIBuffer>()
                             .unwrap();
-                    let picture = gpu.read(&buffer, layout).unwrap();
+                    let picture = gpu.read(&buffer, layout, &mut Timings::default()).unwrap();
                     let visible = (layout.width * layout.height) as usize;
                     assert_eq!(picture.stride, layout.width);
                     assert_eq!(picture.data.len(), visible * 3 / 2);

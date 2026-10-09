@@ -6,6 +6,9 @@
 //! decoded with Media Foundation into NV12 frames for the viewer to draw.
 
 pub mod adaptive;
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod decode_timing;
 pub mod h264;
 #[doc(hidden)]
 pub mod test_pattern;
