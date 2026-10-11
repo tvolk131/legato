@@ -31,5 +31,9 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 [target.'cfg(windows)'.dependencies]
 legato-windows.workspace = true
 
+[dev-dependencies]
+iroh.workspace = true
+tempfile = "3.27.0"
+
 [lints]
 workspace = true
