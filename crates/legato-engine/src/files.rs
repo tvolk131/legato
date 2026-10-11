@@ -7,10 +7,12 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::{fs, io};
 
 use anyhow::{Context, Result, bail};
 use legato_net::{EndpointId, IncomingFile, Session};
 use legato_proto::{FileHeader, FilePurpose};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 /// The most sent in one go through the clipboard (explicit sends have no limit).
@@ -34,18 +36,22 @@ pub fn downloads_dir() -> PathBuf {
         .join("Legato")
 }
 
-fn clipboard_dir(batch: u64) -> PathBuf {
-    std::env::temp_dir()
-        .join("legato-clipboard")
-        .join(batch.to_string())
-}
-
 /// Turns a sender-supplied relative name into safe path components: no absolute paths,
 /// no `..`, and no characters Windows can't store.
 pub fn safe_relative(name: &str) -> Option<PathBuf> {
-    let mut out = PathBuf::new();
-    for part in name.split(['/', '\\']) {
-        let part = part.trim();
+    Some(
+        safe_parts(name)?
+            .into_iter()
+            .map(|(_, clean)| clean)
+            .collect(),
+    )
+}
+
+/// Keep the original component as its identity: different names can sanitize alike.
+fn safe_parts(name: &str) -> Option<Vec<(&str, String)>> {
+    let mut parts = Vec::new();
+    for original in name.split(['/', '\\']) {
+        let part = original.trim();
         if part.is_empty() || part == "." {
             continue;
         }
@@ -63,44 +69,95 @@ pub fn safe_relative(name: &str) -> Option<PathBuf> {
             })
             .collect();
         let cleaned = cleaned.trim_end_matches(['.', ' ']).to_string();
-        if cleaned.is_empty() {
+        if cleaned.is_empty()
+            || !Path::new(&cleaned)
+                .components()
+                .all(|c| matches!(c, Component::Normal(_)))
+        {
             return None;
         }
-        out.push(cleaned);
+        parts.push((original, cleaned));
     }
-    if out.as_os_str().is_empty() {
-        return None;
-    }
-    // Belt and braces: nothing that escapes.
-    out.components()
-        .all(|c| matches!(c, Component::Normal(_)))
-        .then_some(out)
+    (!parts.is_empty()).then_some(parts)
 }
 
-/// `dir/name`, or `dir/name (2)` and so on if that's taken.
-fn unique(dir: &Path, name: &Path) -> PathBuf {
-    let path = dir.join(name);
-    if !path.exists() {
-        return path;
-    }
-    let stem = name
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
+/// Reserve a name atomically. The filesystem decides what collides (including case).
+fn reserve<T>(
+    dir: &Path,
+    name: &Path,
+    mut create: impl FnMut(&Path) -> io::Result<T>,
+) -> Result<(PathBuf, T)> {
+    let stem = name.file_stem().unwrap_or_default().to_string_lossy();
     let ext = name
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
-    (2..)
-        .map(|n| dir.join(name.with_file_name(format!("{stem} ({n}){ext}"))))
-        .find(|p| !p.exists())
-        .expect("some name is free")
+    for n in 1u64.. {
+        let path = dir.join(if n == 1 {
+            name.to_path_buf()
+        } else {
+            PathBuf::from(format!("{stem} ({n}){ext}"))
+        });
+        match create(&path) {
+            Ok(value) => return Ok((path, value)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", path.display())),
+        }
+    }
+    unreachable!("some name is free")
+}
+
+#[derive(Default)]
+struct Batch {
+    /// Original directory prefixes → exclusively created destination directories.
+    directories: HashMap<Vec<String>, PathBuf>,
+    roots: Vec<PathBuf>,
+    done: u32,
+}
+
+struct Destination {
+    path: PathBuf,
+    file: fs::File,
+}
+
+impl Batch {
+    fn reserve(&mut self, root: &Path, name: &str) -> Result<Destination> {
+        let parts = safe_parts(name).with_context(|| format!("refused a file named {name:?}"))?;
+        fs::create_dir_all(root)?;
+        let mut parent = root.to_path_buf();
+        let mut original = Vec::new();
+        for (depth, (part, clean)) in parts.iter().enumerate() {
+            original.push((*part).to_string());
+            if depth == parts.len() - 1 {
+                let (path, file) = reserve(&parent, Path::new(clean), |p| {
+                    fs::OpenOptions::new().write(true).create_new(true).open(p)
+                })?;
+                if depth == 0 {
+                    self.roots.push(path.clone());
+                }
+                return Ok(Destination { path, file });
+            }
+            parent = match self.directories.get(&original) {
+                Some(path) => path.clone(),
+                None => {
+                    let (path, ()) = reserve(&parent, Path::new(clean), |p| fs::create_dir(p))?;
+                    if depth == 0 {
+                        self.roots.push(path.clone());
+                    }
+                    self.directories.insert(original.clone(), path.clone());
+                    path
+                }
+            };
+        }
+        unreachable!("a safe path has at least one component")
+    }
 }
 
 /// Tracks incoming batches and saves their files.
 pub(crate) struct Inbox {
-    /// batch → (top-level name in the batch → where it was saved), files done.
-    batches: HashMap<u64, (HashMap<PathBuf, PathBuf>, u32)>,
+    batches: HashMap<(EndpointId, u64), Batch>,
+    downloads: PathBuf,
+    clipboard: PathBuf,
     done: mpsc::UnboundedSender<Result<(IncomingInfo, PathBuf)>>,
 }
 
@@ -115,10 +172,25 @@ impl Inbox {
         Self,
         mpsc::UnboundedReceiver<Result<(IncomingInfo, PathBuf)>>,
     ) {
+        Self::with_roots(
+            downloads_dir(),
+            std::env::temp_dir().join("legato-clipboard"),
+        )
+    }
+
+    fn with_roots(
+        downloads: PathBuf,
+        clipboard: PathBuf,
+    ) -> (
+        Self,
+        mpsc::UnboundedReceiver<Result<(IncomingInfo, PathBuf)>>,
+    ) {
         let (done, rx) = mpsc::unbounded_channel();
         (
             Self {
                 batches: HashMap::new(),
+                downloads,
+                clipboard,
                 done,
             },
             rx,
@@ -127,39 +199,17 @@ impl Inbox {
 
     /// Starts saving an incoming file. The result arrives on the receiver from `new`.
     pub(crate) fn receive(&mut self, from: EndpointId, file: Arc<IncomingFile>) {
-        let header = file.header.clone();
-        let Some(relative) = safe_relative(&header.name) else {
-            let _ = self.done.send(Err(anyhow::anyhow!(
-                "refused a file named {:?}",
-                header.name
-            )));
-            return;
-        };
-        let root = match header.purpose {
-            FilePurpose::Clipboard => clipboard_dir(header.batch),
-            FilePurpose::Send | FilePurpose::Drop => downloads_dir(),
-        };
-        // Everything in a batch shares one top-level folder or file name, chosen once so a
-        // second send of "Photos" becomes "Photos (2)" rather than merging.
-        let (tops, _) = self.batches.entry(header.batch).or_default();
-        let first: PathBuf = relative
-            .components()
-            .next()
-            .map(|c| c.as_os_str().into())
-            .unwrap_or_default();
-        let top = tops
-            .entry(first.clone())
-            .or_insert_with(|| unique(&root, &first))
-            .clone();
-        let rest: PathBuf = relative.components().skip(1).collect();
-        let path = if rest.as_os_str().is_empty() {
-            top
-        } else {
-            top.join(rest)
+        let destination = match self.reserve(from, &file.header) {
+            Ok(destination) => destination,
+            Err(e) => {
+                let _ = self.done.send(Err(e));
+                return;
+            }
         };
         let done = self.done.clone();
         tokio::spawn(async move {
-            let result = save(&file, &path).await.map(|()| {
+            let path = destination.path.clone();
+            let result = save(&file, destination).await.map(|()| {
                 (
                     IncomingInfo {
                         from,
@@ -172,15 +222,35 @@ impl Inbox {
         });
     }
 
+    fn reserve(&mut self, from: EndpointId, header: &FileHeader) -> Result<Destination> {
+        let root = match header.purpose {
+            FilePurpose::Clipboard => self
+                .clipboard
+                .join(from.to_string())
+                .join(header.batch.to_string()),
+            FilePurpose::Send | FilePurpose::Drop => self.downloads.clone(),
+        };
+        use std::collections::hash_map::Entry;
+        match self.batches.entry((from, header.batch)) {
+            Entry::Occupied(mut entry) => entry.get_mut().reserve(&root, &header.name),
+            Entry::Vacant(entry) => {
+                let mut batch = Batch::default();
+                let destination = batch.reserve(&root, &header.name)?;
+                entry.insert(batch);
+                Ok(destination)
+            }
+        }
+    }
+
     /// Records a saved file; returns the batch once all of it has arrived.
     pub(crate) fn finished(&mut self, info: &IncomingInfo) -> Option<Received> {
-        let (_, done) = self.batches.get_mut(&info.header.batch)?;
-        *done += 1;
-        if *done < info.header.count {
+        let key = (info.from, info.header.batch);
+        let batch = self.batches.get_mut(&key)?;
+        batch.done += 1;
+        if batch.done < info.header.count {
             return None;
         }
-        let (tops, _) = self.batches.remove(&info.header.batch)?;
-        let mut paths: Vec<PathBuf> = tops.into_values().collect();
+        let mut paths = self.batches.remove(&key)?.roots;
         paths.sort();
         Some(Received {
             from: info.from,
@@ -191,19 +261,20 @@ impl Inbox {
     }
 }
 
-async fn save(file: &IncomingFile, path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+async fn save(file: &IncomingFile, destination: Destination) -> Result<()> {
+    // This handle was opened with create_new before the receive task was started.
+    // Never reopen/truncate the path another transfer may be using.
+    let mut out = tokio::fs::File::from_std(destination.file);
+    let received = file.recv(&mut out).await;
+    // Also drain outstanding filesystem writes after a stream error, before deleting
+    // the partial file (Windows cannot remove it while a write still holds it open).
+    let flushed = out.flush().await;
+    drop(out);
+    let result = received.and_then(|_| flushed.map_err(Into::into));
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(destination.path).await;
     }
-    let mut out = tokio::fs::File::create(path)
-        .await
-        .with_context(|| format!("creating {}", path.display()))?;
-    if let Err(e) = file.recv(&mut out).await {
-        drop(out);
-        let _ = tokio::fs::remove_file(path).await;
-        return Err(e);
-    }
-    Ok(())
+    result
 }
 
 /// Every file under `paths` (folders are walked), with its name relative to the batch.
@@ -299,8 +370,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "").unwrap();
         std::fs::write(dir.join("a (2).txt"), "").unwrap();
-        assert_eq!(unique(&dir, Path::new("a.txt")), dir.join("a (3).txt"));
-        assert_eq!(unique(&dir, Path::new("b.txt")), dir.join("b.txt"));
+        assert_eq!(
+            reserve(&dir, Path::new("a.txt"), |p| fs::File::create_new(p))
+                .unwrap()
+                .0,
+            dir.join("a (3).txt")
+        );
+        assert_eq!(
+            reserve(&dir, Path::new("b.txt"), |p| fs::File::create_new(p))
+                .unwrap()
+                .0,
+            dir.join("b.txt")
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -325,3 +406,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "files/tests.rs"]
+mod receive_tests;
