@@ -109,6 +109,13 @@ fn model(page: Page) -> Model {
     }
 }
 
+fn sized_simulator<'a>(
+    size: (f32, f32),
+    element: impl Into<crate::Element<'a, Message>>,
+) -> iced_test::Simulator<'a, Message, Theme> {
+    iced_test::Simulator::with_size(iced::Settings::default(), size, element.into())
+}
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -340,11 +347,7 @@ fn unplaced_peers_are_parked_beside_the_displays() {
 #[test]
 fn settings_toggles_send_messages() {
     let m = model(Page::Settings);
-    let mut ui = iced_test::Simulator::with_size(
-        iced::Settings::default(),
-        (1024.0, 1600.0),
-        crate::view::root(&m),
-    );
+    let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     snapshot(&mut ui, "settings");
     ui.click("Reverse the mouse wheel when this device is being controlled")
         .unwrap();
@@ -368,11 +371,7 @@ fn settings_toggles_send_messages() {
 fn control_mode_can_be_limited_to_one_device() {
     let m = model(Page::Settings);
     let mac = m.paired[0].device.id.to_string();
-    let mut ui = iced_test::Simulator::with_size(
-        iced::Settings::default(),
-        (1024.0, 1600.0),
-        crate::view::root(&m),
-    );
+    let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     ui.click("Only Tommy's MacBook Pro").unwrap();
     ui.click("Share copied text, images and files with paired devices")
         .unwrap();
@@ -496,8 +495,7 @@ fn the_stats_panel_sits_in_the_corner() {
         Duration::from_millis(3),
         Duration::from_millis(6),
     );
-    let mut ui = iced_test::Simulator::with_size(
-        iced::Settings::default(),
+    let mut ui = sized_simulator(
         (1000.0, 220.0),
         iced::widget::container(crate::view::stats_panel(lines))
             .width(iced::Length::Fill)
@@ -526,16 +524,9 @@ fn with_display_options(placement: legato_engine::config::Placement) -> Model {
 #[test]
 fn display_options_separate_the_display_from_the_stream() {
     use legato_engine::config::{MovingSize, Placement, Quality, Resolution};
-    fn window(m: &Model, height: f32) -> iced_test::Simulator<'_, Message, Theme> {
-        iced_test::Simulator::with_size(
-            iced::Settings::default(),
-            (1024.0, height),
-            crate::view::root(m),
-        )
-    }
     // Adaptive quality, the default: full size when still, 1920×1080 while moving.
     let m = with_display_options(Placement::FullScreen);
-    let mut ui = window(&m, 1800.0);
+    let mut ui = sized_simulator((1024.0, 1800.0), crate::view::root(&m));
     snapshot(&mut ui, "display-options");
     assert!(
         ui.find("A 3840×2160 display at 60 Hz: the size of display 2, counted from the left.")
@@ -566,7 +557,7 @@ fn display_options_separate_the_display_from_the_stream() {
         o.quality = Quality::Sharpest;
         o.fps = 120;
     }
-    let mut ui = window(&m, 1600.0);
+    let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     assert!(ui.find("1080p (quicker)").is_err(), "adaptive only");
     assert!(
         ui.find(
@@ -599,12 +590,12 @@ fn display_options_separate_the_display_from_the_stream() {
         o.quality = Quality::Balanced;
         o.fps = 120;
     }
-    let mut ui = window(&m, 1600.0);
+    let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     assert!(ui.find("You'll see 2560×1440 at up to 120 fps.").is_ok());
 
     // In a window, sizes follow the window.
     let m = with_display_options(Placement::Window);
-    let mut ui = window(&m, 1600.0);
+    let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     assert!(
         ui.find("The window's size, updated when you finish resizing it, at 60 Hz.")
             .is_ok()
@@ -623,7 +614,7 @@ fn display_options_separate_the_display_from_the_stream() {
         o.resolution = Resolution::Fixed;
         o.fixed = (2560, 1440);
     }
-    let mut ui = window(&m, 1600.0);
+    let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     ui.click("120 Hz").unwrap();
     ui.click("Show").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
@@ -649,21 +640,13 @@ fn with_many_displays_the_display_is_picked_from_a_list() {
     m.local
         .displays
         .push(display(11520.0, 3840.0, 2160.0, false));
-    let mut ui = iced_test::Simulator::with_size(
-        iced::Settings::default(),
-        (1024.0, 1600.0),
-        crate::view::root(&m),
-    );
+    let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     // Five displays don't fit as buttons: the chosen one shows in a closed list.
     assert!(ui.find("Display 2").is_ok());
     assert!(ui.find("Display 5").is_err());
     // With three, each is a button.
     let m = with_display_options(Placement::FullScreen);
-    let mut ui = iced_test::Simulator::with_size(
-        iced::Settings::default(),
-        (1024.0, 1600.0),
-        crate::view::root(&m),
-    );
+    let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     assert!(ui.find("Display 3").is_ok());
 }
 
@@ -698,11 +681,7 @@ fn display_options_fit_the_default_window() {
     use legato_engine::config::Placement;
     let m = with_display_options(Placement::FullScreen);
     // The main window's default size: every choice should fit without scrolling.
-    let mut ui = iced_test::Simulator::with_size(
-        iced::Settings::default(),
-        (920.0, 640.0),
-        crate::view::root(&m),
-    );
+    let mut ui = sized_simulator((920.0, 640.0), crate::view::root(&m));
     snapshot(&mut ui, "display-options-default-window");
     assert!(ui.find("Show").is_ok());
 }
@@ -716,7 +695,7 @@ fn gpu_renders_the_dialogs_and_the_viewer() {
     use legato_engine::config::Placement;
     let theme = crate::app_theme(false);
     let render = |element: crate::Element<'_, Message>, size: (f32, f32), name: &str| {
-        let mut ui = iced_test::Simulator::with_size(iced::Settings::default(), size, element);
+        let mut ui = sized_simulator(size, element);
         let dir = std::env::temp_dir().join(format!("legato-gpu-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         ui.snapshot(&theme)

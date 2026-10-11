@@ -122,18 +122,27 @@ fn send(inputs: &[INPUT]) {
     std::thread::sleep(Duration::from_millis(30));
 }
 
-fn mouse_move(dx: i32, dy: i32) {
-    send(&[INPUT {
+fn mouse_input(mi: MOUSEINPUT) -> INPUT {
+    INPUT {
         r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx,
-                dy,
-                dwFlags: MOUSEEVENTF_MOVE,
-                ..Default::default()
-            },
-        },
-    }]);
+        Anonymous: INPUT_0 { mi },
+    }
+}
+
+fn keyboard_input(ki: KEYBDINPUT) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki },
+    }
+}
+
+fn mouse_move(dx: i32, dy: i32) {
+    send(&[mouse_input(MOUSEINPUT {
+        dx,
+        dy,
+        dwFlags: MOUSEEVENTF_MOVE,
+        ..Default::default()
+    })]);
 }
 
 fn key(scancode: u16, down: bool) {
@@ -141,17 +150,12 @@ fn key(scancode: u16, down: bool) {
     if !down {
         flags |= KEYEVENTF_KEYUP;
     }
-    send(&[INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(0),
-                wScan: scancode,
-                dwFlags: flags,
-                ..Default::default()
-            },
-        },
-    }]);
+    send(&[keyboard_input(KEYBDINPUT {
+        wVk: VIRTUAL_KEY(0),
+        wScan: scancode,
+        dwFlags: flags,
+        ..Default::default()
+    })]);
 }
 
 #[test]
@@ -486,19 +490,14 @@ mod viewer {
 
 fn click(down: bool) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP};
-    send(&[INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dwFlags: if down {
-                    MOUSEEVENTF_LEFTDOWN
-                } else {
-                    MOUSEEVENTF_LEFTUP
-                },
-                ..Default::default()
-            },
+    send(&[mouse_input(MOUSEINPUT {
+        dwFlags: if down {
+            MOUSEEVENTF_LEFTDOWN
+        } else {
+            MOUSEEVENTF_LEFTUP
         },
-    }]);
+        ..Default::default()
+    })]);
 }
 
 /// What `WindowFromPoint` (which the portal goes by) finds at `(x, y)`: `viewer`, or
@@ -593,17 +592,12 @@ fn windows_key(down: bool) {
     if !down {
         flags |= KEYEVENTF_KEYUP;
     }
-    send(&[INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VK_LWIN,
-                wScan: 0x5b,
-                dwFlags: flags,
-                ..Default::default()
-            },
-        },
-    }]);
+    send(&[keyboard_input(KEYBDINPUT {
+        wVk: VK_LWIN,
+        wScan: 0x5b,
+        dwFlags: flags,
+        ..Default::default()
+    })]);
 }
 
 /// Virtual monitor mode: with the pointer over the viewer's picture, clicks and keys go
@@ -1386,16 +1380,13 @@ fn this_pcs_pointer_is_reported_at_a_pace_ending_where_it_stopped() {
 
     // 50 moves at once, as a fast mouse sends them.
     let moves: Vec<INPUT> = (0..50)
-        .map(|_| INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 2,
-                    dy: 0,
-                    dwFlags: MOUSEEVENTF_MOVE,
-                    ..Default::default()
-                },
-            },
+        .map(|_| {
+            mouse_input(MOUSEINPUT {
+                dx: 2,
+                dy: 0,
+                dwFlags: MOUSEEVENTF_MOVE,
+                ..Default::default()
+            })
         })
         .collect();
     send(&moves);

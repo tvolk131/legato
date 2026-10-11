@@ -380,17 +380,20 @@ mod tests {
             quality: Quality::Sharpest,
             ..Extend::default()
         };
-        let r = extend.request_for(3840, 2160);
-        assert_eq!((r.width, r.height, r.fps, r.hidpi), (3840, 2160, 144, true));
-        assert_eq!(frames_sent(&r), 60, "4K encodes at up to 60 fps");
-        let r = extend.request_for(1921, 1081);
-        assert_eq!(
-            (r.width, r.height, r.fps, r.hidpi),
-            (1920, 1080, 144, false)
-        );
-        assert_eq!(frames_sent(&r), 144);
-        assert_eq!(r.bitrate, 40_000_000);
-        assert_eq!((r.stream_width, r.stream_height), (1920, 1080));
+        for (case, requested, size, hidpi, sent) in [
+            ("4K", (3840, 2160), (3840, 2160), true, 60),
+            ("odd size", (1921, 1081), (1920, 1080), false, 144),
+        ] {
+            let r = extend.request_for(requested.0, requested.1);
+            assert_eq!(
+                (r.width, r.height, r.fps, r.hidpi),
+                (size.0, size.1, 144, hidpi),
+                "{case}"
+            );
+            assert_eq!(frames_sent(&r), sent, "{case}");
+            assert_eq!(r.bitrate, 40_000_000, "{case}");
+            assert_eq!((r.stream_width, r.stream_height), size, "{case}");
+        }
     }
 
     #[test]
@@ -413,35 +416,25 @@ mod tests {
 
     #[test]
     fn adaptive_quality_sends_full_size_when_still_and_smaller_while_moving() {
+        use MovingSize::{Hd, Qhd};
         let mut extend = Extend {
             fps: 144,
             ..Extend::default()
         };
         assert_eq!(extend.quality, Quality::Adaptive, "the default");
-        let r = extend.request_for(3840, 2160);
-        assert_eq!((r.stream_width, r.stream_height), (3840, 2160));
-        assert_eq!((r.moving_width, r.moving_height), (1920, 1080));
-        assert_eq!(
-            legato_core::extend::frames_sent(&r),
-            144,
-            "moving is what needs the frame rate"
-        );
-        extend.while_moving = MovingSize::Qhd;
-        let r = extend.request_for(2560, 1440);
-        assert_eq!(
-            (r.moving_width, r.moving_height),
-            (0, 0),
-            "already small enough"
-        );
-        let r = extend.request_for(3440, 1440);
-        assert_eq!(
-            (r.moving_width, r.moving_height),
-            (2560, 1072),
-            "same shape"
-        );
-        let r = extend.request_for(5120, 2880);
-        assert_eq!((r.moving_width, r.moving_height), (2560, 1440));
-        assert_eq!(legato_core::extend::frames_sent(&r), 120);
+        // No second track when it is already small enough; otherwise keep its shape.
+        for (case, moving, size, expected, sent) in [
+            ("4K/HD", Hd, (3840, 2160), (1920, 1080), 144),
+            ("QHD", Qhd, (2560, 1440), (0, 0), 120),
+            ("ultrawide", Qhd, (3440, 1440), (2560, 1072), 144),
+            ("5K/QHD", Qhd, (5120, 2880), (2560, 1440), 120),
+        ] {
+            extend.while_moving = moving;
+            let r = extend.request_for(size.0, size.1);
+            assert_eq!((r.stream_width, r.stream_height), size, "{case}");
+            assert_eq!((r.moving_width, r.moving_height), expected, "{case}");
+            assert_eq!(legato_core::extend::frames_sent(&r), sent, "{case}");
+        }
     }
 
     #[test]
