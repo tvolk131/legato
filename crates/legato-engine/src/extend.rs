@@ -86,6 +86,8 @@ pub(crate) struct Decoded {
 #[derive(Debug)]
 pub(crate) struct Showing {
     inner: Mutex<ShowingInner>,
+    frames: watch::Sender<Option<ViewerFrame>>,
+    stats: watch::Sender<Option<ViewerStats>>,
 }
 
 #[derive(Debug)]
@@ -96,12 +98,16 @@ struct ShowingInner {
     last_shown: Option<Instant>,
     totals: Totals,
     since: Instant,
-    decoders: usize,
+    closed: bool,
+    readers: Vec<tokio::task::AbortHandle>,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl Showing {
-    pub(crate) fn new() -> Self {
+    fn new(
+        frames: watch::Sender<Option<ViewerFrame>>,
+        stats: watch::Sender<Option<ViewerStats>>,
+    ) -> Self {
         Self {
             inner: Mutex::new(ShowingInner {
                 newest: None,
@@ -109,22 +115,19 @@ impl Showing {
                 last_shown: None,
                 totals: Totals::default(),
                 since: Instant::now(),
-                decoders: 0,
+                closed: false,
+                readers: Vec::new(),
             }),
+            frames,
+            stats,
         }
     }
 
-    /// Shows `picture` (from `track`, taken at `pts`) in `frames` if it's newer than the
+    /// Shows `picture` (from `track`, taken at `pts`) if it's newer than the
     /// one there. Returns whether it was.
-    pub(crate) fn show(
-        &self,
-        track: u8,
-        pts: Duration,
-        picture: Picture,
-        frames: &watch::Sender<Option<ViewerFrame>>,
-    ) -> bool {
+    pub(crate) fn show(&self, track: u8, pts: Duration, picture: Picture) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        if inner.newest.is_some_and(|(newest, _)| pts <= newest) {
+        if inner.closed || inner.newest.is_some_and(|(newest, _)| pts <= newest) {
             return false;
         }
         inner.newest = Some((pts, track));
@@ -137,18 +140,17 @@ impl Showing {
             }
         }
         // Under the lock, so a slower track can't show an older picture after this one.
-        frames.send_replace(Some(Arc::new(picture)));
+        self.frames.send_replace(Some(Arc::new(picture)));
         true
     }
 
-    /// Counts a frame. Every [`STATS_EVERY`], returns the stats since the last time.
-    pub(crate) fn record(
-        &self,
-        frame: Decoded,
-        network: Duration,
-        relayed: bool,
-    ) -> Option<ViewerStats> {
+    /// Counts a frame. Every [`STATS_EVERY`], publishes the stats under the same lock
+    /// as close, so an old worker cannot overwrite a replacement viewer's stats.
+    pub(crate) fn record(&self, frame: Decoded, network: Duration, relayed: bool) -> bool {
         let mut inner = self.inner.lock().unwrap();
+        if inner.closed {
+            return false;
+        }
         let t = &mut inner.totals;
         t.frames += 1;
         t.bytes += frame.bytes as u64;
@@ -159,12 +161,12 @@ impl Showing {
         t.skipped += u32::from(frame.skipped);
         let elapsed = inner.since.elapsed();
         if elapsed < STATS_EVERY {
-            return None;
+            return false;
         }
         let t = std::mem::take(&mut inner.totals);
         inner.since = Instant::now();
         let secs = elapsed.as_secs_f32();
-        Some(ViewerStats {
+        self.stats.send_replace(Some(ViewerStats {
             width: inner.size.0,
             height: inner.size.1,
             fps: t.frames as f32 / secs,
@@ -180,19 +182,82 @@ impl Showing {
             moving: inner
                 .newest
                 .is_some_and(|(_, track)| track == legato_proto::video_track::MOVING),
+        }));
+        true
+    }
+
+    /// Closing and every publication share this lock. After close returns, no old
+    /// worker can publish or enqueue a control message, even if GPU work finishes late.
+    fn close(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closed {
+            return;
+        }
+        inner.closed = true;
+        for reader in &inner.readers {
+            reader.abort();
+        }
+        self.frames.send_replace(None);
+        self.stats.send_replace(None);
+    }
+
+    fn is_open(&self) -> bool {
+        !self.inner.lock().unwrap().closed
+    }
+
+    /// Only for quick, nonblocking effects such as enqueueing a control message.
+    fn when_open(&self, effect: impl FnOnce()) {
+        let inner = self.inner.lock().unwrap();
+        if !inner.closed {
+            effect();
+        }
+    }
+
+    fn decoder_started(self: &Arc<Self>, reader: tokio::task::AbortHandle) -> Option<Decoding> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closed {
+            reader.abort();
+            return None;
+        }
+        inner.readers.push(reader.clone());
+        Some(Decoding {
+            showing: self.clone(),
+            reader,
         })
     }
+}
 
-    /// A track's decoder started.
-    pub(crate) fn decoder_started(&self) {
-        self.inner.lock().unwrap().decoders += 1;
+/// Owns a track's reader and registration before its OS thread is even spawned.
+/// Dropping the spawn closure on failure, early returns, and normal exit all clean up.
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Decoding {
+    showing: Arc<Showing>,
+    reader: tokio::task::AbortHandle,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Decoding {
+    fn next(
+        &self,
+        frames: &mut tokio::sync::mpsc::Receiver<legato_net::VideoFrame>,
+    ) -> Option<legato_net::VideoFrame> {
+        let frame = frames.blocking_recv()?;
+        // Cancellation may have left frames queued. Never start decoding those.
+        self.showing.is_open().then_some(frame)
     }
+}
 
-    /// A track's decoder stopped. Returns whether it was the last.
-    pub(crate) fn decoder_stopped(&self) -> bool {
-        let mut inner = self.inner.lock().unwrap();
-        inner.decoders = inner.decoders.saturating_sub(1);
-        inner.decoders == 0
+impl Drop for Decoding {
+    fn drop(&mut self) {
+        // Also wakes a reader awaiting network data when decoder initialization fails.
+        self.reader.abort();
+        let mut inner = self.showing.inner.lock().unwrap();
+        inner
+            .readers
+            .retain(|reader| reader.id() != self.reader.id());
+        if !inner.closed && inner.readers.is_empty() {
+            self.showing.stats.send_replace(None);
+        }
     }
 }
 
@@ -460,24 +525,18 @@ mod viewer {
     use legato_net::{IncomingVideo, PathKind, Session, VideoFrame};
     use legato_proto::Control;
     use legato_screen::win::Decoder;
-    use tokio::sync::{mpsc, watch};
+    use tokio::sync::mpsc;
 
-    use super::{Decoded, Picture, Showing, ViewerFrame, ViewerStats};
+    use super::{Decoded, Picture, Showing};
 
     /// Decodes one of the Mac's video tracks until it ends, showing its pictures in
-    /// `frames` when they're the newest of any track.
-    pub(crate) fn decode(
-        video: Arc<IncomingVideo>,
-        session: Arc<Session>,
-        showing: Arc<Showing>,
-        frames: watch::Sender<Option<ViewerFrame>>,
-        stats: watch::Sender<Option<ViewerStats>>,
-    ) {
+    /// the viewer when they're the newest of any track.
+    pub(crate) fn decode(video: Arc<IncomingVideo>, session: Arc<Session>, showing: Arc<Showing>) {
         let track = video.track;
         // Bounded, so a slow decoder slows the stream down (and the Mac skips pictures)
         // rather than falling ever further behind.
         let (tx, mut rx) = mpsc::channel::<VideoFrame>(4);
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             loop {
                 match video.next().await {
                     Ok(Some(frame)) => {
@@ -493,23 +552,29 @@ mod viewer {
                 }
             }
         });
-        showing.decoder_started();
+        let Some(decoding) = showing.decoder_started(reader.abort_handle()) else {
+            return;
+        };
         let spawned = std::thread::Builder::new()
             .name(format!("legato-decode-{track}"))
             .spawn(move || {
+                if !showing.is_open() {
+                    return;
+                }
                 let mut decoder = match Decoder::new() {
                     Ok(d) => d,
                     Err(e) => {
-                        session.send(Control::ExtendStop {
-                            reason: format!("{e:#}"),
+                        showing.when_open(|| {
+                            session.send(Control::ExtendStop {
+                                reason: format!("{e:#}"),
+                            });
                         });
-                        showing.decoder_stopped();
                         return;
                     }
                 };
                 // Pictures only make sense from a keyframe on.
                 let mut synced = false;
-                while let Some(frame) = rx.blocking_recv() {
+                while let Some(frame) = decoding.next(&mut rx) {
                     if !synced && !frame.keyframe {
                         continue;
                     }
@@ -529,7 +594,7 @@ mod viewer {
                                     network,
                                     decode,
                                 };
-                                showing.show(track, frame.pts, picture, &frames);
+                                showing.show(track, frame.pts, picture);
                             }
                             let decoded = Decoded {
                                 bytes: frame.data.len(),
@@ -538,25 +603,29 @@ mod viewer {
                                 skipped: frame.skipped,
                             };
                             let relayed = matches!(path, Some((PathKind::Relay, _)));
-                            if let Some(s) = showing.record(decoded, network, relayed) {
-                                stats.send_replace(Some(s));
-                            }
+                            showing.record(decoded, network, relayed);
                         }
                         Err(e) => {
+                            if !showing.is_open() {
+                                break;
+                            }
                             tracing::debug!("{e:#}; asking for a keyframe");
                             synced = false;
                             if let Err(reset) = decoder.reset_after_error(&e) {
-                                session.send(Control::ExtendStop {
-                                    reason: format!("couldn't restart video decoding: {reset:#}"),
+                                showing.when_open(|| {
+                                    session.send(Control::ExtendStop {
+                                        reason: format!(
+                                            "couldn't restart video decoding: {reset:#}"
+                                        ),
+                                    });
                                 });
                                 break;
                             }
-                            session.send(Control::Keyframe { track });
+                            showing.when_open(|| {
+                                session.send(Control::Keyframe { track });
+                            });
                         }
                     }
-                }
-                if showing.decoder_stopped() {
-                    stats.send_replace(None);
                 }
             });
         if let Err(e) = spawned {
@@ -582,10 +651,14 @@ pub(crate) struct Viewing {
 }
 
 impl Viewing {
-    pub(crate) fn new(peer: legato_net::EndpointId) -> Self {
+    pub(crate) fn new(
+        peer: legato_net::EndpointId,
+        frames: watch::Sender<Option<ViewerFrame>>,
+        stats: watch::Sender<Option<ViewerStats>>,
+    ) -> Self {
         Self {
             peer,
-            showing: Arc::new(Showing::new()),
+            showing: Arc::new(Showing::new(frames, stats)),
             bounds: None,
             area: None,
             arranged_for: None,
@@ -621,113 +694,11 @@ impl Viewing {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use legato_proto::video_track::{MOVING, SHARP};
-    use tokio::sync::watch;
-
-    use super::{Decoded, Picture, Showing};
-
-    fn ms(n: u64) -> Duration {
-        Duration::from_millis(n)
-    }
-
-    fn picture(width: u32) -> Picture {
-        Picture {
-            nv12: legato_screen::Nv12 {
-                width,
-                height: 2,
-                stride: width,
-                data: vec![0; width as usize * 3],
-            },
-            decoded_at: Instant::now(),
-            mac: ms(5),
-            network: ms(1),
-            decode: ms(2),
-        }
-    }
-
-    #[test]
-    fn the_newest_picture_of_any_track_is_shown() {
-        let showing = Showing::new();
-        let (frames, shown) = watch::channel::<Option<super::ViewerFrame>>(None);
-        let width = || shown.borrow().as_ref().map(|p| p.nv12.width);
-        assert!(showing.show(SHARP, ms(100), picture(3840), &frames));
-        // Dragging a window: the smaller pictures take over...
-        assert!(showing.show(MOVING, ms(110), picture(1920), &frames));
-        assert_eq!(width(), Some(1920));
-        // ...and a sharp one that was on its way arrives too late to show.
-        assert!(!showing.show(SHARP, ms(105), picture(3840), &frames));
-        assert_eq!(width(), Some(1920));
-        // Still again: sharpened.
-        assert!(showing.show(SHARP, ms(300), picture(3840), &frames));
-        assert_eq!(width(), Some(3840));
-    }
-
-    #[test]
-    fn stats_cover_every_track() {
-        let showing = Showing::new();
-        let (frames, _shown) = watch::channel(None);
-        let frame = |mac, skipped| Decoded {
-            bytes: 125_000,
-            mac: ms(mac),
-            decode: ms(3),
-            skipped,
-        };
-        showing.show(SHARP, ms(10), picture(3840), &frames);
-        assert!(showing.record(frame(20, 0), ms(1), false).is_none());
-        showing.show(MOVING, ms(20), picture(1920), &frames);
-        showing.inner.lock().unwrap().since = Instant::now() - Duration::from_secs(1);
-        let stats = showing.record(frame(8, 2), ms(1), false).unwrap();
-        assert!(stats.moving, "showing the moving picture");
-        assert_eq!((stats.width, stats.height), (1920, 2));
-        assert_eq!(stats.mac, ms(14));
-        assert_eq!(stats.mac_max, ms(20));
-        assert_eq!(stats.skipped, 2);
-        assert!((stats.megabits_per_second - 2.0).abs() < 0.1);
-    }
-
-    #[test]
-    fn stats_stop_with_the_last_track() {
-        let showing = Showing::new();
-        showing.decoder_started();
-        showing.decoder_started();
-        assert!(!showing.decoder_stopped());
-        assert!(showing.decoder_stopped());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_mac_streams_what_was_asked_within_what_it_can_encode() {
-        let request = legato_proto::ExtendRequest {
-            width: 3840,
-            height: 2160,
-            hidpi: true,
-            stream_width: 0,
-            stream_height: 0,
-            moving_width: 1920,
-            moving_height: 1080,
-            fps: 144,
-            bitrate: 40_000_000,
-        };
-        let c = super::host::stream_config(request);
-        assert_eq!((c.stream_width, c.stream_height), (3840, 2160));
-        assert_eq!(c.moving, Some((1920, 1080)));
-        assert_eq!((c.refresh, c.fps, c.sharp_fps), (144, 144, 60));
-        // A moving size no smaller than the stream is no moving track at all.
-        let c = super::host::stream_config(legato_proto::ExtendRequest {
-            stream_width: 1920,
-            stream_height: 1080,
-            ..request
-        });
-        assert_eq!((c.moving, c.fps), (None, 144));
-        let c = super::host::stream_config(legato_proto::ExtendRequest {
-            moving_width: 0,
-            moving_height: 0,
-            ..request
-        });
-        assert_eq!((c.moving, c.refresh, c.fps), (None, 144, 60));
+impl Drop for Viewing {
+    fn drop(&mut self) {
+        self.showing.close();
     }
 }
+
+#[cfg(test)]
+mod tests;

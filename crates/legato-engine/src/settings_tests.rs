@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 
 use super::*;
 
@@ -109,14 +109,17 @@ fn readers_only_see_complete_settings_during_atomic_replacements() {
     config.control.controller = Some("x".repeat(16_384));
     let initial = config.clone();
     config::save(dir.path(), &config).unwrap();
-    let stop = AtomicBool::new(false);
-    let started = std::sync::Barrier::new(2);
+    let path = dir.path();
     std::thread::scope(|scope| {
-        let reader = scope.spawn(|| {
-            assert_eq!(config::load(dir.path()).unwrap(), initial);
-            started.wait();
-            while !stop.load(Ordering::Acquire) {
-                let snapshot = config::load(dir.path()).unwrap();
+        // Channel disconnection releases either side if the other panics. A barrier
+        // and stop flag can leave scope waiting forever, hiding the actual failure.
+        let (started, ready) = mpsc::channel();
+        let (stop, stopping) = mpsc::channel::<()>();
+        let reader = scope.spawn(move || {
+            assert_eq!(config::load(path).unwrap(), initial);
+            started.send(()).unwrap();
+            while matches!(stopping.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                let snapshot = config::load(path).unwrap();
                 assert!(
                     snapshot
                         .control
@@ -125,13 +128,13 @@ fn readers_only_see_complete_settings_during_atomic_replacements() {
                 );
             }
         });
-        started.wait();
+        ready.recv().unwrap();
         for n in 0..20 {
             config.control.updated_at = n;
             config.control.controller = Some("x".repeat(16_384));
             config::save(dir.path(), &config).unwrap();
         }
-        stop.store(true, Ordering::Release);
+        drop(stop);
         reader.join().unwrap();
     });
     assert_eq!(config::load(dir.path()).unwrap(), config);
