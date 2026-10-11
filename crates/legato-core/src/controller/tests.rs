@@ -9,6 +9,7 @@ use crate::layout::fixtures::{macbook_16, windows_triple_4k};
 use crate::layout::{Align, Layout, MachineId, Side};
 
 const MAC: MachineId = MachineId(1);
+const PC: MachineId = MachineId(2);
 const A: u16 = 0x04;
 
 /// The user's desk: three 4K monitors at 150%, MacBook centered below the middle one.
@@ -16,6 +17,26 @@ fn desk() -> Layout {
     let mut layout = Layout::new(windows_triple_4k());
     assert!(layout.place_next_to_local(MAC, macbook_16(), 1, Side::Below, Align::Center, 0.0));
     layout
+}
+
+/// The Mac's view of this desk, crossing straight onto the PC above it.
+fn mac_controller() -> Controller {
+    let mut layout = Layout::new(macbook_16());
+    assert!(layout.place_next_to_local(
+        PC,
+        windows_triple_4k(),
+        0,
+        Side::Above,
+        Align::Center,
+        0.0
+    ));
+    Controller::new(
+        ControllerConfig {
+            push_distance: 0.0,
+            ..Default::default()
+        },
+        layout,
+    )
 }
 
 struct Harness {
@@ -154,23 +175,7 @@ fn bottom_edges_without_a_neighbour_are_walls() {
 
 #[test]
 fn the_macs_own_pointer_on_its_shown_display_is_reported_to_the_viewer() {
-    const PC: MachineId = MachineId(2);
-    let mut layout = Layout::new(macbook_16());
-    assert!(layout.place_next_to_local(
-        PC,
-        windows_triple_4k(),
-        0,
-        Side::Above,
-        Align::Center,
-        0.0
-    ));
-    let mut c = Controller::new(
-        ControllerConfig {
-            push_distance: 0.0,
-            ..Default::default()
-        },
-        layout,
-    );
+    let mut c = mac_controller();
     let display = Rect::new(-96.0, -1080.0, 1920.0, 1080.0);
     c.set_shown(Some(Shown {
         peer: PC,
@@ -226,23 +231,7 @@ fn the_macs_own_pointer_on_its_shown_display_is_reported_to_the_viewer() {
 fn a_mac_cursor_on_its_extra_display_is_not_at_an_edge() {
     // The Mac's view: the PC's monitors above the MacBook. Its extra display (shown on
     // the PC) also sits above the MacBook, but isn't one of the Mac's shared screens.
-    const PC: MachineId = MachineId(2);
-    let mut layout = Layout::new(macbook_16());
-    assert!(layout.place_next_to_local(
-        PC,
-        windows_triple_4k(),
-        0,
-        Side::Above,
-        Align::Center,
-        0.0
-    ));
-    let mut c = Controller::new(
-        ControllerConfig {
-            push_distance: 0.0,
-            ..Default::default()
-        },
-        layout,
-    );
+    let mut c = mac_controller();
     let (mut now, mut out) = (Instant::now(), vec![]);
     // A palm on the trackpad while the cursor is on the extra display, well above the
     // MacBook: the Mac keeps its cursor rather than taking over the PC.
@@ -1177,30 +1166,14 @@ fn a_report_sent_before_the_mac_came_across_is_stale() {
 mod the_macs_extra_display {
     use super::*;
 
-    const PC: MachineId = MachineId(2);
     /// In the Mac's coordinates.
     const DISPLAY: Rect = Rect::new(-96.0, -1080.0, 1920.0, 1080.0);
     /// Full screen on the PC's middle monitor, in the PC's coordinates.
     const FULL_SCREEN: Rect = Rect::new(0.0, 0.0, 3840.0, 2160.0);
 
     fn mac(picture: Option<Rect>) -> Harness {
-        let mut layout = Layout::new(macbook_16());
-        assert!(layout.place_next_to_local(
-            PC,
-            windows_triple_4k(),
-            0,
-            Side::Above,
-            Align::Center,
-            0.0
-        ));
         let mut h = Harness {
-            c: Controller::new(
-                ControllerConfig {
-                    push_distance: 0.0,
-                    ..Default::default()
-                },
-                layout,
-            ),
+            c: mac_controller(),
             now: Instant::now(),
             out: vec![],
         };

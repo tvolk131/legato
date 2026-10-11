@@ -362,6 +362,22 @@ mod tests {
         }
     }
 
+    fn key(usage: u16, down: bool) -> Control {
+        Control::Key { usage, down }
+    }
+
+    fn injected_key(usage: u16, down: bool, repeat: bool) -> Inject {
+        Inject::Key {
+            usage,
+            down,
+            repeat,
+        }
+    }
+
+    fn button(button: Button, down: bool, pos: Point) -> Control {
+        Control::Button { button, down, pos }
+    }
+
     #[test]
     fn stale_and_reordered_motion_is_dropped() {
         let t = Instant::now();
@@ -413,23 +429,8 @@ mod tests {
         let mut r = Receiver::new(ReceiverConfig::default());
         let mut out = vec![];
         r.datagram(motion(1, 1.0), &mut out);
-        r.control(
-            t,
-            Control::Key {
-                usage: A,
-                down: true,
-            },
-            &mut out,
-        );
-        r.control(
-            t,
-            Control::Button {
-                button: Button::Left,
-                down: true,
-                pos: Point::default(),
-            },
-            &mut out,
-        );
+        r.control(t, key(A, true), &mut out);
+        r.control(t, button(Button::Left, true, Point::default()), &mut out);
         assert!(out.is_empty());
     }
 
@@ -438,14 +439,7 @@ mod tests {
         let t = Instant::now();
         let mut r = entered(t);
         let mut out = vec![];
-        r.control(
-            t,
-            Control::Key {
-                usage: A,
-                down: true,
-            },
-            &mut out,
-        );
+        r.control(t, key(A, true), &mut out);
         assert_eq!(r.next_deadline(), Some(t + Duration::from_millis(500)));
         r.tick(t + Duration::from_millis(499), &mut out);
         assert_eq!(out.len(), 1, "no repeat before the delay");
@@ -453,36 +447,11 @@ mod tests {
         r.tick(t + Duration::from_millis(533), &mut out);
         assert_eq!(
             out[1..],
-            [
-                Inject::Key {
-                    usage: A,
-                    down: true,
-                    repeat: true
-                },
-                Inject::Key {
-                    usage: A,
-                    down: true,
-                    repeat: true
-                },
-            ]
+            [injected_key(A, true, true), injected_key(A, true, true)]
         );
         out.clear();
-        r.control(
-            t + Duration::from_millis(540),
-            Control::Key {
-                usage: A,
-                down: false,
-            },
-            &mut out,
-        );
-        assert_eq!(
-            out,
-            [Inject::Key {
-                usage: A,
-                down: false,
-                repeat: false
-            }]
-        );
+        r.control(t + Duration::from_millis(540), key(A, false), &mut out);
+        assert_eq!(out, [injected_key(A, false, false)]);
         assert_eq!(r.next_deadline(), None);
     }
 
@@ -491,14 +460,7 @@ mod tests {
         let t = Instant::now();
         let mut r = entered(t);
         let mut out = vec![];
-        r.control(
-            t,
-            Control::Key {
-                usage: SHIFT,
-                down: true,
-            },
-            &mut out,
-        );
+        r.control(t, key(SHIFT, true), &mut out);
         assert_eq!(r.next_deadline(), None);
     }
 
@@ -507,29 +469,11 @@ mod tests {
         let t = Instant::now();
         let mut r = entered(t);
         let mut out = vec![];
+        r.control(t, key(SHIFT, true), &mut out);
+        r.control(t, key(A, true), &mut out);
         r.control(
             t,
-            Control::Key {
-                usage: SHIFT,
-                down: true,
-            },
-            &mut out,
-        );
-        r.control(
-            t,
-            Control::Key {
-                usage: A,
-                down: true,
-            },
-            &mut out,
-        );
-        r.control(
-            t,
-            Control::Button {
-                button: Button::Left,
-                down: true,
-                pos: Point::new(3.0, 3.0),
-            },
+            button(Button::Left, true, Point::new(3.0, 3.0)),
             &mut out,
         );
         out.clear();
@@ -537,16 +481,8 @@ mod tests {
         assert_eq!(
             out,
             [
-                Inject::Key {
-                    usage: A,
-                    down: false,
-                    repeat: false
-                },
-                Inject::Key {
-                    usage: SHIFT,
-                    down: false,
-                    repeat: false
-                },
+                injected_key(A, false, false),
+                injected_key(SHIFT, false, false),
                 Inject::Button {
                     button: Button::Left,
                     down: false,
@@ -558,14 +494,7 @@ mod tests {
         assert!(!r.is_controlled());
         // A late release for a key already released is ignored.
         out.clear();
-        r.control(
-            t,
-            Control::Key {
-                usage: A,
-                down: false,
-            },
-            &mut out,
-        );
+        r.control(t, key(A, false), &mut out);
         assert!(out.is_empty());
     }
 
@@ -577,24 +506,8 @@ mod tests {
         let p = Point::new(100.0, 100.0);
         for i in 0..3 {
             let at = t + Duration::from_millis(150 * i);
-            r.control(
-                at,
-                Control::Button {
-                    button: Button::Left,
-                    down: true,
-                    pos: p,
-                },
-                &mut out,
-            );
-            r.control(
-                at,
-                Control::Button {
-                    button: Button::Left,
-                    down: false,
-                    pos: p,
-                },
-                &mut out,
-            );
+            r.control(at, button(Button::Left, true, p), &mut out);
+            r.control(at, button(Button::Left, false, p), &mut out);
         }
         let clicks: Vec<u8> = out
             .iter()
@@ -608,34 +521,10 @@ mod tests {
         // Too slow, or moved too far: counting restarts.
         out.clear();
         let later = t + Duration::from_secs(5);
-        r.control(
-            later,
-            Control::Button {
-                button: Button::Left,
-                down: true,
-                pos: p,
-            },
-            &mut out,
-        );
-        r.control(
-            later,
-            Control::Button {
-                button: Button::Left,
-                down: false,
-                pos: p,
-            },
-            &mut out,
-        );
+        r.control(later, button(Button::Left, true, p), &mut out);
+        r.control(later, button(Button::Left, false, p), &mut out);
         let far = Point::new(200.0, 100.0);
-        r.control(
-            later,
-            Control::Button {
-                button: Button::Left,
-                down: true,
-                pos: far,
-            },
-            &mut out,
-        );
+        r.control(later, button(Button::Left, true, far), &mut out);
         assert!(matches!(out[0], Inject::Button { clicks: 1, .. }));
         assert!(matches!(out[2], Inject::Button { clicks: 1, .. }));
     }
@@ -645,27 +534,10 @@ mod tests {
         let t = Instant::now();
         let mut r = entered(t);
         let mut out = vec![];
-        r.control(
-            t,
-            Control::Key {
-                usage: A,
-                down: true,
-            },
-            &mut out,
-        );
+        r.control(t, key(A, true), &mut out);
         out.clear();
         r.local_activity(&mut out);
-        assert_eq!(
-            out,
-            [
-                Inject::Key {
-                    usage: A,
-                    down: false,
-                    repeat: false
-                },
-                Inject::SendYield,
-            ]
-        );
+        assert_eq!(out, [injected_key(A, false, false), Inject::SendYield]);
         out.clear();
         r.local_activity(&mut out);
         assert!(out.is_empty(), "only yield once");

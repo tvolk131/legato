@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use legato_core::controller::{Action, CaptureCommand, Controller};
-use legato_core::{Inject, LocalInput, ReceiverConfig};
+use legato_core::{Inject, LocalInput};
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -92,43 +92,23 @@ mod imp {
     pub use legato_windows::{caps_lock, set_caps_lock};
 }
 
-pub fn check_permissions() -> Result<()> {
-    imp::check_permissions()
-}
-
-pub fn receiver_config() -> ReceiverConfig {
-    imp::receiver_config()
-}
-
-pub fn clipboard_change_count() -> u64 {
-    imp::clipboard_change_count()
-}
+pub use imp::{check_permissions, clipboard_change_count, receiver_config};
 
 /// How the cursor looks to the OS, for the log (Windows only).
-pub fn cursor_state() -> Option<String> {
-    imp::cursor_state()
-}
+pub use imp::cursor_state;
 
 /// Whether this machine's Caps Lock is on.
-pub fn caps_lock() -> bool {
-    imp::caps_lock()
-}
+pub use imp::caps_lock;
 
 /// Turns this machine's Caps Lock on or off, keyboard lights and all.
-pub fn set_caps_lock(on: bool) {
-    imp::set_caps_lock(on);
-}
+pub use imp::set_caps_lock;
 
 /// Where a window's contents are on the screen (native coordinates), where the OS says
 /// so exactly (Windows only).
-pub fn window_area(window: u64) -> Option<legato_proto::Rect> {
-    imp::window_area(window)
-}
+pub use imp::window_area;
 
 /// The app (or window) in front, which gets typing, for the log.
-pub fn frontmost_app() -> Option<String> {
-    imp::frontmost_app()
-}
+pub use imp::frontmost_app;
 
 /// Captures this machine's keyboard and mouse. Stops when dropped.
 pub struct Capture(imp::RawCapture);

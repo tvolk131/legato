@@ -523,17 +523,18 @@ fn quality_name(quality: legato_engine::config::Quality) -> &'static str {
     }
 }
 
-/// One choice of a few, as a connected group of toggle buttons: (chosen, label, what
-/// choosing it sends). Choices that send nothing are disabled.
-fn choices<'a>(
-    items: impl IntoIterator<Item = (bool, String, Option<Message>)>,
+/// One choice of a few, as a connected group of toggle buttons.
+fn choices<'a, T: Copy + PartialEq, L: Into<String>>(
+    selected: T,
+    items: impl IntoIterator<Item = (T, L)>,
+    on_select: impl Fn(T) -> Message,
 ) -> Element<'a, Message> {
-    button_group(items.into_iter().map(|(chosen, label, message)| {
-        button(label)
+    button_group(items.into_iter().map(|(value, label)| {
+        button(label.into())
             .size(ButtonSize::ExtraSmall)
             .variant(ButtonVariant::Tonal)
-            .selected(chosen)
-            .on_press_maybe(message)
+            .selected(value == selected)
+            .on_press(on_select(value))
     }))
     .connected(true)
     .into()
@@ -573,28 +574,22 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
 
     // Where: full screen or a window, then (for full screen) which display.
     let full = o.placement == Placement::FullScreen;
-    let mut where_ = column![choices([
-        (
-            full,
-            "Full screen".to_string(),
-            Some(change(&|o| o.placement = Placement::FullScreen)),
-        ),
-        (
-            !full,
-            "In a window".to_string(),
-            Some(change(&|o| o.placement = Placement::Window)),
-        ),
-    ])]
+    let mut where_ = column![choices(
+        o.placement,
+        [
+            (Placement::FullScreen, "Full screen"),
+            (Placement::Window, "In a window")
+        ],
+        |placement| change(&|o| o.placement = placement),
+    )]
     .spacing(8);
     if full && displays.len() > 1 {
         where_ = where_.push(if displays.len() <= 4 {
-            choices((1..=displays.len()).map(|i| {
-                (
-                    i == display,
-                    format!("Display {i}"),
-                    Some(change(&move |o| o.display = i)),
-                )
-            }))
+            choices(
+                display,
+                (1..=displays.len()).map(|i| (i, format!("Display {i}"))),
+                |display| change(&|o| o.display = display),
+            )
         } else {
             let o = o.clone();
             select(
@@ -621,29 +616,21 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
         Resolution::Fixed => Some(o.fixed),
     };
     let size_choice = choices(
-        std::iter::once((
-            o.resolution == Resolution::Match,
-            "Match".to_string(),
-            Some(change(&|o| o.resolution = Resolution::Match)),
-        ))
-        .chain(FIXED_SIZES.iter().map(|&(w, h, label)| {
-            (
-                o.resolution == Resolution::Fixed && o.fixed == (w, h),
-                label.to_string(),
-                Some(change(&move |o| {
-                    o.resolution = Resolution::Fixed;
-                    o.fixed = (w, h);
-                })),
-            )
-        })),
+        (o.resolution, o.fixed),
+        std::iter::once(((Resolution::Match, o.fixed), "Match"))
+            .chain(FIXED_SIZES.map(|(w, h, label)| ((Resolution::Fixed, (w, h)), label))),
+        |(resolution, fixed)| {
+            change(&|o| {
+                o.resolution = resolution;
+                o.fixed = fixed;
+            })
+        },
     );
-    let refresh_choice = choices(legato_core::extend::FRAME_RATES.map(|rate| {
-        (
-            rate == o.fps,
-            format!("{rate} Hz"),
-            Some(change(&move |o| o.fps = rate)),
-        )
-    }));
+    let refresh_choice = choices(
+        o.fps,
+        legato_core::extend::FRAME_RATES.map(|rate| (rate, format!("{rate} Hz"))),
+        |fps| change(&|o| o.fps = fps),
+    );
     let hz = o.fps;
     let display_note = match (o.resolution, shown) {
         (Resolution::Match, Some((w, h))) if displays.len() > 1 => format!(
@@ -660,34 +647,25 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
 
     // The stream: how it gets here, and so what you see.
     let quality_choice = choices(
+        o.quality,
         [
             Quality::Adaptive,
             Quality::Sharpest,
             Quality::Balanced,
             Quality::Fastest,
         ]
-        .map(|q| {
-            (
-                o.quality == q,
-                quality_name(q).to_string(),
-                Some(change(&move |o| o.quality = q)),
-            )
-        }),
+        .map(|q| (q, quality_name(q))),
+        |quality| change(&|o| o.quality = quality),
     );
     let moving_choice = row![
         typography("While things move", TypeScale::LabelLarge),
         choices(
+            o.while_moving,
             [
                 (MovingSize::Hd, "1080p (quicker)"),
                 (MovingSize::Qhd, "1440p (sharper)"),
-            ]
-            .map(|(size, label)| {
-                (
-                    o.while_moving == size,
-                    label.to_string(),
-                    Some(change(&move |o| o.while_moving = size)),
-                )
-            }),
+            ],
+            |size| change(&|o| o.while_moving = size),
         ),
     ]
     .spacing(12)
