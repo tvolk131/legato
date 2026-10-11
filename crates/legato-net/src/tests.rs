@@ -126,17 +126,22 @@ async fn next_connected(events: &mut mpsc::UnboundedReceiver<SessionEvent>) -> A
     }
 }
 
+/// Pair two loopback nodes and keep both session event streams alive.
+async fn connect(a: &Net, b: &Net) -> [(mpsc::UnboundedReceiver<SessionEvent>, Arc<Session>); 2] {
+    pair(a, b, true, true).await;
+    a.remember(b.addr());
+    b.remember(a.addr());
+    let mut a_events = a.start_sessions(hello(a));
+    let mut b_events = b.start_sessions(hello(b));
+    let a_session = next_connected(&mut a_events).await;
+    let b_session = next_connected(&mut b_events).await;
+    [(a_events, a_session), (b_events, b_session)]
+}
+
 #[tokio::test]
 async fn paired_peers_connect_and_exchange_input() {
     let (a, b) = (node("a", Os::Windows).await, node("b", Os::MacOs).await);
-    pair(&a, &b, true, true).await;
-    a.remember(b.addr());
-    b.remember(a.addr());
-
-    let mut a_events = a.start_sessions(hello(&a));
-    let mut b_events = b.start_sessions(hello(&b));
-    let a_session = next_connected(&mut a_events).await;
-    let b_session = next_connected(&mut b_events).await;
+    let [(mut a_events, a_session), (mut b_events, b_session)] = connect(&a, &b).await;
     assert_eq!(a_session.peer, b.id());
     assert_eq!(b_session.remote.name, "a");
     assert_eq!(a_session.path().map(|(k, _)| k), Some(PathKind::Direct));
@@ -221,14 +226,7 @@ fn adverts_round_trip_and_fit() {
 #[tokio::test]
 async fn blobs_and_files_arrive_intact() {
     let (a, b) = (node("a", Os::Windows).await, node("b", Os::MacOs).await);
-    pair(&a, &b, true, true).await;
-    a.remember(b.addr());
-    b.remember(a.addr());
-    let _a_events = a.start_sessions(hello(&a));
-    let mut b_events = b.start_sessions(hello(&b));
-    let mut a_events = _a_events;
-    let a_session = next_connected(&mut a_events).await;
-    let _b_session = next_connected(&mut b_events).await;
+    let [(_a_events, a_session), (mut b_events, _b_session)] = connect(&a, &b).await;
 
     let blob: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
     a_session.send_blob(legato_proto::blob::CLIPBOARD, blob.clone());
@@ -281,13 +279,7 @@ async fn blobs_and_files_arrive_intact() {
 #[tokio::test]
 async fn video_frames_arrive_in_order() {
     let (a, b) = (node("a", Os::MacOs).await, node("b", Os::Windows).await);
-    pair(&a, &b, true, true).await;
-    a.remember(b.addr());
-    b.remember(a.addr());
-    let mut a_events = a.start_sessions(hello(&a));
-    let mut b_events = b.start_sessions(hello(&b));
-    let a_session = next_connected(&mut a_events).await;
-    let _b_session = next_connected(&mut b_events).await;
+    let [(_a_events, a_session), (mut b_events, _b_session)] = connect(&a, &b).await;
 
     let frames: Vec<VideoFrame> = (0..20u32)
         .map(|i| VideoFrame {

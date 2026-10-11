@@ -5,11 +5,11 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use legato_core::controller::{Action, Controller, ControllerConfig, Event};
+use legato_core::controller::{Action, Controller, ControllerConfig, Event, Portal};
 use legato_core::{Align, Layout, MachineId, Side};
 use legato_proto::{Control, Display, Rect, Screens};
 use legato_windows::{Capture, CaptureOptions, Command, screens};
-use windows::Win32::Foundation::POINT;
+use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
     MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput, VIRTUAL_KEY,
@@ -69,6 +69,45 @@ fn start_capture(config: ControllerConfig, layout: Layout) -> (Capture, mpsc::Re
     )
     .unwrap();
     (capture, rx)
+}
+
+fn centered_window(primary: Rect) -> (i32, i32, i32, i32) {
+    let (w, h) = (640, 360);
+    (
+        primary.center().x as i32 - w / 2,
+        primary.center().y as i32 - h / 2,
+        w,
+        h,
+    )
+}
+
+fn set_portal(capture: &Capture, window: HWND, remote: Rect) {
+    capture.send(Command::SetPortal(Some(Portal {
+        peer: PEER,
+        remote,
+        window: window.0 as usize as u64,
+    })));
+}
+
+/// What went to the peer since the last call: (entered, clicks, this key's events).
+fn sent_counts(
+    rx: &mpsc::Receiver<Action>,
+    key_usage: u16,
+    wait: Duration,
+) -> (usize, usize, usize) {
+    std::thread::sleep(wait);
+    let actions: Vec<Action> = rx.try_iter().collect();
+    let count = |matches: &dyn Fn(&Control) -> bool| {
+        actions
+            .iter()
+            .filter(|a| matches!(a, Action::Send { to: PEER, msg } if matches(msg)))
+            .count()
+    };
+    (
+        count(&|m| matches!(m, Control::Enter { .. })),
+        count(&|m| matches!(m, Control::Button { .. })),
+        count(&|m| matches!(m, Control::Key { usage, .. } if *usage == key_usage)),
+    )
 }
 
 fn cursor() -> POINT {
@@ -573,35 +612,14 @@ fn windows_key(down: bool) {
 #[test]
 #[ignore = "moves the cursor and shows a window"]
 fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
-    use legato_core::controller::Portal;
-
     let local = screens();
     let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
     let (layout, _) = peer_to_the_right(&local, 1512.0, 982.0);
     let (capture, rx) = start_capture(ControllerConfig::default(), layout);
 
-    let (w, h) = (640, 360);
-    let (x, y) = (
-        primary.center().x as i32 - w / 2,
-        primary.center().y as i32 - h / 2,
-    );
+    let (x, y, w, h) = centered_window(primary);
     let (cx, cy) = (x + w / 2, y + h / 2);
-    // What went to the peer since the last call: (entered, clicks, keys).
-    let sent = || {
-        std::thread::sleep(Duration::from_millis(100));
-        let actions: Vec<Action> = rx.try_iter().collect();
-        let count = |m: &dyn Fn(&Control) -> bool| {
-            actions
-                .iter()
-                .filter(|a| matches!(a, Action::Send { to: PEER, msg } if m(msg)))
-                .count()
-        };
-        (
-            count(&|m| matches!(m, Control::Enter { .. })),
-            count(&|m| matches!(m, Control::Button { .. })),
-            count(&|m| matches!(m, Control::Key { usage: 0x68, .. })),
-        )
-    };
+    let sent = || sent_counts(&rx, 0x68, Duration::from_millis(100));
     let press = || {
         key(0x64, true); // F13
         key(0x64, false);
@@ -635,11 +653,11 @@ fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
         // The viewer appears under a resting pointer.
         unsafe { SetCursorPos(cx, cy).unwrap() };
         std::thread::sleep(Duration::from_millis(50));
-        capture.send(Command::SetPortal(Some(Portal {
-            peer: PEER,
-            remote: Rect::new(1512.0, 0.0, 1920.0, 1080.0),
-            window: viewer.hwnd.0 as usize as u64,
-        })));
+        set_portal(
+            &capture,
+            viewer.hwnd,
+            Rect::new(1512.0, 0.0, 1920.0, 1080.0),
+        );
         let _ = sent();
         press();
         check("typing before any motion", sent(), (1, 0, 2));
@@ -701,11 +719,11 @@ fn keys_go_through_the_portal_whether_or_not_the_viewer_has_focus() {
     eprintln!("taskbar at {taskbar:?}");
     for close in ["Escape", "a click outside Start", "a click on the taskbar"] {
         let viewer = viewer::Viewer::open(fx, fy, fw, fh, Duration::ZERO);
-        capture.send(Command::SetPortal(Some(Portal {
-            peer: PEER,
-            remote: Rect::new(1512.0, 0.0, 1920.0, 1080.0),
-            window: viewer.hwnd.0 as usize as u64,
-        })));
+        set_portal(
+            &capture,
+            viewer.hwnd,
+            Rect::new(1512.0, 0.0, 1920.0, 1080.0),
+        );
         let before = window_at(mx, my, viewer.hwnd);
         if before != "the viewer" {
             eprintln!("[{close}] skipped: something else covers the viewer: {before}");
@@ -879,16 +897,10 @@ mod winit_viewer {
 #[test]
 #[ignore = "moves the cursor and shows windows"]
 fn keys_go_through_the_portal_to_a_focused_winit_viewer() {
-    use legato_core::controller::Portal;
-
     let local = screens();
     let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
     let layout = || peer_to_the_right(&local, 1512.0, 982.0).0;
-    let (w, h) = (640, 360);
-    let (x, y) = (
-        primary.center().x as i32 - w / 2,
-        primary.center().y as i32 - h / 2,
-    );
+    let (x, y, w, h) = centered_window(primary);
     let (cx, cy) = (x + w / 2, y + h / 2);
 
     // Types on a focused window shown as a portal; returns what reached the peer. The
@@ -898,11 +910,7 @@ fn keys_go_through_the_portal_to_a_focused_winit_viewer() {
         let (capture, rx) = start_capture(ControllerConfig::default(), layout());
         let late = hwnd.is_none().then(open);
         let hwnd = hwnd.or(late.as_ref().map(|v| v.hwnd)).unwrap();
-        capture.send(Command::SetPortal(Some(Portal {
-            peer: PEER,
-            remote: Rect::new(1512.0, 0.0, 1920.0, 1080.0),
-            window: hwnd.0 as usize as u64,
-        })));
+        set_portal(&capture, hwnd, Rect::new(1512.0, 0.0, 1920.0, 1080.0));
         let focused = viewer::focus(hwnd);
         unsafe { SetCursorPos(cx, cy).unwrap() };
         mouse_move(3, 0);
@@ -911,18 +919,7 @@ fn keys_go_through_the_portal_to_a_focused_winit_viewer() {
             key(0x1e, true); // A
             key(0x1e, false);
         }
-        std::thread::sleep(Duration::from_millis(150));
-        let actions: Vec<Action> = rx.try_iter().collect();
-        let count = |m: &dyn Fn(&Control) -> bool| {
-            actions
-                .iter()
-                .filter(|a| matches!(a, Action::Send { to: PEER, msg } if m(msg)))
-                .count()
-        };
-        let (entered, keys) = (
-            count(&|m| matches!(m, Control::Enter { .. })),
-            count(&|m| matches!(m, Control::Key { usage: 0x04, .. })),
-        );
+        let (entered, _, keys) = sent_counts(&rx, 0x04, Duration::from_millis(150));
         let under = window_at(cx, cy, hwnd);
         eprintln!(
             "{what}: focused {focused}, under the pointer: {under}; entered {entered}, keys {keys}/6"
@@ -1208,25 +1205,15 @@ fn the_cursor_shows_when_the_peer_takes_over() {
 #[test]
 #[ignore = "moves the cursor and shows a window"]
 fn the_pcs_cursor_follows_the_macs_own_pointer_on_its_display() {
-    use legato_core::controller::Portal;
-
     let local = screens();
     let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
     let (layout, edge) = peer_to_the_right(&local, 1512.0, 982.0);
     let (capture, rx) = start_capture(no_push(), layout);
-    let (w, h) = (640, 360);
-    let (x, y) = (
-        primary.center().x as i32 - w / 2,
-        primary.center().y as i32 - h / 2,
-    );
+    let (x, y, w, h) = centered_window(primary);
     let viewer = viewer::Viewer::open(x, y, w, h, Duration::ZERO);
     // The Mac's extra display, above its MacBook, shown here in the window.
     let remote = Rect::new(-96.0, -1080.0, 1920.0, 1080.0);
-    capture.send(Command::SetPortal(Some(Portal {
-        peer: PEER,
-        remote,
-        window: viewer.hwnd.0 as usize as u64,
-    })));
+    set_portal(&capture, viewer.hwnd, remote);
     std::thread::sleep(Duration::from_millis(100));
     let under = window_at(x + w / 2, y + h / 2, viewer.hwnd);
     if under != "the viewer" {
