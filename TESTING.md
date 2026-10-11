@@ -102,6 +102,8 @@ File receive regressions use isolated temporary directories and a real loopback 
 
 Settings regressions exercise actual app actions and the config subscription: an incoming controller policy survives unrelated UI edits, queued notifications preserve newer values and drafts, and failed saves keep committed values. Engine tests cover concurrent edits, stale peer policies, failed publication, and readers observing only complete files during atomic replacement.
 
+Input-routing regressions use the injection thread's peer selector with the real core receiver, without injecting OS events. They cover delayed motion from the previous controller after a handover (including a higher sequence number), held-key/button release, unrelated peer disconnects, local takeover, leave, duplicate packets, and sequence wraparound. Peer pointer reports retain their separate capture/controller path.
+
 ## 3. OS conformance suite (CI on hosted runners)
 
 GitHub-hosted `macos-latest` and `windows-latest` runners can inject input:

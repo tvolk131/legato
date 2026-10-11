@@ -12,7 +12,7 @@ use anyhow::Result;
 use legato_core::controller::{
     Action, CaptureCommand, Controller, ControllerConfig, Event, Portal,
 };
-use legato_core::{ActivityFilter, Inject, KeyRemap, Layout, MachineId, Receiver};
+use legato_core::{ActivityFilter, Inject, KeyRemap, Layout, MachineId};
 use legato_net::{EndpointId, Session, SessionEvent};
 use legato_proto::{
     ClipboardContent, Control, ControlMode, Datagram, ExtendRequest, FilePurpose, Os, Point,
@@ -27,6 +27,9 @@ use crate::extend::{self, Viewing};
 use crate::files::{self, Inbox};
 use crate::platform::{self, Capture, Injector};
 use crate::{Ctx, Status};
+
+mod input;
+use input::InputReceiver;
 
 type BySessions = Arc<RwLock<HashMap<MachineId, Arc<Session>>>>;
 
@@ -62,7 +65,7 @@ fn control_mode(config: &Config) -> ControlMode {
 /// Messages for the injection thread.
 enum Input {
     Control(EndpointId, Control),
-    Datagram(Datagram),
+    Datagram(EndpointId, Datagram),
     /// Someone used this machine's own keyboard or mouse: what it was, for the log.
     LocalActivity(&'static str),
     Disconnected(EndpointId),
@@ -612,7 +615,7 @@ pub(crate) async fn run(
                             }
                             continue;
                         }
-                        let _ = inject_tx.send(Input::Datagram(msg));
+                        let _ = inject_tx.send(Input::Datagram(peer, msg));
                     }
                     SessionEvent::Blob { tag, data, .. } => {
                         if tag == blob::CLIPBOARD
@@ -695,15 +698,13 @@ fn inject_loop(
     status: tokio::sync::broadcast::Sender<Status>,
     yielded: mpsc::UnboundedSender<EndpointId>,
 ) {
-    let mut receiver = Receiver::new(platform::receiver_config());
+    let mut input = InputReceiver::new(platform::receiver_config());
     let Some(mut injector) = Injector::new() else {
         tracing::error!("could not set up input injection");
         return;
     };
     injector.set_invert_wheel(invert_wheel);
     let mut out = Vec::new();
-    // The peer currently driving this machine.
-    let mut driver: Option<EndpointId> = None;
     // For the log: where the first typing after each entry went, and whether typing that
     // arrived while not being driven was noted.
     let (mut typing_noted, mut ignored_noted) = (false, false);
@@ -713,24 +714,20 @@ fn inject_loop(
     let (mut moves_came, mut moves_used) = (0u32, 0u32);
     let mut controlled = false;
     loop {
-        let input = match receiver.next_deadline() {
+        let received = match input.receiver.next_deadline() {
             Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         let now = Instant::now();
-        let stop = match input {
+        let stop = match received {
             Ok(Input::Control(peer, msg)) => {
                 if matches!(msg, Control::Enter { .. }) {
-                    driver = Some(peer);
                     (typing_noted, ignored_noted) = (false, false);
                     entered_at = Some(now);
                     (moves_came, moves_used) = (0, 0);
                 }
                 let key_down = matches!(msg, Control::Key { down: true, .. });
-                // Only the current driver's input counts.
-                if driver == Some(peer) {
-                    receiver.control(now, msg, &mut out);
-                }
+                input.control(peer, now, msg, &mut out);
                 if key_down {
                     let name = || {
                         sessions
@@ -739,7 +736,7 @@ fn inject_loop(
                             .get(&peer)
                             .map_or_else(|| peer.fmt_short().to_string(), |s| s.remote.name.clone())
                     };
-                    if driver == Some(peer) && receiver.is_controlled() {
+                    if input.driver == Some(peer) && input.receiver.is_controlled() {
                         if !std::mem::replace(&mut typing_noted, true) {
                             tracing::info!(
                                 "Typing from \"{}\" goes to {}.",
@@ -757,17 +754,18 @@ fn inject_loop(
                 }
                 false
             }
-            Ok(Input::Datagram(msg)) => {
+            Ok(Input::Datagram(peer, msg)) => {
                 let before = out.len();
-                receiver.datagram(msg, &mut out);
-                moves_came = moves_came.saturating_add(1);
+                if input.datagram(peer, msg, &mut out) {
+                    moves_came = moves_came.saturating_add(1);
+                }
                 if out.len() > before {
                     moves_used = moves_used.saturating_add(1);
                 }
                 false
             }
             Ok(Input::LocalActivity(what)) => {
-                receiver.local_activity(&mut out);
+                input.receiver.local_activity(&mut out);
                 if out.iter().any(|i| matches!(i, Inject::SendYield)) {
                     // Worth knowing when input from the other machine seems to stop.
                     tracing::info!(
@@ -777,10 +775,7 @@ fn inject_loop(
                 false
             }
             Ok(Input::Disconnected(peer)) => {
-                if driver == Some(peer) {
-                    receiver.disconnected(&mut out);
-                    driver = None;
-                }
+                input.disconnected(peer, &mut out);
                 false
             }
             Ok(Input::InvertWheel(invert)) => {
@@ -788,7 +783,7 @@ fn inject_loop(
                 false
             }
             Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => {
-                receiver.disconnected(&mut out);
+                input.receiver.disconnected(&mut out);
                 true
             }
             Err(RecvTimeoutError::Timeout) => false,
@@ -798,10 +793,11 @@ fn inject_loop(
         // else, hidden, or suppressed.
         if entered_at
             .is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_millis(400))
-            && receiver.is_controlled()
+            && input.receiver.is_controlled()
         {
             entered_at = None;
-            let name = driver
+            let name = input
+                .driver
                 .and_then(|d| {
                     sessions
                         .read()
@@ -818,11 +814,12 @@ fn inject_loop(
                  took over, {moves_used} moved the cursor{cursor}."
             );
         }
-        receiver.tick(now, &mut out);
+        input.receiver.tick(now, &mut out);
         for action in out.drain(..) {
             if action == Inject::SendYield {
-                if let Some(session) =
-                    driver.and_then(|d| sessions.read().unwrap().get(&d).cloned())
+                if let Some(session) = input
+                    .driver
+                    .and_then(|d| sessions.read().unwrap().get(&d).cloned())
                 {
                     session.send(Control::Yield);
                     let _ = yielded.send(session.peer);
@@ -831,9 +828,9 @@ fn inject_loop(
                 injector.apply(&action);
             }
         }
-        if receiver.is_controlled() != controlled {
-            controlled = receiver.is_controlled();
-            let _ = status.send(Status::ControlledBy(driver.filter(|_| controlled)));
+        if input.receiver.is_controlled() != controlled {
+            controlled = input.receiver.is_controlled();
+            let _ = status.send(Status::ControlledBy(input.driver.filter(|_| controlled)));
         }
         if stop {
             return;
