@@ -89,6 +89,7 @@ fn model(page: Page) -> Model {
         pairing_open: false,
         add_device_open: false,
         config,
+        push_distance: None,
         local: Screens {
             displays: vec![
                 display(-3840.0, 3840.0, 2160.0, false),

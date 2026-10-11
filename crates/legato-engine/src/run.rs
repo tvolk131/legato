@@ -496,11 +496,8 @@ pub(crate) async fn run(
                                 }
                             }
                             Control::ControlMode(mode) => {
-                                if mode.updated_at > config.control.updated_at {
-                                    let _ = ctx.engine.update_config(|c| {
-                                        c.control.controller = mode.controller.clone();
-                                        c.control.updated_at = mode.updated_at;
-                                    });
+                                if let Err(e) = ctx.engine.apply_control_mode(mode) {
+                                    ctx.status(Status::Problem(format!("Couldn't save controller settings: {e:#}")));
                                 }
                             }
                             Control::ExtendRequest(request) => {

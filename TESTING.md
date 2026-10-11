@@ -100,6 +100,8 @@ Table-driven tests on these fixtures check:
 
 File receive regressions use isolated temporary directories and a real loopback transfer. They check that sanitized names and nested folders remain distinct, simultaneous receives never truncate existing files, batch ids are scoped to their sender, and a truncated transfer removes only its own partial file. These run with the normal engine tests.
 
+Settings regressions exercise actual app actions and the config subscription: an incoming controller policy survives unrelated UI edits, queued notifications preserve newer values and drafts, and failed saves keep committed values. Engine tests cover concurrent edits, stale peer policies, failed publication, and readers observing only complete files during atomic replacement.
+
 ## 3. OS conformance suite (CI on hosted runners)
 
 GitHub-hosted `macos-latest` and `windows-latest` runners can inject input:

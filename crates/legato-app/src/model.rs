@@ -65,6 +65,8 @@ pub struct Model {
     /// The "Add a device" dialog, listing unpaired devices nearby, is open.
     pub add_device_open: bool,
     pub config: Config,
+    /// A slider drag that has not been committed yet.
+    pub push_distance: Option<f64>,
     pub local: Screens,
     pub known: HashMap<EndpointId, Screens>,
     /// Where peers have placed this machine, for mirroring their arrangement.
