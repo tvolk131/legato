@@ -383,7 +383,9 @@ pub(crate) async fn run(
                             {
                                 s.send(Control::ExtendStop { reason: String::new() });
                             }
-                            viewing = Some(Viewing::new(to));
+                            viewing = Some(Viewing::new(
+                                to, frames.clone(), ctx.engine.viewer_stats.clone(),
+                            ));
                             session.send(Control::ExtendRequest(request));
                         }
                         None => ctx.status(Status::ExtendEnded {
@@ -396,7 +398,6 @@ pub(crate) async fn run(
                 RunCommand::StopExtend { to } => {
                     if viewing.as_ref().is_some_and(|v| v.peer == to) {
                         viewing = None;
-                        frames.send_replace(None);
                         if let Some(s) = by_peer.read().unwrap().get(&to) {
                             s.send(Control::ExtendStop { reason: String::new() });
                         }
@@ -576,7 +577,6 @@ pub(crate) async fn run(
                                 }
                                 if viewing.as_ref().is_some_and(|v| v.peer == peer) {
                                     viewing = None;
-                                    frames.send_replace(None);
                                     set_portal(&viewing, viewer_window, &ids);
                                     ctx.status(Status::ExtendEnded { id: peer, reason });
                                 }
@@ -631,13 +631,7 @@ pub(crate) async fn run(
                         if let Some(v) = viewing.as_ref().filter(|v| v.peer == peer)
                             && let Some(session) = by_peer.read().unwrap().get(&peer).cloned()
                         {
-                            extend::decode(
-                                video,
-                                session,
-                                v.showing.clone(),
-                                frames.clone(),
-                                ctx.engine.viewer_stats.clone(),
-                            );
+                            extend::decode(video, session, v.showing.clone());
                             continue;
                         }
                         let _ = (peer, video);
@@ -660,7 +654,6 @@ pub(crate) async fn run(
                         }
                         if viewing.as_ref().is_some_and(|v| v.peer == peer) {
                             viewing = None;
-                            frames.send_replace(None);
                             set_portal(&viewing, viewer_window, &ids);
                             ctx.status(Status::ExtendEnded { id: peer, reason: "disconnected".into() });
                         }
@@ -677,9 +670,10 @@ pub(crate) async fn run(
         h.stop().await;
     }
     if let Some(v) = viewing {
-        frames.send_replace(None);
+        let peer = v.peer;
+        drop(v);
         ctx.status(Status::ExtendEnded {
-            id: v.peer,
+            id: peer,
             reason: String::new(),
         });
     }
