@@ -424,7 +424,7 @@ fn arrangement(m: &Model) -> Element<'_, Message> {
 }
 
 fn settings(m: &Model) -> Element<'_, Message> {
-    let push = m.config.switching.push_distance as f32;
+    let push = m.push_distance.unwrap_or(m.config.switching.push_distance) as f32;
     let mut col = column![
         heading("Switching"),
         body(format!(

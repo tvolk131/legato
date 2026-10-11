@@ -1,5 +1,6 @@
 //! `legato.toml`: where other machines sit, and behaviour tweaks.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -301,7 +302,15 @@ pub fn save(dir: &Path, config: &Config) -> Result<()> {
         "# Legato settings. See `legato layout --help`.\n\n{}",
         toml::to_string_pretty(config)?
     );
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    // Write beside the destination so persisting is an atomic replacement on both
+    // macOS and Windows. A failed write/rename leaves the previous file intact.
+    let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
+    temporary.write_all(text.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]

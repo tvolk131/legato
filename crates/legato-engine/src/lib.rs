@@ -99,6 +99,8 @@ pub struct Engine {
     _lock: std::fs::File,
     dir: PathBuf,
     config: watch::Sender<Config>,
+    /// Serializes reading, editing, saving and publishing settings from every caller.
+    config_update: Mutex<()>,
     status: broadcast::Sender<Status>,
     sharing: Mutex<Option<Sharing>>,
     known_screens: Mutex<HashMap<EndpointId, Screens>>,
@@ -127,6 +129,7 @@ impl Engine {
             _lock: lock,
             dir,
             config: watch::Sender::new(config),
+            config_update: Mutex::new(()),
             status,
             sharing: Mutex::new(None),
             known_screens: Mutex::new(known_screens),
@@ -208,13 +211,34 @@ impl Engine {
         self.viewer_stats.subscribe()
     }
 
-    /// Changes settings, saves them, and applies them to a running session.
+    /// Changes from the UI or a peer, including while sharing is stopped.
+    pub fn config_updates(&self) -> watch::Receiver<Config> {
+        self.config.subscribe()
+    }
+
+    /// Edits the latest settings as one transaction. Failed saves leave the published
+    /// settings untouched; concurrent edits cannot overwrite each other's fields.
     pub fn update_config(&self, change: impl FnOnce(&mut Config)) -> Result<()> {
-        let mut config = self.config();
+        let _update = self.config_update.lock().unwrap();
+        let current = self.config();
+        let mut config = current.clone();
         change(&mut config);
-        config::save(&self.dir, &config)?;
-        self.config.send_replace(config);
+        if config != current {
+            config::save(&self.dir, &config)?;
+            self.config.send_replace(config);
+        }
         Ok(())
+    }
+
+    /// Compare with the latest committed policy inside the settings transaction, not
+    /// the sharing loop's possibly older snapshot.
+    pub(crate) fn apply_control_mode(&self, mode: legato_proto::ControlMode) -> Result<()> {
+        self.update_config(|c| {
+            if mode.updated_at > c.control.updated_at {
+                c.control.controller = mode.controller;
+                c.control.updated_at = mode.updated_at;
+            }
+        })
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Status> {
@@ -458,3 +482,7 @@ fn assert_engine_is_send_sync() {
     fn check<T: Send + Sync>() {}
     check::<Engine>();
 }
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod settings_tests;

@@ -76,6 +76,7 @@ pub enum Message {
     ToggleSharing(bool),
     Sharing(Result<(), String>),
     Status(Status),
+    ConfigChanged,
     Nearby(NearbyEvent),
     /// Open or close the "Add a device" dialog.
     AddDevice(bool),
@@ -202,6 +203,7 @@ impl App {
             pairing_open: false,
             add_device_open: false,
             config: engine.config(),
+            push_distance: None,
             local: legato_engine::local_screens(),
             known: engine.known_screens(),
             placed_us: HashMap::new(),
@@ -277,6 +279,7 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ConfigChanged => self.model.config = self.engine.config(),
             Message::Init => {
                 match tray::Tray::new(self.model.sharing) {
                     Ok(tray) => self.tray = Some(tray),
@@ -452,41 +455,44 @@ impl App {
             Message::Unpair(id) => {
                 let engine = self.engine.clone();
                 let result = engine.net().unpair(&id);
-                let _ = self.engine.update_config(|c| {
+                self.save_config(|c| {
                     let text = id.to_string();
                     c.neighbors.retain(|n| !text.starts_with(&n.peer));
                 });
-                self.model.config = self.engine.config();
                 self.refresh_paired();
                 if let Err(e) = result {
                     self.notify(format!("Couldn't unpair: {e:#}"));
                 }
             }
             Message::DropPeer(id, top_left) => self.drop_peer(id, top_left),
-            Message::PushDistance(v) => self.model.config.switching.push_distance = v.into(),
-            Message::SaveSettings => self.save_config(),
+            Message::PushDistance(v) => self.model.push_distance = Some(v.into()),
+            Message::SaveSettings => {
+                if let Some(distance) = self.model.push_distance.take() {
+                    self.save_config(|c| c.switching.push_distance = distance);
+                }
+            }
             Message::Remap(on) => {
-                self.model.config.keys.remap = if on { Remap::Auto } else { Remap::None };
-                self.save_config();
+                self.save_config(|c| c.keys.remap = if on { Remap::Auto } else { Remap::None });
             }
             Message::InvertWheel(on) => {
-                self.model.config.scrolling.invert_wheel = on;
-                self.save_config();
+                self.save_config(|c| c.scrolling.invert_wheel = on);
             }
             Message::Autostart(on) => match platform::set_autostart(on) {
                 Ok(()) => self.model.autostart = Some(on),
                 Err(e) => self.notify(format!("Couldn't change login item: {e:#}")),
             },
             Message::ControlMode(controller) => {
-                self.model.config.control.controller = controller;
-                self.model.config.control.updated_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs());
-                self.save_config();
+                self.save_config(|c| {
+                    c.control.controller = controller;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    // Several changes within one second must still be newer.
+                    c.control.updated_at = now.max(c.control.updated_at.saturating_add(1));
+                });
             }
             Message::Clipboard(on) => {
-                self.model.config.clipboard.enabled = on;
-                self.save_config();
+                self.save_config(|c| c.clipboard.enabled = on);
             }
             Message::SendFiles(id) => {
                 let name = self.model.name_of(&id);
@@ -566,8 +572,10 @@ impl App {
                 let Some(options) = self.model.display_options.clone().filter(|_| show) else {
                     return Task::none();
                 };
-                options.save_to(&mut self.model.config.extend);
-                self.save_config();
+                if !self.save_config(|c| options.save_to(&mut c.extend)) {
+                    self.model.display_options_open = true;
+                    return Task::none();
+                }
                 // Showing already: start over with the new choices.
                 let restart = self.viewer.take().map(|viewer| {
                     self.engine.set_viewer_window(None);
@@ -663,8 +671,7 @@ impl App {
                 }
             }
             Message::Stats(on) => {
-                self.model.config.extend.stats = on;
-                self.save_config();
+                self.save_config(|c| c.extend.stats = on);
             }
             Message::ToggleStats(id) => {
                 if self.viewer.as_ref().is_some_and(|v| v.window == id) {
@@ -758,11 +765,16 @@ impl App {
         open.map(Message::ViewerOpened)
     }
 
-    fn save_config(&mut self) {
-        let config = self.model.config.clone();
-        if let Err(e) = self.engine.update_config(|c| *c = config) {
-            self.notify(format!("Couldn't save settings: {e:#}"));
-        }
+    fn save_config(&mut self, change: impl FnOnce(&mut legato_engine::Config)) -> bool {
+        let saved = match self.engine.update_config(change) {
+            Ok(()) => true,
+            Err(e) => {
+                self.notify(format!("Couldn't save settings: {e:#}"));
+                false
+            }
+        };
+        self.model.config = self.engine.config();
+        saved
     }
 
     fn drop_peer(&mut self, id: EndpointId, top_left: legato_proto::Point) {
@@ -776,14 +788,9 @@ impl App {
             return;
         };
         let text = id.to_string();
-        self.model
-            .config
-            .neighbors
-            .retain(|n| !text.starts_with(&n.peer));
-        self.model
-            .config
-            .neighbors
-            .push(legato_engine::config::Neighbor {
+        if self.save_config(|c| {
+            c.neighbors.retain(|n| !text.starts_with(&n.peer));
+            c.neighbors.push(legato_engine::config::Neighbor {
                 peer: text,
                 side: snapped.side,
                 display: snapped.display + 1,
@@ -791,8 +798,9 @@ impl App {
                 nudge: 0.0,
                 offset: Some([snapped.top_left.x, snapped.top_left.y]),
             });
-        self.model.problems.clear();
-        self.save_config();
+        }) {
+            self.model.problems.clear();
+        }
     }
 
     fn status(&mut self, status: Status) -> Task<Message> {
@@ -920,6 +928,7 @@ impl App {
         let engine = EngineRef(self.engine.clone());
         Subscription::batch([
             Subscription::run_with(engine.clone(), status_stream),
+            Subscription::run_with(engine.clone(), config_stream),
             Subscription::run_with(engine.clone(), nearby_stream),
             Subscription::run_with(engine.clone(), pairing_stream),
             Subscription::run(tray::events).map(Message::Tray),
@@ -974,6 +983,21 @@ fn decide(attempt: Attempt, accept: bool) -> Task<Message> {
         ),
         Message::PairFinished,
     )
+}
+
+/// Notifications carry no snapshot: the UI always reads the latest config, even if
+/// an earlier notification was queued before its own settings edit.
+fn config_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
+    let engine = engine.0.clone();
+    iced::stream::channel(1, async move |mut out| {
+        let mut changes = engine.config_updates();
+        loop {
+            changes.borrow_and_update();
+            if out.send(Message::ConfigChanged).await.is_err() || changes.changed().await.is_err() {
+                return;
+            }
+        }
+    })
 }
 
 fn status_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
@@ -1145,3 +1169,7 @@ fn main() -> iced::Result {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod settings_tests;
