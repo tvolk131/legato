@@ -265,19 +265,19 @@ impl Drop for Decoding {
 pub(crate) use host::Host;
 
 #[cfg(target_os = "macos")]
+mod queue;
+
+#[cfg(target_os = "macos")]
 mod host {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use anyhow::Result;
     use legato_net::{EndpointId, Session, VideoFrame, VideoSender};
     use legato_proto::{Control, ExtendRequest, Rect, video_track};
-    use legato_screen::mac::{DisplayStream, EncodedFrame, StreamConfig};
-    use tokio::sync::mpsc;
+    use legato_screen::mac::{DisplayStream, StreamConfig};
 
-    /// Frames waiting to go out on a track before its new pictures are skipped.
-    const BACKLOG: usize = 3;
+    use super::queue;
 
     fn to_rect(r: objc2_core_foundation::CGRect) -> Rect {
         Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height)
@@ -351,27 +351,36 @@ mod host {
         session: Arc<Session>,
         stream: Arc<DisplayStream>,
         track: u8,
-        mut frames: mpsc::UnboundedReceiver<EncodedFrame>,
-        queued: Arc<AtomicUsize>,
+        mut frames: queue::Receiver,
     ) {
         let result = async {
             let mut video: Option<VideoSender> = None;
             while let Some(frame) = frames.recv().await {
-                let waiting = queued.fetch_sub(1, Ordering::Relaxed) - 1;
-                let sender = match &mut video {
-                    Some(sender) => sender,
-                    None => video.insert(session.open_video(track).await?),
-                };
-                sender
-                    .send(&VideoFrame {
-                        sender_time: frame.shown_at.map_or(Duration::ZERO, |t| t.elapsed()),
-                        skipped: stream.take_missed().min(u16::MAX.into()) as u16,
-                        keyframe: frame.keyframe,
-                        pts: frame.pts,
-                        data: frame.data,
-                    })
-                    .await?;
-                stream.set_backlogged(track, waiting >= BACKLOG);
+                queue::while_sending(|b| stream.set_backlogged(track, b), async {
+                    let sender = match &mut video {
+                        Some(sender) => sender,
+                        None => video.insert(session.open_video(track).await?),
+                    };
+                    sender
+                        .send(&VideoFrame {
+                            sender_time: frame.shown_at.map_or(Duration::ZERO, |t| t.elapsed()),
+                            skipped: stream
+                                .take_missed()
+                                .saturating_add(frames.take_missed())
+                                .min(u16::MAX.into()) as u16,
+                            keyframe: frame.keyframe,
+                            pts: frame.pts,
+                            data: frame.data,
+                        })
+                        .await
+                })
+                .await?;
+                if frames.needs_keyframe() {
+                    // There is room again. Re-send the cached picture even if the
+                    // display became still while the network was blocked.
+                    let stream = stream.clone();
+                    tokio::task::spawn_blocking(move || stream.request_keyframe(track)).await?;
+                }
             }
             if let Some(video) = video {
                 video.finish();
@@ -390,44 +399,35 @@ mod host {
             request: ExtendRequest,
             name: String,
         ) -> Result<Self> {
-            let (sharp_tx, sharp_rx) = mpsc::unbounded_channel::<EncodedFrame>();
-            let (moving_tx, moving_rx) = mpsc::unbounded_channel::<EncodedFrame>();
-            let queued = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+            let (sharp_tx, sharp_rx) = queue::channel();
+            let (moving_tx, moving_rx) = queue::channel();
             let config = stream_config(request);
-            let stream = {
-                let queued = queued.clone();
-                tokio::task::spawn_blocking(move || {
-                    DisplayStream::start(&name, config, move |frame| {
-                        let (tx, queued) = if frame.track == video_track::MOVING {
-                            (&moving_tx, &queued[1])
-                        } else {
-                            (&sharp_tx, &queued[0])
-                        };
-                        queued.fetch_add(1, Ordering::Relaxed);
-                        let _ = tx.send(frame);
-                    })
+            let stream = tokio::task::spawn_blocking(move || {
+                DisplayStream::start(&name, config, move |frame| {
+                    if frame.track == video_track::MOVING {
+                        moving_tx.push(frame);
+                    } else {
+                        sharp_tx.push(frame);
+                    }
                 })
-                .await??
-            };
+            })
+            .await??;
             let stream = Arc::new(stream);
             let mut bounds = to_rect(stream.display().bounds());
             session.send(Control::Extended { bounds });
             log_config("showing an extra display", config);
-            let [sharp_queued, moving_queued] = queued;
             let mut tasks = vec![
                 tokio::spawn(send_track(
                     session.clone(),
                     stream.clone(),
                     video_track::SHARP,
                     sharp_rx,
-                    sharp_queued,
                 )),
                 tokio::spawn(send_track(
                     session.clone(),
                     stream.clone(),
                     video_track::MOVING,
                     moving_rx,
-                    moving_queued,
                 )),
             ];
             tasks.push({
