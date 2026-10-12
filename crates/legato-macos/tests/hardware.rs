@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use legato_core::Inject;
-use legato_macos::{ActivityMonitor, Injector, Permissions, cursor_position, screens};
+use legato_macos::{Capture, Injector, Permissions, cursor_position, screens};
 use legato_proto::Point;
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
@@ -37,11 +37,21 @@ fn injected_motion_lands_exactly_and_is_not_local_activity() {
     require_permissions();
     let original = cursor_position();
     let seen = Arc::new(AtomicUsize::new(0));
-    let monitor = {
+    let capture = {
         let seen = seen.clone();
-        ActivityMonitor::start(move || {
-            seen.fetch_add(1, Ordering::SeqCst);
-        })
+        let mut activity = legato_core::ActivityFilter::default();
+        Capture::start(
+            legato_core::controller::Controller::new(
+                Default::default(),
+                legato_core::Layout::new(screens()),
+            ),
+            |_| {},
+            move |input| {
+                if activity.feed(std::time::Instant::now(), input) {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        )
         .unwrap()
     };
 
@@ -97,7 +107,7 @@ fn injected_motion_lands_exactly_and_is_not_local_activity() {
     );
 
     injector.apply(&Inject::MoveTo { pos: original });
-    drop(monitor);
+    drop(capture);
 }
 
 #[test]
