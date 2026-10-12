@@ -334,6 +334,14 @@ scale and placement. Check both arrangement editors, cross each changed edge, re
 while driving the other machine, and check an open viewer's alignment. Also change a
 monitor with sharing stopped, then start sharing. Hosted tests do not simulate OS hotplug.
 
+Native capture also re-pins its hidden cursor when local displays change during a remote
+visit. A Windows unit test supplies a moved/shrunken primary monitor, verifies the new
+pin effect without making OS calls, and checks that the next hook movement sends only
+its four-by-three-pixel delta while preserving the held drag. Repeated unchanged layouts
+must not re-pin. The core regression covers preserving the peer position and ending a
+visit safely if its configured anchor disappears; the native effect also reinitializes
+macOS's first-motion-after-warp handling.
+
 ### Confirmed file saves and failed batches
 
 Protocol 11 moves files to bidirectional streams: the receiver acknowledges only after

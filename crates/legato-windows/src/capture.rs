@@ -1008,3 +1008,134 @@ fn run(
         windows::Win32::System::Ole::OleUninitialize();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use legato_core::controller::ControllerConfig;
+    use legato_core::{Layout, MachineId};
+    use legato_proto::{Control, Datagram, Display, Screens};
+
+    fn layout(local: Rect) -> Layout {
+        let screens = |bounds| Screens {
+            displays: vec![Display {
+                id: 1,
+                bounds,
+                pixel_scale: 1.0,
+                ui_scale: 1.0,
+                primary: true,
+                name: String::new(),
+            }],
+            native_per_desk: 1.0,
+        };
+        let mut layout = Layout::new(screens(local));
+        layout.place_at(
+            MachineId(1),
+            screens(Rect::new(0.0, 0.0, 1920.0, 1080.0)),
+            Point::new(local.x, local.bottom()),
+        );
+        layout
+    }
+
+    #[test]
+    fn display_changes_repin_capture_without_jumping_or_releasing_the_drag() {
+        let (sink, actions) = mpsc::channel();
+        let (_, commands) = mpsc::channel();
+        let mut state = State {
+            controller: Controller::new(
+                ControllerConfig {
+                    push_distance: 0.0,
+                    ..Default::default()
+                },
+                layout(Rect::new(0.0, 0.0, 1920.0, 1080.0)),
+            ),
+            sink: Box::new(move |action| {
+                sink.send(action).unwrap();
+            }),
+            local_input: Box::new(|_| {}),
+            options: CaptureOptions::default(),
+            commands,
+            out: vec![],
+            window: HWND::default(),
+            pin: None,
+            last_pos: None,
+            raw: (0, 0),
+            raw_seen: false,
+            left_down: false,
+            catching: false,
+            where_: None,
+            key_noted: None,
+            peer_moved: false,
+        };
+        state.handle(Event::LocalMotion {
+            pos: Point::new(500.0, 1079.0),
+            attempted: Point::new(0.0, 10.0),
+        });
+        assert_eq!(state.pin, Some(POINT { x: 960, y: 540 }));
+        state.handle(Event::Button {
+            button: Button::Left,
+            down: true,
+        });
+        let before = actions
+            .try_iter()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .find_map(|a| match a {
+                Action::Send {
+                    msg: Control::Enter { pos, .. },
+                    ..
+                } => Some(pos),
+                _ => None,
+            })
+            .unwrap();
+        // Move/shrink the primary display so its old anchor is no longer on any screen.
+        let new_layout = layout(Rect::new(-1280.0, 0.0, 1280.0, 720.0));
+        let effects = state
+            .on_command(Command::SetLayout(new_layout.clone()))
+            .unwrap();
+        assert!(matches!(
+            &effects[..],
+            [Effect::Pin(POINT { x: -640, y: 360 })]
+        ));
+        assert_eq!(state.pin, Some(POINT { x: -640, y: 360 }));
+        assert_eq!(actions.try_iter().collect::<Vec<_>>(), [Action::Capture]);
+        assert!(
+            state
+                .on_command(Command::SetLayout(new_layout))
+                .unwrap()
+                .is_empty()
+        );
+
+        // No native calls: simulate the next hook position relative to the new anchor.
+        let (verdict, _) = state.on_mouse(
+            WM_MOUSEMOVE,
+            &MSLLHOOKSTRUCT {
+                pt: POINT { x: -636, y: 363 },
+                ..Default::default()
+            },
+        );
+        assert_eq!(verdict, Verdict::Swallow);
+        let motion = actions
+            .try_iter()
+            .find_map(|a| match a {
+                Action::Datagram {
+                    msg: Datagram::Motion { pos, .. },
+                    ..
+                } => Some(pos),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(motion, Point::new(before.x + 4.0, before.y + 3.0));
+        state.handle(Event::Button {
+            button: Button::Left,
+            down: false,
+        });
+        assert!(actions.try_iter().any(|a| matches!(
+            a,
+            Action::Send {
+                to: MachineId(1),
+                msg: Control::Button { down: false, .. }
+            }
+        )));
+    }
+}

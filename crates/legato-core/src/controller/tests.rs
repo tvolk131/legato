@@ -193,7 +193,11 @@ fn reconfiguring_displays_preserves_the_remote_pointer_and_clamps_the_return_poi
     assert!(layout.place_next_to_local(MAC, macbook_16(), 0, Side::Below, Align::Center, 0.0));
     h.c.set_layout(layout, &mut h.out);
     assert_eq!(h.c.peer_cursor_native(MAC), Some(before));
-    assert!(h.take().is_empty(), "the drag is still held on the Mac");
+    assert_eq!(
+        h.take(),
+        [Action::Capture],
+        "re-pin locally without ending the drag"
+    );
 
     // Losing the configured anchor must release the peer's held inputs and return to
     // a real local display, even though the original return point no longer exists.
