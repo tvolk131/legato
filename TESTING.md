@@ -2,6 +2,10 @@
 
 Target platforms are **macOS and Windows**, in both directions (Mac→Windows and Windows→Mac).
 
+Building from source requires **Rust 1.99 or newer**. CI checks the workspace with
+Rust 1.99 as the minimum supported Rust version (MSRV); platform tests and release
+builds use the current stable toolchain.
+
 The approach:
 - Make most behaviour testable without a real OS.
 - Test the thin OS layers against one shared contract.
