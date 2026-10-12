@@ -302,14 +302,18 @@ pub fn save(dir: &Path, config: &Config) -> Result<()> {
         "# Legato settings. See `legato layout --help`.\n\n{}",
         toml::to_string_pretty(config)?
     );
-    // Write beside the destination so persisting is an atomic replacement on both
-    // macOS and Windows. A failed write/rename leaves the previous file intact.
+    // Write beside the destination so renaming is an atomic replacement.
+    // Windows needs a normal file: fs::rename doesn't clear FILE_ATTRIBUTE_TEMPORARY.
+    #[cfg(windows)]
+    let mut temporary = tempfile::Builder::new().make_in(dir, |p| std::fs::File::create_new(p))?;
+    #[cfg(not(windows))]
     let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
     temporary.write_all(text.as_bytes())?;
     temporary.as_file().sync_all()?;
-    temporary
-        .persist(&path)
-        .with_context(|| format!("writing {}", path.display()))?;
+    let temporary = temporary.into_temp_path();
+    // Unlike tempfile::persist's MoveFileExW, std's Windows rename can replace an
+    // open destination with FileRenameInfoEx. TempPath cleans up if renaming fails.
+    std::fs::rename(&temporary, &path).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
