@@ -824,19 +824,23 @@ fn portal_at(at: Point) -> Event {
     }
 }
 
-fn with_portal() -> Harness {
+fn with_portal_at(remote: Rect) -> Harness {
     let mut h = Harness::new();
     let mut out = vec![];
     h.c.set_portal(
         Some(Portal {
             peer: MAC,
-            remote: EXTRA,
+            remote,
             window: 42,
         }),
         &mut out,
     );
     assert!(out.is_empty());
     h
+}
+
+fn with_portal() -> Harness {
+    with_portal_at(EXTRA)
 }
 
 #[test]
@@ -966,7 +970,7 @@ fn dragging_off_the_portal_carries_on_on_the_mac() {
     );
     assert!(
         out.iter()
-            .any(|a| matches!(a, Action::Datagram { to: MAC, msg: Datagram::Motion { pos, .. } } if pos.x == 0.0)),
+            .any(|a| matches!(a, Action::Datagram { to: MAC, msg: Datagram::Motion { pos, .. } } if (0.0..1.0).contains(&pos.x))),
         "the Mac cursor continues at the MacBook's left edge: {out:?}"
     );
     assert_eq!(h.c.active_peer(), Some(MAC));
@@ -975,6 +979,77 @@ fn dragging_off_the_portal_carries_on_on_the_mac() {
     assert_eq!(v, Verdict::Swallow);
     assert!(matches!(
         &sent(&h.take())[..],
+        [Control::Button {
+            button: Button::Left,
+            down: false,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn dragging_off_an_edge_without_a_mac_display_does_not_jump_to_the_macbook() {
+    let above = Rect::new(-96.0, -1080.0, 1920.0, 1080.0);
+    for at in [
+        Point::new(0.5, 0.0),
+        Point::new(0.0, 0.5),
+        Point::new(1.0, 0.5),
+        // The extra display is wider than the MacBook: no screen below this corner.
+        Point::new(0.01, 1.0),
+    ] {
+        let mut h = with_portal_at(above);
+        h.step(8, portal_at(at));
+        h.step(0, button(Button::Left, true));
+        h.take();
+        for _ in 0..20 {
+            assert_eq!(
+                h.step(8, local_at(1920.0, 0.0, 0.0, -15.0)),
+                Verdict::Swallow
+            );
+            assert!(
+                h.take().is_empty(),
+                "must neither capture nor send a jump at {at:?}"
+            );
+        }
+        assert!(matches!(h.c.state, State::Portal { peer: MAC, .. }));
+        // Returning to the picture continues the same drag, without a new Enter.
+        h.step(8, portal_at(Point::new(0.5, 0.5)));
+        assert!(sent(&h.take()).is_empty());
+        assert_eq!(h.step(0, button(Button::Left, false)), Verdict::Swallow);
+        assert!(matches!(
+            sent(&h.take()).as_slice(),
+            [Control::Button {
+                button: Button::Left,
+                down: false,
+                ..
+            }]
+        ));
+    }
+}
+
+#[test]
+fn dragging_down_from_the_extra_display_crosses_to_the_macbook_and_back() {
+    let mut h = with_portal_at(Rect::new(-96.0, -1080.0, 1920.0, 1080.0));
+    h.step(8, portal_at(Point::new(0.5, 0.99)));
+    h.step(0, button(Button::Left, true));
+    h.take();
+    assert_eq!(
+        h.step(8, local_at(1920.0, 2160.0, 0.0, 20.0)),
+        Verdict::Swallow
+    );
+    let out = h.take();
+    assert!(out.contains(&Action::Capture));
+    assert!(!sent(&out).contains(&Control::Leave));
+    assert!(out.iter().any(|a| matches!(a, Action::Datagram { msg: Datagram::Motion { pos, .. }, .. } if pos.x == 864.0 && (0.0..1.0).contains(&pos.y))));
+    h.step(8, captured(0.0, -15.0));
+    assert!(
+        h.take()
+            .iter()
+            .any(|a| matches!(a, Action::EnterPortal { at } if at.y > 0.98))
+    );
+    assert_eq!(h.step(0, button(Button::Left, false)), Verdict::Swallow);
+    assert!(matches!(
+        sent(&h.take()).as_slice(),
         [Control::Button {
             button: Button::Left,
             down: false,
@@ -1005,28 +1080,34 @@ fn moving_onto_the_extra_display_from_the_macbook_enters_the_portal() {
 }
 
 #[test]
-fn pushing_past_a_full_screen_portals_edge_towards_the_mac_crosses_to_it() {
-    let mut h = with_portal();
-    // Full screen on the middle monitor, which the MacBook sits below.
-    let at_bottom = |dy| Event::PortalMotion {
-        at: Point::new(0.5, 1.0),
-        pos: Point::new(1920.0, 2159.0),
-        attempted: Point::new(0.0, dy),
-    };
-    h.step(8, at_bottom(0.0));
-    h.take();
-    let mut crossed = false;
-    for _ in 0..20 {
-        if h.step(8, at_bottom(15.0)) == Verdict::Swallow {
-            crossed = true;
-            break;
+fn pushing_past_a_full_screen_portal_crosses_only_to_an_adjacent_mac_display() {
+    for (remote, should_cross) in [
+        (Rect::new(-96.0, -1080.0, 1920.0, 1080.0), true),
+        // The PC's layout still puts the Mac below it, but the extra display is
+        // beside the MacBook: leaving its bottom must not teleport to the right.
+        (EXTRA, false),
+    ] {
+        let mut h = with_portal_at(remote);
+        let at_bottom = |dy| Event::PortalMotion {
+            at: Point::new(0.5, 1.0),
+            pos: Point::new(1920.0, 2159.0),
+            attempted: Point::new(0.0, dy),
+        };
+        h.step(8, at_bottom(0.0));
+        h.take();
+        let mut crossed = false;
+        for _ in 0..20 {
+            if h.step(8, at_bottom(15.0)) == Verdict::Swallow {
+                crossed = true;
+                break;
+            }
         }
+        assert_eq!(crossed, should_cross, "{remote:?}");
+        let out = h.take();
+        assert_eq!(out.contains(&Action::Capture), should_cross);
+        assert!(!sent(&out).contains(&Control::Leave), "still the same Mac");
+        assert_eq!(h.c.active_peer(), Some(MAC));
     }
-    assert!(crossed, "pushing on crosses");
-    let out = h.take();
-    assert!(out.contains(&Action::Capture));
-    assert!(!sent(&out).contains(&Control::Leave), "still the same Mac");
-    assert_eq!(h.c.active_peer(), Some(MAC));
 }
 
 #[test]

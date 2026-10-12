@@ -291,8 +291,8 @@ impl State {
                     let on_screen =
                         clamp_to_displays(&self.controller, Point::new(pos.x as f64, pos.y as f64));
                     let at = Point::new(on_screen.x as f64, on_screen.y as f64);
-                    let hit = self.portal_hit(pos);
-                    self.note_where(pos, hit.is_some());
+                    let hit = self.portal_hit(on_screen);
+                    self.note_where(on_screen, hit.is_some());
                     if let Some(picture_at) = hit {
                         return self.handle(Event::PortalMotion {
                             at: picture_at,
