@@ -286,7 +286,7 @@ async fn blobs_and_files_arrive_intact() {
     let header = legato_proto::FileHeader {
         batch: 1,
         name: "folder/photo.jpg".into(),
-        size: contents.len() as u64,
+        size: Some(contents.len() as u64),
         count: 1,
         index: 0,
         purpose: legato_proto::FilePurpose::Send,

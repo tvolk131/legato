@@ -15,7 +15,7 @@ fn header(name: &str, batch: u64, count: u32) -> FileHeader {
     FileHeader {
         batch,
         name: name.into(),
-        size: 5,
+        size: Some(5),
         count,
         index: 0,
         purpose: FilePurpose::Send,
@@ -57,7 +57,12 @@ fn colliding_files_and_nested_directories_keep_their_contents_and_shape() {
             ..header(name, 1, names.len() as u32)
         };
         let mut destination = inbox.reserve(peer(1), &h).unwrap();
-        destination.file.write_all(name.as_bytes()).unwrap();
+        destination
+            .file
+            .as_mut()
+            .unwrap()
+            .write_all(name.as_bytes())
+            .unwrap();
         saved.push(destination.path);
         received = inbox.finished(&IncomingInfo {
             from: peer(1),
@@ -106,7 +111,7 @@ fn simultaneous_transfers_reserve_distinct_names_without_touching_existing_files
                 scope.spawn(move || {
                     barrier.wait();
                     let mut dest = inbox.reserve(peer(1), &header("report.txt", n, 1)).unwrap();
-                    dest.file.write_all(&[n as u8]).unwrap();
+                    dest.file.as_mut().unwrap().write_all(&[n as u8]).unwrap();
                     (dest.path, n as u8)
                 })
             })
@@ -227,7 +232,7 @@ async fn receiving_colliding_names_preserves_both_files_and_cleans_up_failed_rec
     ] {
         let h = FileHeader {
             index: if index < 2 { index } else { 0 },
-            size,
+            size: Some(size),
             ..header(
                 name,
                 if index < 2 { 1 } else { 2 },
@@ -553,4 +558,112 @@ fn a_reconnected_batch_ignores_old_completions_and_refuses_duplicate_indices() {
     );
     assert!(inbox.reserve(from, &FileHeader { index: 2, ..h }).is_err());
     assert_eq!(inbox.batches[&(from, 1)].indices.len(), 1);
+}
+
+#[tokio::test]
+async fn folders_keep_empty_directories_and_empty_files_for_every_purpose() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    fs::create_dir_all(source.join("Mixed/empty/nested")).unwrap();
+    fs::create_dir(source.join("Empty")).unwrap();
+    fs::write(source.join("Mixed/file.txt"), "contents").unwrap();
+    fs::write(source.join("Mixed/zero.txt"), "").unwrap();
+    let (nodes, sender, mut events) = connected(root.path()).await;
+    let (mut inbox, mut done) = inbox(root.path());
+    // Existing destinations must remain separate, even when they are directories.
+    fs::create_dir_all(inbox.downloads.join("Mixed")).unwrap();
+    fs::write(inbox.downloads.join("Mixed/original.txt"), "original").unwrap();
+    fs::create_dir(inbox.downloads.join("Empty")).unwrap();
+    for purpose in [FilePurpose::Send, FilePurpose::Drop, FilePurpose::Clipboard] {
+        let session = sender.clone();
+        let paths = vec![source.join("Mixed"), source.join("Empty")];
+        let sending = tokio::spawn(async move { send(&session, &paths, purpose).await });
+        let received = loop {
+            let file = match next(&mut events).await {
+                SessionEvent::File { file, .. } => file,
+                other => panic!("{other:?}"),
+            };
+            let directory = file.header.size.is_none();
+            inbox.receive(nodes[0].id(), file);
+            let (info, saved) = timeout(Duration::from_secs(5), done.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let path = saved.unwrap();
+            assert_eq!(path.is_dir(), directory);
+            if let Some(received) = inbox.finished(&info) {
+                break received;
+            }
+        };
+        assert_eq!(sending.await.unwrap().unwrap(), 8);
+        assert_eq!(received.purpose, purpose);
+        assert_eq!(received.paths.len(), 2);
+        let mixed = received
+            .paths
+            .iter()
+            .find(|p| p.join("file.txt").exists())
+            .unwrap();
+        assert!(mixed.join("empty/nested").is_dir());
+        assert_eq!(fs::read_dir(mixed.join("empty/nested")).unwrap().count(), 0);
+        assert!(mixed.join("zero.txt").is_file());
+        assert_eq!(fs::metadata(mixed.join("zero.txt")).unwrap().len(), 0);
+        assert_eq!(
+            fs::read_to_string(mixed.join("file.txt")).unwrap(),
+            "contents"
+        );
+        let empty = received.paths.iter().find(|p| *p != mixed).unwrap();
+        assert!(empty.is_dir());
+        assert_eq!(fs::read_dir(empty).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_to_string(inbox.downloads.join("Mixed/original.txt")).unwrap(),
+            "original"
+        );
+    }
+    // An entirely empty selection is a successful, zero-byte batch.
+    let session = sender.clone();
+    let empty = source.join("Empty");
+    let sending = tokio::spawn(async move { send(&session, &[empty], FilePurpose::Send).await });
+    let file = match next(&mut events).await {
+        SessionEvent::File { file, .. } => file,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(file.header.size, None);
+    assert_eq!(file.header.count, 1);
+    inbox.receive(nodes[0].id(), file);
+    let (info, saved) = timeout(Duration::from_secs(5), done.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.unwrap().is_dir());
+    assert_eq!(inbox.finished(&info).unwrap().paths.len(), 1);
+    assert_eq!(sending.await.unwrap().unwrap(), 0);
+    drop(sender);
+    for node in nodes {
+        node.shutdown().await;
+    }
+}
+
+#[test]
+fn directory_entries_share_reserved_parents_and_keep_colliding_names_distinct() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut inbox, _) = inbox(root.path());
+    let mut paths = Vec::new();
+    for (index, name, size) in [
+        (0, "folder?/child", None), // The parent is reserved implicitly first.
+        (1, "folder?", None),
+        (2, "folder*", None),
+        (3, "folder?/zero", Some(0)),
+    ] {
+        let h = FileHeader {
+            index,
+            size,
+            ..header(name, 1, 4)
+        };
+        paths.push(inbox.reserve(peer(1), &h).unwrap().path);
+    }
+    assert_eq!(paths[0].parent(), Some(paths[1].as_path()));
+    assert_eq!(paths[3].parent(), Some(paths[1].as_path()));
+    assert_ne!(paths[1], paths[2]);
+    assert!(paths[3].is_file());
+    assert_eq!(inbox.batches[&(peer(1), 1)].roots.len(), 2);
 }

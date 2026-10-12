@@ -77,13 +77,11 @@ impl IncomingFile {
     /// Streams the file's bytes into `out`. Can only be called once.
     pub async fn recv(&self, out: &mut (impl tokio::io::AsyncWrite + Unpin)) -> Result<u64> {
         let mut recv = self.recv.lock().await.take().context("already received")?;
-        let copied = tokio::io::copy(
-            &mut tokio::io::AsyncReadExt::take(&mut recv, self.header.size),
-            out,
-        )
-        .await?;
-        if copied != self.header.size {
-            bail!("expected {} bytes, got {copied}", self.header.size);
+        let size = self.header.size.unwrap_or(0);
+        let copied =
+            tokio::io::copy(&mut tokio::io::AsyncReadExt::take(&mut recv, size), out).await?;
+        if copied != size {
+            bail!("expected {size} bytes, got {copied}");
         }
         let mut extra = [0];
         if recv.read(&mut extra).await?.is_some() {
@@ -263,7 +261,7 @@ impl Session {
     ) -> Result<()> {
         let (mut send, mut reply) = self.conn.open_bi().await?;
         send.set_priority(BULK_PRIORITY)?;
-        let size = header.size;
+        let size = header.size.unwrap_or(0);
         write_frame(&mut send, &header).await?;
         let sending = async {
             let sent =
