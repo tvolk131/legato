@@ -252,11 +252,12 @@ impl Net {
 
     /// Forgets a paired peer and drops any session with it.
     pub fn unpair(&self, id: &EndpointId) -> Result<bool> {
+        let removed = self.shared.store.remove_peer(id)?;
         self.shared.allowed.write().unwrap().remove(id);
         if let Some(hub) = self.shared.sessions.lock().unwrap().as_ref() {
             hub.close(id);
         }
-        self.shared.store.remove_peer(id)
+        Ok(removed)
     }
 
     /// Legato machines on the local network, as they come and go.

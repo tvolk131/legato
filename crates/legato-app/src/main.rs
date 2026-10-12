@@ -457,16 +457,15 @@ impl App {
                 }
             }
             Message::Unpair(id) => {
-                let engine = self.engine.clone();
-                let result = engine.net().unpair(&id);
+                if let Err(e) = self.engine.net().unpair(&id) {
+                    self.notify(format!("Couldn't unpair: {e:#}"));
+                    return Task::none();
+                }
                 self.save_config(|c| {
                     let text = id.to_string();
                     c.neighbors.retain(|n| !text.starts_with(&n.peer));
                 });
                 self.refresh_paired();
-                if let Err(e) = result {
-                    self.notify(format!("Couldn't unpair: {e:#}"));
-                }
             }
             Message::DropPeer(id, top_left) => self.drop_peer(id, top_left),
             Message::PushDistance(v) => self.model.push_distance = Some(v.into()),
