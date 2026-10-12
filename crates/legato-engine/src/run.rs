@@ -432,8 +432,8 @@ pub(crate) async fn run(
                     arrange(&mut viewing, viewer_window, &layout_now, &ids);
                 }
             },
-            Some(result) = inbox_done.recv() => match result {
-                Ok((info, _path)) => {
+            Some((info, result)) = inbox_done.recv() => match result {
+                Ok(_path) => {
                     if let Some(received) = inbox.finished(&info) {
                         if received.purpose == FilePurpose::Clipboard
                             && let Some(clipboard) = &clipboard
@@ -443,7 +443,10 @@ pub(crate) async fn run(
                         ctx.status(Status::FilesReceived(received));
                     }
                 }
-                Err(e) => ctx.status(Status::Problem(format!("Couldn't receive a file: {e:#}"))),
+                Err(e) => {
+                    inbox.failed(&info);
+                    ctx.status(Status::Problem(format!("Couldn't receive a file: {e:#}")));
+                }
             },
             event = events.recv() => {
                 let Some(event) = event else { break };
@@ -477,6 +480,7 @@ pub(crate) async fn run(
                     SessionEvent::Control { peer, msg } => {
                         let Some(&machine) = ids.get(&peer) else { continue };
                         match msg {
+                            Control::FileCancel { batch } => inbox.cancel(peer, batch),
                             Control::Yield => {
                                 tracing::info!(
                                     "\"{}\" was used directly, so it took back control",
@@ -638,7 +642,9 @@ pub(crate) async fn run(
                             clipboard.set(content);
                         }
                     }
-                    SessionEvent::File { peer, file } => inbox.receive(peer, file),
+                    SessionEvent::File { peer, file } => {
+                        if by_peer.read().unwrap().contains_key(&peer) { inbox.receive(peer, file); }
+                    },
                     SessionEvent::Video { peer, video } => {
                         #[cfg(windows)]
                         if let Some(v) = viewing.as_ref().filter(|v| v.peer == peer)
@@ -650,6 +656,7 @@ pub(crate) async fn run(
                         let _ = (peer, video);
                     }
                     SessionEvent::Disconnected { peer, reason } => {
+                        inbox.disconnected(peer);
                         let Some(&machine) = ids.get(&peer) else { continue };
                         if let Some(p) = peers.remove(&machine) {
                             ctx.status(Status::PeerDisconnected {

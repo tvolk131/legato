@@ -4,7 +4,7 @@
 //! paste or drop) and its path within the batch, so folders keep their shape. Received
 //! files go to `Downloads/Legato`, or to a scratch folder when they're for the clipboard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use legato_net::{EndpointId, IncomingFile, Session};
 use legato_proto::{FileHeader, FilePurpose};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// The most sent in one go through the clipboard (explicit sends have no limit).
 pub const MAX_CLIPBOARD_BATCH: u64 = 512 * 1024 * 1024;
@@ -107,12 +107,31 @@ fn reserve<T>(
     unreachable!("some name is free")
 }
 
-#[derive(Default)]
 struct Batch {
     /// Original directory prefixes → exclusively created destination directories.
     directories: HashMap<Vec<String>, PathBuf>,
     roots: Vec<PathBuf>,
     done: u32,
+    count: u32,
+    purpose: Option<FilePurpose>,
+    indices: HashSet<u32>,
+    generation: u64,
+    cancel: watch::Sender<()>,
+}
+
+impl Default for Batch {
+    fn default() -> Self {
+        Self {
+            directories: HashMap::new(),
+            roots: Vec::new(),
+            done: 0,
+            count: 0,
+            purpose: None,
+            indices: HashSet::new(),
+            generation: 0,
+            cancel: watch::channel(()).0,
+        }
+    }
 }
 
 struct Destination {
@@ -158,20 +177,22 @@ pub(crate) struct Inbox {
     batches: HashMap<(EndpointId, u64), Batch>,
     downloads: PathBuf,
     clipboard: PathBuf,
-    done: mpsc::UnboundedSender<Result<(IncomingInfo, PathBuf)>>,
+    done: mpsc::UnboundedSender<Completion>,
+    generation: u64,
+    cancelled: VecDeque<(EndpointId, u64)>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct IncomingInfo {
     pub from: EndpointId,
     pub header: FileHeader,
+    generation: u64,
 }
 
+pub(crate) type Completion = (IncomingInfo, Result<PathBuf>);
+
 impl Inbox {
-    pub(crate) fn new() -> (
-        Self,
-        mpsc::UnboundedReceiver<Result<(IncomingInfo, PathBuf)>>,
-    ) {
+    pub(crate) fn new() -> (Self, mpsc::UnboundedReceiver<Completion>) {
         Self::with_roots(
             downloads_dir(),
             std::env::temp_dir().join("legato-clipboard"),
@@ -181,10 +202,7 @@ impl Inbox {
     fn with_roots(
         downloads: PathBuf,
         clipboard: PathBuf,
-    ) -> (
-        Self,
-        mpsc::UnboundedReceiver<Result<(IncomingInfo, PathBuf)>>,
-    ) {
+    ) -> (Self, mpsc::UnboundedReceiver<Completion>) {
         let (done, rx) = mpsc::unbounded_channel();
         (
             Self {
@@ -192,6 +210,8 @@ impl Inbox {
                 downloads,
                 clipboard,
                 done,
+                generation: 0,
+                cancelled: VecDeque::new(),
             },
             rx,
         )
@@ -199,26 +219,37 @@ impl Inbox {
 
     /// Starts saving an incoming file. The result arrives on the receiver from `new`.
     pub(crate) fn receive(&mut self, from: EndpointId, file: Arc<IncomingFile>) {
-        let destination = match self.reserve(from, &file.header) {
-            Ok(destination) => destination,
-            Err(e) => {
-                let _ = self.done.send(Err(e));
-                return;
-            }
+        let destination = self.reserve(from, &file.header);
+        let batch = self.batches.get(&(from, file.header.batch));
+        let info = IncomingInfo {
+            from,
+            header: file.header.clone(),
+            generation: batch.map_or(0, |b| b.generation),
         };
+        let mut cancel = batch.map(|b| b.cancel.subscribe());
         let done = self.done.clone();
         tokio::spawn(async move {
-            let path = destination.path.clone();
-            let result = save(&file, destination).await.map(|()| {
-                (
-                    IncomingInfo {
-                        from,
-                        header: file.header.clone(),
-                    },
-                    path,
+            let result = match destination {
+                Ok(destination) => {
+                    let path = destination.path.clone();
+                    save(&file, destination, cancel.as_mut().unwrap())
+                        .await
+                        .map(|()| path)
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = file
+                .complete(
+                    &result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|e| anyhow::anyhow!("{e:#}")),
                 )
-            });
-            let _ = done.send(result);
+                .await
+            {
+                tracing::debug!("couldn't acknowledge file save: {e:#}");
+            }
+            let _ = done.send((info, result));
         });
     }
 
@@ -230,15 +261,63 @@ impl Inbox {
                 .join(header.batch.to_string()),
             FilePurpose::Send | FilePurpose::Drop => self.downloads.clone(),
         };
-        use std::collections::hash_map::Entry;
-        match self.batches.entry((from, header.batch)) {
-            Entry::Occupied(mut entry) => entry.get_mut().reserve(&root, &header.name),
-            Entry::Vacant(entry) => {
-                let mut batch = Batch::default();
-                let destination = batch.reserve(&root, &header.name)?;
-                entry.insert(batch);
-                Ok(destination)
+        let key = (from, header.batch);
+        if self.cancelled.contains(&key) {
+            bail!("file batch was cancelled");
+        }
+        if header.count == 0 || header.index >= header.count {
+            bail!("invalid file index/count");
+        }
+        if let Some(batch) = self.batches.get_mut(&key) {
+            if batch.count != header.count
+                || batch.purpose != Some(header.purpose)
+                || batch.indices.contains(&header.index)
+            {
+                bail!("inconsistent or duplicate file in batch");
             }
+            let destination = batch.reserve(&root, &header.name)?;
+            batch.indices.insert(header.index);
+            Ok(destination)
+        } else {
+            self.generation += 1;
+            let mut batch = Batch {
+                count: header.count,
+                purpose: Some(header.purpose),
+                generation: self.generation,
+                ..Default::default()
+            };
+            let destination = batch.reserve(&root, &header.name)?;
+            batch.indices.insert(header.index);
+            self.batches.insert(key, batch);
+            Ok(destination)
+        }
+    }
+
+    /// Cancel unfinished saves without deleting files already saved. A short bounded
+    /// history rejects file headers that race a cancellation on the control stream.
+    pub(crate) fn cancel(&mut self, from: EndpointId, batch: u64) {
+        let key = (from, batch);
+        self.batches.remove(&key); // Closing the watch channel cancels its save tasks.
+        if !self.cancelled.contains(&key) {
+            self.cancelled.push_back(key);
+            if self.cancelled.len() > 256 {
+                self.cancelled.pop_front();
+            }
+        }
+    }
+
+    pub(crate) fn disconnected(&mut self, from: EndpointId) {
+        self.batches.retain(|(peer, _), _| *peer != from);
+        self.cancelled.retain(|(peer, _)| *peer != from);
+    }
+
+    pub(crate) fn failed(&mut self, info: &IncomingInfo) {
+        if self
+            .batches
+            .get(&(info.from, info.header.batch))
+            .is_none_or(|b| b.generation == info.generation)
+        {
+            self.cancel(info.from, info.header.batch);
         }
     }
 
@@ -246,6 +325,9 @@ impl Inbox {
     pub(crate) fn finished(&mut self, info: &IncomingInfo) -> Option<Received> {
         let key = (info.from, info.header.batch);
         let batch = self.batches.get_mut(&key)?;
+        if batch.generation != info.generation {
+            return None;
+        }
         batch.done += 1;
         if batch.done < info.header.count {
             return None;
@@ -261,20 +343,36 @@ impl Inbox {
     }
 }
 
-async fn save(file: &IncomingFile, destination: Destination) -> Result<()> {
+async fn save(
+    file: &IncomingFile,
+    destination: Destination,
+    cancel: &mut watch::Receiver<()>,
+) -> Result<()> {
     // This handle was opened with create_new before the receive task was started.
     // Never reopen/truncate the path another transfer may be using.
     let mut out = tokio::fs::File::from_std(destination.file);
-    let received = file.recv(&mut out).await;
-    // Also drain outstanding filesystem writes after a stream error, before deleting
-    // the partial file (Windows cannot remove it while a write still holds it open).
-    let flushed = out.flush().await;
+    let result = receive_into(file, &mut out, cancel).await;
     drop(out);
-    let result = received.and_then(|_| flushed.map_err(Into::into));
     if result.is_err() {
         let _ = tokio::fs::remove_file(destination.path).await;
     }
     result
+}
+
+async fn receive_into(
+    file: &IncomingFile,
+    out: &mut (impl tokio::io::AsyncWrite + Unpin),
+    cancel: &mut watch::Receiver<()>,
+) -> Result<()> {
+    let received = tokio::select! {
+        biased;
+        _ = cancel.changed() => Err(anyhow::anyhow!("file batch was cancelled")),
+        result = file.recv(out) => result,
+    };
+    // Drain outstanding filesystem writes even after a stream error/cancellation,
+    // before closing the handle and deleting only this transfer's partial file.
+    let flushed = out.flush().await;
+    received.and_then(|_| flushed.map_err(Into::into))
 }
 
 /// Every file under `paths` (folders are walked), with its name relative to the batch.
@@ -312,7 +410,12 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String, u64)>> {
 pub async fn send(session: &Session, paths: &[PathBuf], purpose: FilePurpose) -> Result<u64> {
     let files = collect(paths)?;
     let batch = rand_batch();
-    let count = files.len() as u32;
+    let count = files.len().try_into().context("too many files")?;
+    let mut pending = PendingBatch {
+        session,
+        batch,
+        complete: false,
+    };
     let mut total = 0;
     for (index, (path, name, size)) in files.into_iter().enumerate() {
         let mut file = tokio::fs::File::open(&path)
@@ -329,7 +432,23 @@ pub async fn send(session: &Session, paths: &[PathBuf], purpose: FilePurpose) ->
         session.send_file(header, &mut file).await?;
         total += size;
     }
+    pending.complete = true;
     Ok(total)
+}
+
+struct PendingBatch<'a> {
+    session: &'a Session,
+    batch: u64,
+    complete: bool,
+}
+
+impl Drop for PendingBatch<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.session
+                .send(legato_proto::Control::FileCancel { batch: self.batch });
+        }
+    }
 }
 
 fn rand_batch() -> u64 {

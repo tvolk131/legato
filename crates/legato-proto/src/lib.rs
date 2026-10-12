@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
@@ -148,6 +148,10 @@ pub enum Scroll {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Control {
     Hello(Hello),
+    /// The sender abandoned this file batch; preserve completed files, discard partials.
+    FileCancel {
+        batch: u64,
+    },
     /// The sender's displays changed.
     Screens(Screens),
     /// Controller → controlled: the shared cursor enters your screen at `pos`.
@@ -254,8 +258,6 @@ pub struct ControlMode {
 pub mod blob {
     /// A [`super::ClipboardContent`].
     pub const CLIPBOARD: u8 = 1;
-    /// A file, as a [`super::FileHeader`] frame followed by its bytes.
-    pub const FILE: u8 = 2;
     /// A stream of H.264 frames: a [`super::video_track`] byte, then each frame as a
     /// [`super::VideoFrameHeader`] and its bytes.
     pub const VIDEO: u8 = 3;

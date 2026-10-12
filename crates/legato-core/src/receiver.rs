@@ -131,7 +131,8 @@ impl Receiver {
                     out.push(Inject::Scroll(scroll));
                 }
             }
-            Control::Hello(_)
+            Control::FileCancel { .. }
+            | Control::Hello(_)
             | Control::Screens(_)
             | Control::Yield
             | Control::Placement { .. }
