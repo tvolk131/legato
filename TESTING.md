@@ -342,6 +342,11 @@ must not re-pin. The core regression covers preserving the peer position and end
 visit safely if its configured anchor disappears; the native effect also reinitializes
 macOS's first-motion-after-warp handling.
 
+Viewer-placement regressions change the peer's desk position and native client rectangle
+without resizing the viewer. The new placement must be sent; identical placements and
+macOS nudges must not repeat requests. The arrangement editor's actual canvas handler is
+tested dragging out of and back through all four edges with a nonzero canvas origin.
+
 ### Confirmed file saves and failed batches
 
 Protocol 11 moves files to bidirectional streams: the receiver acknowledges only after

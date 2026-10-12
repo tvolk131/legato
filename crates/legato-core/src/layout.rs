@@ -227,7 +227,8 @@ impl Layout {
     }
 }
 
-pub(crate) fn bounding_box(rects: impl IntoIterator<Item = Rect>) -> Option<Rect> {
+/// The smallest rectangle enclosing all the supplied rectangles.
+pub fn bounding_box(rects: impl IntoIterator<Item = Rect>) -> Option<Rect> {
     let mut iter = rects.into_iter();
     let first = iter.next()?;
     let (mut l, mut t, mut r, mut b) = (first.left(), first.top(), first.right(), first.bottom());

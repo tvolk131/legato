@@ -343,3 +343,68 @@ fn the_mac_streams_what_was_asked_within_what_it_can_encode() {
     });
     assert_eq!((c.moving, c.refresh, c.fps), (None, 144, 60));
 }
+
+fn layout(offset: legato_proto::Point) -> legato_core::Layout {
+    use legato_proto::{Display, Rect, Screens};
+    let screens = Screens {
+        native_per_desk: 1.0,
+        displays: vec![Display {
+            id: 1,
+            bounds: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            pixel_scale: 1.0,
+            ui_scale: 1.0,
+            primary: true,
+            name: String::new(),
+        }],
+    };
+    let mut layout = legato_core::Layout::new(screens.clone());
+    layout.set_machine(legato_core::MachineId(1), screens, offset);
+    layout
+}
+
+#[test]
+fn arrangement_refreshes_when_peer_moves_without_window_resize() {
+    use legato_proto::{Point, Rect};
+    let outputs = Outputs::new();
+    let mut viewer = outputs.viewer(1);
+    viewer.bounds = Some(Rect::new(0.0, -1080.0, 1920.0, 1080.0));
+    viewer.area = Some(Rect::new(0.0, 0.0, 1920.0, 1080.0));
+    let peer = legato_core::MachineId(1);
+    let old = layout(Point::new(0.0, 1080.0));
+    let new = layout(Point::new(1920.0, 0.0));
+    let first = viewer.arrangement(&old, peer, None).unwrap();
+    assert_eq!(viewer.arrangement(&old, peer, None), None);
+    viewer.bounds.as_mut().unwrap().x += 3.0;
+    assert_eq!(viewer.arrangement(&old, peer, None), None);
+    let expected = legato_core::extend::place_extra_display(
+        &new,
+        peer,
+        viewer.area.unwrap(),
+        (1920.0, 1080.0),
+    )
+    .unwrap();
+    assert_ne!(first.0, expected, "moving peer changes the required origin");
+    assert_eq!(
+        viewer.arrangement(&new, peer, None).map(|a| a.0),
+        Some(expected)
+    );
+}
+
+#[test]
+fn arrangement_refreshes_when_native_client_rect_changes() {
+    use legato_proto::{Point, Rect};
+    let outputs = Outputs::new();
+    let mut viewer = outputs.viewer(1);
+    viewer.bounds = Some(Rect::new(0.0, -1080.0, 1920.0, 1080.0));
+    let area = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+    viewer.area = Some(area);
+    let peer = legato_core::MachineId(1);
+    let layout = layout(Point::new(0.0, 1080.0));
+    viewer.arrangement(&layout, peer, Some(area)).unwrap();
+    let native = Rect::new(0.0, 30.0, 1920.0, 1050.0);
+    let expected = legato_core::controller::fit_picture((1920.0, 1080.0), native);
+    assert_eq!(
+        viewer.arrangement(&layout, peer, Some(native)).map(|a| a.1),
+        Some(expected)
+    );
+}

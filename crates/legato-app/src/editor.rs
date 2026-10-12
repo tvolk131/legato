@@ -7,6 +7,7 @@ use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::text;
 use iced::{Color, Point, Rectangle, Renderer, Size, Vector};
 use iced_m3::Theme;
+pub use legato_core::layout::bounding_box as bounds;
 use legato_net::EndpointId;
 use legato_proto::Rect;
 
@@ -26,19 +27,6 @@ impl PeerBox {
     pub fn bounds(&self) -> Option<Rect> {
         bounds(self.displays.iter().copied())
     }
-}
-
-pub fn bounds(rects: impl IntoIterator<Item = Rect>) -> Option<Rect> {
-    let mut it = rects.into_iter();
-    let first = it.next()?;
-    let (mut l, mut t, mut r, mut b) = (first.left(), first.top(), first.right(), first.bottom());
-    for rect in it {
-        l = l.min(rect.left());
-        t = t.min(rect.top());
-        r = r.max(rect.right());
-        b = b.max(rect.bottom());
-    }
-    Some(Rect::new(l, t, r - l, b - t))
 }
 
 pub struct Editor {
@@ -146,7 +134,7 @@ impl canvas::Program<Message, Theme> for Editor {
             }
             mouse::Event::CursorMoved { .. } => {
                 let (index, grab, _) = state.active?;
-                let desk = view.to_desk(cursor.position_in(bounds).or(cursor.position())?);
+                let desk = view.to_desk(cursor.position_from(bounds.position())?);
                 let top_left = legato_proto::Point::new(desk.x - grab.x, desk.y - grab.y);
                 state.active = Some((index, grab, top_left));
                 Some(canvas::Action::request_redraw().and_capture())
@@ -256,6 +244,72 @@ impl canvas::Program<Message, Theme> for Editor {
         match cursor.position_in(bounds) {
             Some(p) if self.peer_at(view.to_desk(p)).is_some() => mouse::Interaction::Grab,
             _ => mouse::Interaction::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canvas::Program;
+
+    #[test]
+    fn drag_crossing_canvas_boundary_keeps_coordinate_space() {
+        let editor = Editor {
+            local: vec![Rect::new(0.0, 0.0, 100.0, 100.0)],
+            primary: Some(0),
+            peers: vec![PeerBox {
+                id: iroh::SecretKey::from_bytes(&[1; 32]).public(),
+                name: "peer".into(),
+                displays: vec![Rect::new(100.0, 0.0, 100.0, 100.0)],
+                placed: true,
+            }],
+        };
+        let bounds = Rectangle {
+            x: 50.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let viewport = Viewport::fit(&editor, bounds.size());
+        let (p, _) = viewport.to_canvas(Rect::new(150.0, 50.0, 0.0, 0.0));
+        let click = Point::new(p.x + bounds.x, p.y + bounds.y);
+        for (inside, outside) in [
+            (Point::new(449.0, 250.0), Point::new(451.0, 250.0)),
+            (Point::new(51.0, 250.0), Point::new(49.0, 250.0)),
+            (Point::new(300.0, 399.0), Point::new(300.0, 401.0)),
+            (Point::new(300.0, 101.0), Point::new(300.0, 99.0)),
+        ] {
+            let mut state = Drag::default();
+            editor.update(
+                &mut state,
+                &iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                bounds,
+                mouse::Cursor::Available(click),
+            );
+            assert!(state.active.is_some());
+            let mut last = click;
+            for pos in [inside, outside, inside] {
+                let before = state.active.unwrap().2;
+                editor.update(
+                    &mut state,
+                    &iced::Event::Mouse(mouse::Event::CursorMoved { position: pos }),
+                    bounds,
+                    mouse::Cursor::Available(pos),
+                );
+                let after = state.active.unwrap().2;
+                let delta = (pos - last) / viewport.scale;
+                assert!((after.x - before.x - delta.x as f64).abs() < 0.001);
+                assert!((after.y - before.y - delta.y as f64).abs() < 0.001);
+                last = pos;
+            }
+            editor.update(
+                &mut state,
+                &iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                bounds,
+                mouse::Cursor::Available(last),
+            );
+            assert!(state.active.is_none());
         }
     }
 }
