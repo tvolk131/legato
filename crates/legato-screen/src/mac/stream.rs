@@ -125,11 +125,9 @@ impl Encoding {
                 move |frame| match frame {
                     Ok(mut frame) => {
                         let mut shown = shown_at.lock().unwrap();
-                        while let Some(&(pts, at, submitted)) = shown.front() {
-                            if pts > frame.pts {
-                                break;
-                            }
-                            shown.pop_front();
+                        while let Some((pts, at, submitted)) =
+                            shown.pop_front_if(|(pts, ..)| *pts <= frame.pts)
+                        {
                             if pts == frame.pts {
                                 frame.shown_at = Some(at);
                                 stages.lock().unwrap().encoded(submitted.elapsed());

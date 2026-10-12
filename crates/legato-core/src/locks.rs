@@ -79,6 +79,7 @@ impl CapsLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     /// Delivers `msg` (from a machine whose id is lower when `from_lower`) to `to`.
     fn deliver(to: &mut CapsLock, msg: &Control, from_lower: bool) -> Option<bool> {
@@ -112,7 +113,7 @@ mod tests {
         // If it never shows (it couldn't be set), what's read wins in the end.
         let _ = deliver(&mut mac, &CapsLock::new(true).local(false).unwrap(), true);
         let sent = (0..10).find_map(|_| mac.local(true));
-        assert!(matches!(sent, Some(Control::CapsLock { on: true, .. })));
+        assert_matches!(sent, Some(Control::CapsLock { on: true, .. }));
     }
 
     #[test]

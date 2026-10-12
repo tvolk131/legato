@@ -194,8 +194,7 @@ fn covered(rects: &[CGRect], size: (usize, usize)) -> f64 {
     xs.sort_by(f64::total_cmp);
     xs.dedup();
     let mut total = 0.0;
-    for band in xs.windows(2) {
-        let (left, right) = (band[0], band[1]);
+    for &[left, right] in xs.array_windows() {
         let mut spans: Vec<(f64, f64)> = rects
             .iter()
             .filter(|r| r.0 <= left && r.2 >= right)

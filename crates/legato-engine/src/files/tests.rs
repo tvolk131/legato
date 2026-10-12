@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::io::Write;
 use std::time::Duration;
 
@@ -213,7 +214,7 @@ async fn connected(
         SessionEvent::Connected(s) => s,
         e => panic!("{e:?}"),
     };
-    assert!(matches!(next(&mut be).await, SessionEvent::Connected(_)));
+    assert_matches!(next(&mut be).await, SessionEvent::Connected(_));
     (nodes, sender, be)
 }
 

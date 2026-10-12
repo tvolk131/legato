@@ -164,9 +164,9 @@ fn reports_displays() {
     assert!(!s.displays.is_empty());
     assert_eq!(s.displays.iter().filter(|d| d.primary).count(), 1, "{s:?}");
     assert!(s.native_per_desk >= 1.0, "{s:?}");
-    for pair in s.displays.windows(2) {
+    for [left, right] in s.displays.array_windows() {
         assert!(
-            pair[0].bounds.x <= pair[1].bounds.x,
+            left.bounds.x <= right.bounds.x,
             "sorted left to right: {s:?}"
         );
     }
