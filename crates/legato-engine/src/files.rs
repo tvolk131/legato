@@ -136,25 +136,28 @@ impl Default for Batch {
 
 struct Destination {
     path: PathBuf,
-    file: fs::File,
+    file: Option<fs::File>,
 }
 
 impl Batch {
-    fn reserve(&mut self, root: &Path, name: &str) -> Result<Destination> {
+    fn reserve(&mut self, root: &Path, name: &str, directory: bool) -> Result<Destination> {
         let parts = safe_parts(name).with_context(|| format!("refused a file named {name:?}"))?;
         fs::create_dir_all(root)?;
         let mut parent = root.to_path_buf();
         let mut original = Vec::new();
         for (depth, (part, clean)) in parts.iter().enumerate() {
             original.push((*part).to_string());
-            if depth == parts.len() - 1 {
+            if depth == parts.len() - 1 && !directory {
                 let (path, file) = reserve(&parent, Path::new(clean), |p| {
                     fs::OpenOptions::new().write(true).create_new(true).open(p)
                 })?;
                 if depth == 0 {
                     self.roots.push(path.clone());
                 }
-                return Ok(Destination { path, file });
+                return Ok(Destination {
+                    path,
+                    file: Some(file),
+                });
             }
             parent = match self.directories.get(&original) {
                 Some(path) => path.clone(),
@@ -168,7 +171,10 @@ impl Batch {
                 }
             };
         }
-        unreachable!("a safe path has at least one component")
+        Ok(Destination {
+            path: parent,
+            file: None,
+        })
     }
 }
 
@@ -275,7 +281,7 @@ impl Inbox {
             {
                 bail!("inconsistent or duplicate file in batch");
             }
-            let destination = batch.reserve(&root, &header.name)?;
+            let destination = batch.reserve(&root, &header.name, header.size.is_none())?;
             batch.indices.insert(header.index);
             Ok(destination)
         } else {
@@ -286,7 +292,7 @@ impl Inbox {
                 generation: self.generation,
                 ..Default::default()
             };
-            let destination = batch.reserve(&root, &header.name)?;
+            let destination = batch.reserve(&root, &header.name, header.size.is_none())?;
             batch.indices.insert(header.index);
             self.batches.insert(key, batch);
             Ok(destination)
@@ -348,15 +354,19 @@ async fn save(
     destination: Destination,
     cancel: &mut watch::Receiver<()>,
 ) -> Result<()> {
-    // This handle was opened with create_new before the receive task was started.
-    // Never reopen/truncate the path another transfer may be using.
-    let mut out = tokio::fs::File::from_std(destination.file);
-    let result = receive_into(file, &mut out, cancel).await;
-    drop(out);
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(destination.path).await;
+    if let Some(handle) = destination.file {
+        // Use the exclusively reserved handle; never reopen/truncate a shared path.
+        let mut out = tokio::fs::File::from_std(handle);
+        let result = receive_into(file, &mut out, cancel).await;
+        drop(out);
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(destination.path).await;
+        }
+        result
+    } else {
+        // Still consume FIN and reject unexpected data before acknowledging a directory.
+        receive_into(file, &mut tokio::io::sink(), cancel).await
     }
-    result
 }
 
 async fn receive_into(
@@ -375,11 +385,12 @@ async fn receive_into(
     received.and_then(|_| flushed.map_err(Into::into))
 }
 
-/// Every file under `paths`, with its name relative to the selection. Links inside a
+/// Every file and directory under `paths`, with its name relative to the selection.
+/// `None` size is a directory; `Some(0)` is an empty file. Links inside a
 /// selected folder may resolve within that folder, but may not escape it or form cycles.
 /// An explicitly selected link selects its target. Return resolved paths so changing a
 /// link after the scan cannot redirect a send to a different target.
-pub fn collect(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String, u64)>> {
+pub fn collect(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String, Option<u64>)>> {
     enum Step {
         Visit(PathBuf),
         Leave(PathBuf),
@@ -413,18 +424,19 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String, u64)>> {
                 if !ancestors.insert(resolved.clone()) {
                     bail!("{} forms a folder link cycle", path.display());
                 }
-                stack.push(Step::Leave(resolved));
+                stack.push(Step::Leave(resolved.clone()));
                 for entry in fs::read_dir(&path)? {
                     stack.push(Step::Visit(entry?.path()));
                 }
-            } else if meta.is_file() {
+            }
+            if meta.is_file() || meta.is_dir() {
                 let rel = path.strip_prefix(base).unwrap_or(&path);
                 let name = rel
                     .components()
                     .map(|c| c.as_os_str().to_string_lossy())
                     .collect::<Vec<_>>()
                     .join("/");
-                out.push((resolved, name, meta.len()));
+                out.push((resolved, name, meta.is_file().then_some(meta.len())));
             }
         }
     }
@@ -439,14 +451,16 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String, u64)>> {
 /// or a Tokio worker. The same manifest supplies clipboard limits and transfer headers.
 async fn prepare(
     purpose: FilePurpose,
-    scan: impl FnOnce() -> Result<Vec<(PathBuf, String, u64)>> + Send + 'static,
-) -> Result<Vec<(PathBuf, String, u64)>> {
+    scan: impl FnOnce() -> Result<Vec<(PathBuf, String, Option<u64>)>> + Send + 'static,
+) -> Result<Vec<(PathBuf, String, Option<u64>)>> {
     let files = tokio::task::spawn_blocking(scan)
         .await
         .context("scanning files")??;
     let total = files
         .iter()
-        .try_fold(0u64, |total, (_, _, size)| total.checked_add(*size))
+        .try_fold(0u64, |total, (_, _, size)| {
+            total.checked_add(size.unwrap_or(0))
+        })
         .context("file batch size overflow")?;
     if purpose == FilePurpose::Clipboard && total > MAX_CLIPBOARD_BATCH {
         bail!("Copied files are too big to share through the clipboard; send them instead.");
@@ -467,9 +481,6 @@ pub async fn send(session: &Session, paths: &[PathBuf], purpose: FilePurpose) ->
     };
     let mut total = 0;
     for (index, (path, name, size)) in files.into_iter().enumerate() {
-        let mut file = tokio::fs::File::open(&path)
-            .await
-            .with_context(|| format!("opening {}", path.display()))?;
         let header = FileHeader {
             batch,
             name,
@@ -478,8 +489,15 @@ pub async fn send(session: &Session, paths: &[PathBuf], purpose: FilePurpose) ->
             index: index as u32,
             purpose,
         };
-        session.send_file(header, &mut file).await?;
-        total += size;
+        if let Some(size) = size {
+            let mut file = tokio::fs::File::open(&path)
+                .await
+                .with_context(|| format!("opening {}", path.display()))?;
+            session.send_file(header, &mut file).await?;
+            total += size;
+        } else {
+            session.send_file(header, &mut tokio::io::empty()).await?;
+        }
     }
     pending.complete = true;
     Ok(total)
@@ -566,9 +584,11 @@ mod tests {
         assert_eq!(
             names,
             [
-                ("Photos/2026/b.jpg", 3),
-                ("Photos/a.jpg", 2),
-                ("notes.txt", 1)
+                ("Photos", None),
+                ("Photos/2026", None),
+                ("Photos/2026/b.jpg", Some(3)),
+                ("Photos/a.jpg", Some(2)),
+                ("notes.txt", Some(1))
             ]
         );
         std::fs::remove_dir_all(dir).unwrap();

@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
@@ -328,15 +328,17 @@ pub enum ClipboardContent {
     },
 }
 
-/// Describes a file sent on a [`blob::FILE`] stream.
+/// Describes a file or directory sent on its own bidirectional stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileHeader {
     /// Groups files sent together (one drop or paste).
     pub batch: u64,
     /// Path relative to the batch root, with `/` separators (folders keep their shape).
     pub name: String,
-    pub size: u64,
-    /// Files in the batch, and this one's position, for progress.
+    /// File length, including zero for an empty file. `None` creates a directory;
+    /// directory streams carry no payload and are acknowledged after creation.
+    pub size: Option<u64>,
+    /// Entries in the batch, and this one's position, for progress.
     pub count: u32,
     pub index: u32,
     /// What to do once the batch has arrived.
@@ -458,6 +460,25 @@ mod tests {
                 }],
                 native_per_desk: 1.5,
             },
+        }
+    }
+
+    #[test]
+    fn directory_headers_are_distinct_from_empty_and_nonempty_files() {
+        let mut encodings = Vec::new();
+        for size in [None, Some(0), Some(123)] {
+            let header = FileHeader {
+                batch: 9,
+                name: "folder/entry".into(),
+                size,
+                count: 3,
+                index: 0,
+                purpose: FilePurpose::Clipboard,
+            };
+            let encoded = encode_frame(&header);
+            assert_eq!(decode_frame::<FileHeader>(&encoded[4..]).unwrap(), header);
+            assert!(!encodings.contains(&encoded));
+            encodings.push(encoded);
         }
     }
 

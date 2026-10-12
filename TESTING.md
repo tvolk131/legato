@@ -374,3 +374,11 @@ and directory links, exercise repeated internal targets and rejected traversal, 
 retarget an alias after scanning. A deterministic current-thread-runtime test blocks
 the scanner while another async task continues; limit and overflow tests use manifests
 without allocating large files.
+
+### Empty directories in transfers
+
+Protocol 12 distinguishes a directory from a zero-byte file. Loopback tests send mixed
+folders and entirely empty selections through Send, Drop, and Clipboard, preserving
+nested empty directories, empty files, existing destinations, and batch completion.
+Reservation tests also cover sanitized directory-name collisions and directory entries
+arriving after their children. Both peers must use the updated protocol.

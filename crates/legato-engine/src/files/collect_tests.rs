@@ -25,7 +25,11 @@ fn internal_links_keep_their_names_and_repeated_targets_are_not_cycles() {
     directory_link(&root.join("folder"), &root.join("another"));
     file_link(&root.join("folder/file.txt"), &root.join("file-link.txt"));
     let files = collect(std::slice::from_ref(&root)).unwrap();
-    let names: Vec<_> = files.iter().map(|(_, name, _)| name.as_str()).collect();
+    let names: Vec<_> = files
+        .iter()
+        .filter(|(_, _, size)| size.is_some())
+        .map(|(_, name, _)| name.as_str())
+        .collect();
     assert_eq!(
         names,
         [
@@ -35,9 +39,9 @@ fn internal_links_keep_their_names_and_repeated_targets_are_not_cycles() {
             "selected/folder/file.txt"
         ]
     );
-    for (path, _, size) in files {
+    for (path, _, size) in files.into_iter().filter(|(_, _, size)| size.is_some()) {
         assert_eq!(fs::read(path).unwrap(), b"contents");
-        assert_eq!(size, 8);
+        assert_eq!(size, Some(8));
     }
     // Selecting an alias itself is an explicit selection of that target.
     let link = temp.path().join("explicit");
@@ -46,7 +50,7 @@ fn internal_links_keep_their_names_and_repeated_targets_are_not_cycles() {
         collect(&[link])
             .unwrap()
             .iter()
-            .all(|(_, name, _)| name.starts_with("explicit/"))
+            .all(|(_, name, _)| name == "explicit" || name.starts_with("explicit/"))
     );
     let link = temp.path().join("explicit-file.txt");
     file_link(&root.join("folder/file.txt"), &link);
@@ -114,7 +118,7 @@ async fn a_blocked_folder_scan_does_not_block_the_async_runtime() {
         blocked
             .recv_timeout(Duration::from_secs(2))
             .context("async runtime was blocked by folder scanning")?;
-        Ok(vec![(PathBuf::from("file"), "file".into(), 1)])
+        Ok(vec![(PathBuf::from("file"), "file".into(), Some(1))])
     });
     let input = async {
         waiting.await.unwrap();
@@ -132,7 +136,7 @@ async fn clipboard_limits_apply_to_the_manifest_before_sending() {
         move || {
             Ok(sizes
                 .into_iter()
-                .map(|size| (PathBuf::from("file"), "file".into(), size))
+                .map(|size| (PathBuf::from("file"), "file".into(), Some(size)))
                 .collect())
         }
     };
