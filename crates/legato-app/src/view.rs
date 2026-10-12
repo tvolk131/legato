@@ -1,7 +1,7 @@
 //! The window's contents.
 
-use iced::widget::{Space, canvas, column, container, row, scrollable};
-use iced::{Alignment, Length};
+use iced::widget::{Space, canvas, column, container, responsive, row, scrollable};
+use iced::{Alignment, Length, Size};
 use iced_m3::dialog::{dialog, modal};
 use iced_m3::{
     ButtonSize, ButtonVariant, Element, MenuItem, NavigationItem, TypeScale, app_bar, badged,
@@ -20,6 +20,20 @@ use crate::icons;
 use crate::model::{Model, Page, PairingStage, os_name};
 
 pub fn root(m: &Model) -> Element<'_, Message> {
+    responsive(move |size| window_contents(m, size)).into()
+}
+
+fn window_contents(m: &Model, size: Size) -> Element<'_, Message> {
+    // Keep the labelled compact rail when a drawer would crowd the page.
+    let can_expand = size.width >= 900.0;
+    let expanded = m.rail_expanded && can_expand;
+    let header: Element<'_, Message> = if can_expand {
+        icon_button(icon(icons::menu()))
+            .on_press(Message::ToggleRail)
+            .into()
+    } else {
+        Space::new().width(40).height(40).into()
+    };
     let rail = navigation_rail(
         [
             NavigationItem::new(Page::Devices, "Devices", icon(icons::devices())),
@@ -28,21 +42,29 @@ pub fn root(m: &Model) -> Element<'_, Message> {
         ],
         Some(m.page),
     )
-    .header(icon_button(icon(icons::menu())).on_press(Message::ToggleRail))
-    .expanded(m.rail_expanded)
+    .header(header)
+    .expanded(expanded)
     .on_select(Message::Page);
 
     let sharing = switch(m.sharing)
         .label("Sharing")
         .on_toggle(Message::ToggleSharing);
-    let content: Element<'_, Message> = match m.page {
-        Page::Devices => devices(m),
-        Page::Arrangement => arrangement(m),
-        Page::Settings => settings(m),
-    };
     let body = column![
         app_bar("Legato").action(sharing),
-        scrollable(container(content).padding([8, 24]).width(Length::Fill)).height(Length::Fill),
+        responsive(move |size| {
+            let width = (size.width - 48.0).max(0.0);
+            let content = match m.page {
+                Page::Devices => devices(m, width),
+                Page::Arrangement => arrangement(m),
+                Page::Settings => settings(m, width),
+            };
+            let content = container(content).padding([8, 24]).width(Length::Fill);
+            if m.page == Page::Arrangement {
+                content.height(Length::Fill).into()
+            } else {
+                scrollable(content).height(Length::Fill).into()
+            }
+        }),
     ]
     .width(Length::Fill);
 
@@ -180,7 +202,7 @@ fn body(text: impl Into<String>) -> Element<'static, Message> {
     typography(text.into(), TypeScale::BodyMedium).into()
 }
 
-fn devices(m: &Model) -> Element<'_, Message> {
+fn devices(m: &Model, width: f32) -> Element<'_, Message> {
     let this = card(
         column![
             typography(m.this.name.clone(), TypeScale::TitleLarge),
@@ -232,20 +254,34 @@ fn devices(m: &Model) -> Element<'_, Message> {
                     )],
                 )
             });
-            list_item(p.device.name.clone())
-                .supporting_text(format!("{} · {status}", os_name(p.device.os)))
-                .trailing(
-                    row![
-                        display,
-                        send,
-                        button("Unpair")
-                            .variant(ButtonVariant::Text)
-                            .on_press(Message::Unpair(p.device.id)),
+            let actions = row![
+                display,
+                send,
+                button("Unpair")
+                    .variant(ButtonVariant::Text)
+                    .on_press(Message::Unpair(p.device.id)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            let status = format!("{} · {status}", os_name(p.device.os));
+            if width < 720.0 {
+                container(
+                    column![
+                        typography(p.device.name.clone(), TypeScale::TitleMedium),
+                        body(status),
+                        actions,
                     ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
+                    .spacing(8),
                 )
+                .padding(16)
+                .width(Length::Fill)
                 .into()
+            } else {
+                list_item(p.device.name.clone())
+                    .supporting_text(status)
+                    .trailing(actions)
+                    .into()
+            }
         }))
         .into()
     };
@@ -397,33 +433,56 @@ fn arrangement(m: &Model) -> Element<'_, Message> {
         .filter(|p| !m.known.contains_key(&p.device.id))
         .map(|p| p.device.name.clone())
         .collect();
-    let mut col = column![
-        heading("Arrangement"),
-        body(
-            "Drag your other devices to where they sit on your desk. The cursor moves across \
-             wherever they touch this device's displays."
-        ),
-        card(
-            canvas(editor(m))
-                .width(Length::Fill)
-                .height(Length::Fixed(380.0))
-        )
-        .width(Length::Fill),
-    ]
-    .spacing(8);
+    let editor = editor(m);
+    let unplaced: Vec<_> = editor
+        .peers
+        .iter()
+        .filter(|p| !p.placed)
+        .map(|p| p.name.as_str())
+        .collect();
+    let mut notes = column![].spacing(8);
+    if !unplaced.is_empty() {
+        notes = notes.push(body(format!(
+            "Drag {} next to one of this device's displays.",
+            unplaced.join(", ")
+        )));
+    }
     if !missing.is_empty() {
-        col = col.push(body(format!(
+        notes = notes.push(body(format!(
             "Waiting to connect to {} once to learn its displays.",
             missing.join(", ")
         )));
     }
     for problem in &m.problems {
-        col = col.push(body(problem.clone()));
+        notes = notes.push(body(problem.clone()));
     }
-    col.into()
+    column![
+        heading("Arrangement"),
+        body(
+            "Drag your other devices to where they sit on your desk. The cursor moves across \
+             wherever they touch this device's displays."
+        ),
+        responsive(move |size| {
+            card(
+                container(
+                    canvas(editor.clone())
+                        .width(Length::Fill)
+                        // Cards reserve 16 px of padding on each side.
+                        .height((size.height - 32.0).max(0.0)),
+                )
+                .id("arrangement-canvas"),
+            )
+            .into()
+        }),
+        // Long device lists and diagnostic messages must not consume the canvas.
+        container(scrollable(notes).height(Length::Shrink)).max_height(120),
+    ]
+    .spacing(8)
+    .height(Length::Fill)
+    .into()
 }
 
-fn settings(m: &Model) -> Element<'_, Message> {
+fn settings(m: &Model, width: f32) -> Element<'_, Message> {
     let push = m.push_distance.unwrap_or(m.config.switching.push_distance) as f32;
     let mut col = column![
         heading("Switching"),
@@ -438,7 +497,7 @@ fn settings(m: &Model) -> Element<'_, Message> {
             .on_release(Message::SaveSettings),
         heading("Control"),
         body("Which device's keyboard and mouse can move onto the others. This applies to all your paired devices."),
-        control_mode(m),
+        control_mode(m, width),
         heading("Keyboard"),
         switch(m.config.keys.remap == Remap::Auto)
             .label("On Macs, use the key next to the space bar as Command")
@@ -476,7 +535,8 @@ fn settings(m: &Model) -> Element<'_, Message> {
         .into()
 }
 
-fn control_mode(m: &Model) -> Element<'_, Message> {
+fn control_mode(m: &Model, width: f32) -> Element<'_, Message> {
+    use iced_m3::menu::{SelectOption, select};
     let this = m.this.id.to_string();
     let mut choices = vec![
         (None, "Any device".to_string()),
@@ -495,14 +555,18 @@ fn control_mode(m: &Model) -> Element<'_, Message> {
             .find(|id| id.starts_with(c.as_str()))
             .unwrap_or_else(|| c.clone())
     });
-    // One choice of several: a connected group of toggle buttons.
-    button_group(choices.into_iter().map(|(value, label)| {
-        button(label)
-            .variant(ButtonVariant::Tonal)
-            .selected(value == selected)
-            .on_press(Message::ControlMode(value))
-    }))
-    .connected(true)
+    if !choices.iter().any(|(value, _)| value == &selected) {
+        choices.push((selected.clone(), "Unavailable device".into()));
+    }
+    select(
+        "Control from",
+        choices
+            .into_iter()
+            .map(|(value, label)| SelectOption::new(value, label)),
+        Some(selected),
+    )
+    .width(width.min(480.0))
+    .on_select(Message::ControlMode)
     .into()
 }
 
