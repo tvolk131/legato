@@ -391,6 +391,7 @@ impl Controller {
     /// Replaces the layout. If the cursor is on a peer that disappeared, control returns
     /// to the local machine.
     pub fn set_layout(&mut self, layout: Layout, out: &mut Vec<Action>) {
+        let local_changed = self.layout.local().screens != layout.local().screens;
         let native_cursor = match self.state {
             State::Remote { peer, cursor, .. } => {
                 self.layout.machine(peer).map(|m| m.to_native(cursor))
@@ -430,6 +431,11 @@ impl Controller {
                     let clamped = self.clamp_to_machine(peer, cursor);
                     if let State::Remote { cursor, .. } = &mut self.state {
                         *cursor = clamped;
+                    }
+                    if local_changed {
+                        // The native backend's hidden cursor anchor may now be off-screen.
+                        // Re-pin it without ending the visit or releasing held inputs.
+                        out.push(Action::Capture);
                     }
                 }
             }
