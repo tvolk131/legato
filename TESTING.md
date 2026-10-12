@@ -346,3 +346,18 @@ Batch tests cover cancellation during a stalled transfer, disconnect cleanup, la
 headers/completions, and a source disappearing after the first file was saved. Incomplete
 clipboard batches never become ready to paste; completed files are kept on disk. Sender
 cancellation also notifies the receiver when the send future is dropped.
+
+### Folder traversal and links
+
+Transfers resolve links within each selected folder, preserving their relative names.
+Nested links outside the selection, ancestor cycles and dangling links fail the scan
+before any files are sent. Explicitly selecting a link selects its target. Canonical
+manifest paths prevent changing an alias after scanning from redirecting that entry.
+This is not a filesystem snapshot: moving/replacing source files can still fail a send.
+
+The same background scan prepares explicit sends, drops and clipboard files, with the
+clipboard size limit checked against that manifest. Cross-platform tests create file
+and directory links, exercise repeated internal targets and rejected traversal, and
+retarget an alias after scanning. A deterministic current-thread-runtime test blocks
+the scanner while another async task continues; limit and overflow tests use manifests
+without allocating large files.

@@ -375,18 +375,47 @@ async fn receive_into(
     received.and_then(|_| flushed.map_err(Into::into))
 }
 
-/// Every file under `paths` (folders are walked), with its name relative to the batch.
+/// Every file under `paths`, with its name relative to the selection. Links inside a
+/// selected folder may resolve within that folder, but may not escape it or form cycles.
+/// An explicitly selected link selects its target. Return resolved paths so changing a
+/// link after the scan cannot redirect a send to a different target.
 pub fn collect(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String, u64)>> {
+    enum Step {
+        Visit(PathBuf),
+        Leave(PathBuf),
+    }
     let mut out = Vec::new();
     for root in paths {
         let base = root.parent().unwrap_or(Path::new(""));
-        let mut stack = vec![root.clone()];
-        while let Some(path) = stack.pop() {
+        let boundary =
+            fs::canonicalize(root).with_context(|| format!("reading {}", root.display()))?;
+        let mut ancestors = HashSet::new();
+        let mut stack = vec![Step::Visit(root.clone())];
+        while let Some(step) = stack.pop() {
+            let path = match step {
+                Step::Visit(path) => path,
+                Step::Leave(path) => {
+                    ancestors.remove(&path);
+                    continue;
+                }
+            };
+            let resolved =
+                fs::canonicalize(&path).with_context(|| format!("resolving {}", path.display()))?;
+            if !resolved.starts_with(&boundary) {
+                bail!(
+                    "{} links outside the selected folder; select its target separately to send it",
+                    path.display()
+                );
+            }
             let meta =
-                std::fs::metadata(&path).with_context(|| format!("reading {}", path.display()))?;
+                fs::metadata(&resolved).with_context(|| format!("reading {}", path.display()))?;
             if meta.is_dir() {
-                for entry in std::fs::read_dir(&path)? {
-                    stack.push(entry?.path());
+                if !ancestors.insert(resolved.clone()) {
+                    bail!("{} forms a folder link cycle", path.display());
+                }
+                stack.push(Step::Leave(resolved));
+                for entry in fs::read_dir(&path)? {
+                    stack.push(Step::Visit(entry?.path()));
                 }
             } else if meta.is_file() {
                 let rel = path.strip_prefix(base).unwrap_or(&path);
@@ -395,7 +424,7 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String, u64)>> {
                     .map(|c| c.as_os_str().to_string_lossy())
                     .collect::<Vec<_>>()
                     .join("/");
-                out.push((path, name, meta.len()));
+                out.push((resolved, name, meta.len()));
             }
         }
     }
@@ -406,9 +435,29 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String, u64)>> {
     Ok(out)
 }
 
+/// Walk before opening any streams, on the blocking pool rather than the sharing loop
+/// or a Tokio worker. The same manifest supplies clipboard limits and transfer headers.
+async fn prepare(
+    purpose: FilePurpose,
+    scan: impl FnOnce() -> Result<Vec<(PathBuf, String, u64)>> + Send + 'static,
+) -> Result<Vec<(PathBuf, String, u64)>> {
+    let files = tokio::task::spawn_blocking(scan)
+        .await
+        .context("scanning files")??;
+    let total = files
+        .iter()
+        .try_fold(0u64, |total, (_, _, size)| total.checked_add(*size))
+        .context("file batch size overflow")?;
+    if purpose == FilePurpose::Clipboard && total > MAX_CLIPBOARD_BATCH {
+        bail!("Copied files are too big to share through the clipboard; send them instead.");
+    }
+    Ok(files)
+}
+
 /// Sends files (and folders) to a peer as one batch.
 pub async fn send(session: &Session, paths: &[PathBuf], purpose: FilePurpose) -> Result<u64> {
-    let files = collect(paths)?;
+    let paths = paths.to_vec();
+    let files = prepare(purpose, move || collect(&paths)).await?;
     let batch = rand_batch();
     let count = files.len().try_into().context("too many files")?;
     let mut pending = PendingBatch {
@@ -529,3 +578,7 @@ mod tests {
 #[cfg(test)]
 #[path = "files/tests.rs"]
 mod receive_tests;
+
+#[cfg(test)]
+#[path = "files/collect_tests.rs"]
+mod collect_tests;
