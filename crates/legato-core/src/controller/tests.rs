@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::time::{Duration, Instant};
 
 use legato_proto::{Button, Control, Datagram, Point, Scroll};
@@ -262,14 +263,12 @@ fn the_macs_own_pointer_on_its_shown_display_is_reported_to_the_viewer() {
     assert_eq!(reported[1].1, Point::new(520.0, -310.0));
     // Onto the MacBook: the PC hears once more, so it knows the pointer left...
     assert_eq!(motion(&mut c, 500.0, 400.0, 0.0, &mut out), Verdict::Pass);
-    assert!(
-        matches!(
-            std::mem::take(&mut out)[..],
-            [Action::Datagram {
-                to: PC,
-                msg: Datagram::Pointer { pos, .. },
-            }] if pos == Point::new(500.0, 400.0)
-        ),
+    assert_matches!(
+        std::mem::take(&mut out)[..],
+        [Action::Datagram {
+            to: PC,
+            msg: Datagram::Pointer { pos, .. },
+        }] if pos == Point::new(500.0, 400.0),
         "the PC wasn't told the pointer left the display it shows"
     );
     // ...and then, or once it's no longer shown, there's nothing to tell.
@@ -578,8 +577,9 @@ fn parked_a_key_or_click_takes_the_pointer_back_first() {
         h.take();
         assert_eq!(h.step(8, event.clone()), Verdict::Swallow);
         let out = sent(&h.take());
-        assert!(
-            matches!(out.first(), Some(Control::Enter { pos, .. }) if *pos == Point::new(700.0, 200.0)),
+        assert_matches!(
+            out.first(),
+            Some(Control::Enter { pos, .. }) if *pos == Point::new(700.0, 200.0),
             "{event:?}: {out:?}"
         );
         assert_eq!(out.len(), 2, "then the input itself: {out:?}");
@@ -622,15 +622,12 @@ fn after_taking_over_this_machine_reports_its_own_pointer_to_the_one_it_took_ove
     h.step(0, Event::YieldedTo(MAC));
     h.step(8, local_at(1000.0, 700.0, 5.0, 0.0));
     let out = h.take();
-    assert!(
-        matches!(
-            out.as_slice(),
-            [Action::Datagram {
-                to: MAC,
-                msg: Datagram::Pointer { pos, .. }
-            }] if *pos == Point::new(1000.0, 700.0)
-        ),
-        "{out:?}"
+    assert_matches!(
+        out.as_slice(),
+        [Action::Datagram {
+            to: MAC,
+            msg: Datagram::Pointer { pos, .. }
+        }] if *pos == Point::new(1000.0, 700.0)
     );
     // Once the Mac drives Windows again it knows where the pointer is.
     h.step(0, Event::PeerEntered { peer: MAC, seq: 1 });
@@ -746,7 +743,7 @@ fn motion_seq_increases_across_visits() {
             }
         }
     }
-    assert!(seqs.windows(2).all(|w| w[1] > w[0]), "{seqs:?}");
+    assert!(seqs.array_windows().all(|[a, b]| b > a), "{seqs:?}");
 }
 
 #[derive(Debug, Clone)]
@@ -903,19 +900,20 @@ fn the_portal_places_the_mac_cursor_absolutely_and_leaves_the_local_one_alone() 
     let v = h.step(8, portal_at(Point::new(0.5, 0.25)));
     assert_eq!(v, Verdict::Pass, "the local cursor keeps moving");
     let out = h.take();
-    assert!(
-        matches!(&out[..], [Action::Send { to: MAC, msg: Control::Enter { pos, .. } }]
-            if *pos == Point::new(-960.0, 270.0)),
-        "{out:?}"
+    assert_matches!(
+        &out[..],
+        [Action::Send { to: MAC, msg: Control::Enter { pos, .. } }]
+            if *pos == Point::new(-960.0, 270.0)
     );
     assert!(!out.contains(&Action::Capture));
     assert_eq!(h.c.active_peer(), Some(MAC));
 
     h.step(8, portal_at(Point::new(1.0, 1.0)));
     let out = h.take();
-    assert!(
-        matches!(&out[..], [Action::Datagram { to: MAC, msg: Datagram::Motion { pos, .. } }]
-            if *pos == Point::new(-1.0, 1079.0)),
+    assert_matches!(
+        &out[..],
+        [Action::Datagram { to: MAC, msg: Datagram::Motion { pos, .. } }]
+            if *pos == Point::new(-1.0, 1079.0),
         "clamped inside the display: {out:?}"
     );
 }
@@ -927,10 +925,10 @@ fn input_over_the_portal_goes_to_the_mac_and_leaving_ends_it() {
     h.take();
     let v = h.step(0, button(Button::Left, true));
     assert_eq!(v, Verdict::Swallow);
-    assert!(matches!(
+    assert_matches!(
         &sent(&h.take())[..],
         [Control::Button { button: Button::Left, down: true, pos }] if *pos == Point::new(-1728.0, 108.0)
-    ));
+    );
     h.step(0, button(Button::Left, false));
     let v = h.step(0, key(A, true));
     assert_eq!(v, Verdict::Swallow);
@@ -979,7 +977,7 @@ fn touching_the_mac_hands_it_back_until_the_pointer_moves_over_the_portal_again(
     assert_eq!(sent(&h.take()), [Control::Leave]);
     assert_eq!(h.c.active_peer(), None);
     h.step(8, portal_at(Point::new(0.5, 0.6)));
-    assert!(matches!(&sent(&h.take())[..], [Control::Enter { .. }]));
+    assert_matches!(&sent(&h.take())[..], [Control::Enter { .. }]);
 }
 
 #[test]
@@ -1031,14 +1029,14 @@ fn dragging_off_the_portal_carries_on_on_the_mac() {
     // Letting go drops it on the MacBook's screen.
     let v = h.step(0, button(Button::Left, false));
     assert_eq!(v, Verdict::Swallow);
-    assert!(matches!(
+    assert_matches!(
         &sent(&h.take())[..],
         [Control::Button {
             button: Button::Left,
             down: false,
             ..
         }]
-    ));
+    );
 }
 
 #[test]
@@ -1065,19 +1063,19 @@ fn dragging_off_an_edge_without_a_mac_display_does_not_jump_to_the_macbook() {
                 "must neither capture nor send a jump at {at:?}"
             );
         }
-        assert!(matches!(h.c.state, State::Portal { peer: MAC, .. }));
+        assert_matches!(h.c.state, State::Portal { peer: MAC, .. });
         // Returning to the picture continues the same drag, without a new Enter.
         h.step(8, portal_at(Point::new(0.5, 0.5)));
         assert!(sent(&h.take()).is_empty());
         assert_eq!(h.step(0, button(Button::Left, false)), Verdict::Swallow);
-        assert!(matches!(
+        assert_matches!(
             sent(&h.take()).as_slice(),
             [Control::Button {
                 button: Button::Left,
                 down: false,
                 ..
             }]
-        ));
+        );
     }
 }
 
@@ -1102,14 +1100,14 @@ fn dragging_down_from_the_extra_display_crosses_to_the_macbook_and_back() {
             .any(|a| matches!(a, Action::EnterPortal { at } if at.y > 0.98))
     );
     assert_eq!(h.step(0, button(Button::Left, false)), Verdict::Swallow);
-    assert!(matches!(
+    assert_matches!(
         sent(&h.take()).as_slice(),
         [Control::Button {
             button: Button::Left,
             down: false,
             ..
         }]
-    ));
+    );
 }
 
 #[test]
@@ -1278,7 +1276,7 @@ fn off_the_portal_or_after_showing_the_macs_pointer_this_machines_mouse_is_repor
     // by this machine's own mouse.
     let mut h = with_portal();
     h.step(8, mac_pointer(1, EXTRA.x + 100.0, EXTRA.y + 100.0));
-    assert!(matches!(h.take()[..], [Action::ShowOnPortal { .. }]));
+    assert_matches!(h.take()[..], [Action::ShowOnPortal { .. }]);
     h.step(8, local_at(100.0, 700.0, 3.0, 0.0));
     assert_eq!(reported_to(&h.take(), MAC), [Point::new(100.0, 700.0)]);
 }

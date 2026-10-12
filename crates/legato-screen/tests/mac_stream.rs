@@ -74,7 +74,7 @@ fn a_virtual_display_streams_as_h264_on_one_track_or_two() {
         assert!(moving.keyframe, "each track starts with a keyframe");
     }
     assert!(
-        frames.windows(2).all(|w| w[0].pts < w[1].pts),
+        frames.array_windows().all(|[a, b]| a.pts < b.pts),
         "one clock across tracks"
     );
 

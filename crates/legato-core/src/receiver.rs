@@ -332,6 +332,7 @@ fn distance(a: Point, b: Point) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     const A: u16 = 0x04;
     const SHIFT: u16 = keymap::usage::LEFT_SHIFT;
@@ -526,8 +527,8 @@ mod tests {
         r.control(later, button(Button::Left, false, p), &mut out);
         let far = Point::new(200.0, 100.0);
         r.control(later, button(Button::Left, true, far), &mut out);
-        assert!(matches!(out[0], Inject::Button { clicks: 1, .. }));
-        assert!(matches!(out[2], Inject::Button { clicks: 1, .. }));
+        assert_matches!(out[0], Inject::Button { clicks: 1, .. });
+        assert_matches!(out[2], Inject::Button { clicks: 1, .. });
     }
 
     #[test]

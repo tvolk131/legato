@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::time::Duration;
 
 use legato_proto::{Control, Datagram, Hello, Os, Point, Screens};
@@ -67,8 +68,8 @@ async fn pairing_requires_both_sides_to_accept() {
     assert!(a.paired_peers().is_empty() && b.paired_peers().is_empty());
 
     let (x, y) = pair(&a, &b, true, true).await;
-    assert!(matches!(x, PairOutcome::Paired(ref p) if p.id == b.id() && p.name == "b"));
-    assert!(matches!(y, PairOutcome::Paired(ref p) if p.id == a.id() && p.os == Os::Windows));
+    assert_matches!(x, PairOutcome::Paired(ref p) if p.id == b.id() && p.name == "b");
+    assert_matches!(y, PairOutcome::Paired(ref p) if p.id == a.id() && p.os == Os::Windows);
     assert_eq!(b.store().peer(&a.id()).unwrap().name, "a");
 }
 
@@ -231,8 +232,10 @@ async fn changed_displays_reach_connected_peers_and_the_next_handshake() {
         .await
         .unwrap()
         .unwrap();
-    assert!(
-        matches!(event, SessionEvent::Control { peer, msg: Control::Screens(ref got) } if peer == a.id() && got == &screens)
+    assert_matches!(
+        event,
+        SessionEvent::Control { peer, msg: Control::Screens(ref got) }
+            if peer == a.id() && got == &screens
     );
     b_session.close();
     let reconnected = timeout(Duration::from_secs(15), async {
@@ -614,13 +617,13 @@ async fn failed_pairing_changes_preserve_allow_list_and_live_session() {
     assert!(a.shared.allowed.read().unwrap().contains(&b.id()));
     assert_eq!(a.paired_peers().len(), 1);
     assert!(session.send(Control::Leave));
-    assert!(matches!(
+    assert_matches!(
         timeout(Duration::from_secs(5), be.recv()).await.unwrap(),
         Some(SessionEvent::Control {
             msg: Control::Leave,
             ..
         })
-    ));
+    );
     let new = PeerInfo {
         id: iroh::SecretKey::generate().public(),
         name: "new".into(),
@@ -634,8 +637,8 @@ async fn failed_pairing_changes_preserve_allow_list_and_live_session() {
     assert!(a.unpair(&b.id()).unwrap());
     assert!(!a.shared.allowed.read().unwrap().contains(&b.id()));
     assert!(a.paired_peers().is_empty());
-    assert!(matches!(
+    assert_matches!(
         timeout(Duration::from_secs(5), be.recv()).await.unwrap(),
         Some(SessionEvent::Disconnected { .. })
-    ));
+    );
 }

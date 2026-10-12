@@ -154,6 +154,7 @@ thread_local! {
 }
 
 /// Side effects that must run outside the state borrow (they can pump messages).
+#[derive(Debug)]
 enum Effect {
     Pin(POINT),
     Unpin(POINT),
@@ -1015,6 +1016,7 @@ mod tests {
     use legato_core::controller::ControllerConfig;
     use legato_core::{Layout, MachineId};
     use legato_proto::{Control, Datagram, Display, Screens};
+    use std::assert_matches;
 
     fn layout(local: Rect) -> Layout {
         let screens = |bounds| Screens {
@@ -1093,10 +1095,7 @@ mod tests {
         let effects = state
             .on_command(Command::SetLayout(new_layout.clone()))
             .unwrap();
-        assert!(matches!(
-            &effects[..],
-            [Effect::Pin(POINT { x: -640, y: 360 })]
-        ));
+        assert_matches!(&effects[..], [Effect::Pin(POINT { x: -640, y: 360 })]);
         assert_eq!(state.pin, Some(POINT { x: -640, y: 360 }));
         assert_eq!(actions.try_iter().collect::<Vec<_>>(), [Action::Capture]);
         assert!(
