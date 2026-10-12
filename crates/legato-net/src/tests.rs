@@ -208,6 +208,45 @@ async fn paired_peers_connect_and_exchange_input() {
     }
 }
 
+#[tokio::test]
+async fn changed_displays_reach_connected_peers_and_the_next_handshake() {
+    let (a, b) = (
+        node("screens-a", Os::Windows).await,
+        node("screens-b", Os::MacOs).await,
+    );
+    let [(_a_events, _a_session), (mut b_events, b_session)] = connect(&a, &b).await;
+    let screens = Screens {
+        native_per_desk: 1.5,
+        displays: vec![legato_proto::Display {
+            id: 7,
+            bounds: legato_proto::Rect::new(-2560.0, 0.0, 2560.0, 1440.0),
+            pixel_scale: 1.0,
+            ui_scale: 1.5,
+            primary: true,
+            name: "Reconnected monitor".into(),
+        }],
+    };
+    a.update_screens(screens.clone());
+    let event = timeout(Duration::from_secs(5), b_events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(event, SessionEvent::Control { peer, msg: Control::Screens(ref got) } if peer == a.id() && got == &screens)
+    );
+    b_session.close();
+    let reconnected = timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(SessionEvent::Connected(s)) = b_events.recv().await {
+                break s;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(reconnected.remote.screens, screens);
+}
+
 #[test]
 fn adverts_round_trip_and_fit() {
     let mut config = NetConfig::for_this_machine("test");

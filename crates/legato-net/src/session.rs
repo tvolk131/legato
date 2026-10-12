@@ -363,9 +363,10 @@ async fn dial(shared: &Arc<Shared>, endpoint: &Endpoint, peer: EndpointId) -> Re
         .await
         .context("timed out connecting")??;
     let (mut send, mut recv) = conn.open_bi().await?;
-    write_frame(&mut send, &Control::Hello(our_hello(shared)?)).await?;
+    let hello = our_hello(shared)?;
+    write_frame(&mut send, &Control::Hello(hello.clone())).await?;
     let remote = read_hello(&mut recv).await?;
-    run(shared, conn, send, recv, remote).await
+    run(shared, conn, send, recv, remote, hello.screens).await
 }
 
 fn our_hello(shared: &Shared) -> Result<Hello> {
@@ -402,6 +403,7 @@ async fn run(
     mut send: SendStream,
     mut recv: RecvStream,
     remote: Hello,
+    announced: Screens,
 ) -> Result<()> {
     let peer = conn.remote_id();
     let (control, mut outgoing) = mpsc::unbounded_channel();
@@ -416,6 +418,10 @@ async fn run(
         let hub = hub.as_mut().context("sessions are not running")?;
         if let Some(old) = hub.active.insert(peer, session.clone()) {
             old.close();
+        }
+        // A display change during the handshake must not be lost before registration.
+        if hub.hello.screens != announced {
+            session.send(Control::Screens(hub.hello.screens.clone()));
         }
         hub.events.clone()
     };
@@ -551,8 +557,8 @@ impl ProtocolHandler for Handler {
         let result = async {
             let (mut send, mut recv) = timeout(HELLO_TIMEOUT, conn.accept_bi()).await??;
             let remote = read_hello(&mut recv).await?;
-            write_frame(&mut send, &Control::Hello(hello)).await?;
-            run(shared, conn.clone(), send, recv, remote).await
+            write_frame(&mut send, &Control::Hello(hello.clone())).await?;
+            run(shared, conn.clone(), send, recv, remote, hello.screens).await
         }
         .await;
         if let Err(e) = result {

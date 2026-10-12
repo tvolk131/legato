@@ -318,3 +318,18 @@ Permission behaviour depends on the signature and the install, so development bu
 - [AutoControlGUI #482: macOS runner TCC measurements](https://github.com/Integration-Automation/AutoControlGUI/pull/482)
 - [runner-images #1567: Accessibility on macOS runners](https://github.com/actions/runner-images/issues/1567)
 - [Tart (macOS VMs)](https://github.com/cirruslabs/tart)
+
+### Live physical-display changes
+
+Display enumeration runs once a second off the sharing loop and updates the arrangement
+editor even while sharing is stopped. Tests inject resolution, DPI, origin and monitor
+count changes; empty/transient enumeration retains the last usable desk. Core tests
+preserve a held drag's native peer position when the shared layout moves, clamp the local
+return point after unplugging, and cross at the new edge. Loopback tests verify updated
+screens reach both an existing session and the next handshake. Legato's Mac virtual
+display remains excluded by the platform enumerator.
+
+Hardware check: while sharing, unplug/reconnect a monitor and change its resolution,
+scale and placement. Check both arrangement editors, cross each changed edge, repeat
+while driving the other machine, and check an open viewer's alignment. Also change a
+monitor with sharing stopped, then start sharing. Hosted tests do not simulate OS hotplug.

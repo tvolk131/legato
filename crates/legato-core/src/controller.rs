@@ -391,7 +391,29 @@ impl Controller {
     /// Replaces the layout. If the cursor is on a peer that disappeared, control returns
     /// to the local machine.
     pub fn set_layout(&mut self, layout: Layout, out: &mut Vec<Action>) {
+        let native_cursor = match self.state {
+            State::Remote { peer, cursor, .. } => {
+                self.layout.machine(peer).map(|m| m.to_native(cursor))
+            }
+            _ => None,
+        };
         self.layout = layout;
+        self.push = None;
+        // A moved peer must not move the pointer within that peer's screens. Likewise,
+        // returning from a visit must not warp onto a local monitor that was unplugged.
+        self.last_local = self.clamp_to_machine(
+            MachineId::LOCAL,
+            self.layout.local().to_desk(self.last_local),
+        );
+        self.last_local = self.layout.local().to_native(self.last_local);
+        if let State::Remote { return_to, .. } = self.state {
+            let clamped =
+                self.clamp_to_machine(MachineId::LOCAL, self.layout.local().to_desk(return_to));
+            let clamped = self.layout.local().to_native(clamped);
+            if let State::Remote { return_to, .. } = &mut self.state {
+                *return_to = clamped;
+            }
+        }
         if let State::Portal { peer, .. } = self.state
             && self.layout.machine(peer).is_none()
         {
@@ -400,10 +422,11 @@ impl Controller {
         if let State::Remote { peer, cursor, .. } = self.state {
             match self.layout.machine(peer) {
                 None => {
-                    self.exit_to_local(false, out);
+                    self.exit_to_local(true, out);
                     self.drop_routes(peer);
                 }
-                Some(_) => {
+                Some(machine) => {
+                    let cursor = native_cursor.map_or(cursor, |pos| machine.to_desk(pos));
                     let clamped = self.clamp_to_machine(peer, cursor);
                     if let State::Remote { cursor, .. } = &mut self.state {
                         *cursor = clamped;
