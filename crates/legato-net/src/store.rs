@@ -117,20 +117,23 @@ impl Store {
                 .map_or(0, |d| d.as_secs()),
         };
         let mut peers = self.peers.write().unwrap();
-        peers.retain(|p| p.id != id);
-        peers.push(peer.clone());
-        self.save(&peers)?;
+        let mut next = peers.clone();
+        next.retain(|p| p.id != id);
+        next.push(peer.clone());
+        self.save(&next)?;
+        *peers = next;
         Ok(peer)
     }
 
     /// Removes a paired peer. Returns whether it was present.
     pub fn remove_peer(&self, id: &EndpointId) -> Result<bool> {
         let mut peers = self.peers.write().unwrap();
-        let before = peers.len();
-        peers.retain(|p| &p.id != id);
-        let removed = peers.len() != before;
+        let mut next = peers.clone();
+        next.retain(|p| &p.id != id);
+        let removed = next.len() != peers.len();
         if removed {
-            self.save(&peers)?;
+            self.save(&next)?;
+            *peers = next;
         }
         Ok(removed)
     }
@@ -225,6 +228,36 @@ mod tests {
         assert_eq!(peers[0].name, "Tommy's MacBook");
         assert!(store.remove_peer(&id).unwrap());
         assert!(Store::open(&dir).unwrap().peers().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_peer_saves_preserve_committed_state_and_can_be_retried() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let id = SecretKey::generate().public();
+        let other = SecretKey::generate().public();
+        store.add_peer(id, "Original".into(), Os::MacOs).unwrap();
+        let before = store.peers();
+        let blocker = dir.join("peers.tmp");
+        fs::create_dir(&blocker).unwrap();
+        for result in [
+            store.add_peer(other, "New".into(), Os::Windows).map(|_| ()),
+            store.add_peer(id, "Renamed".into(), Os::MacOs).map(|_| ()),
+            store.remove_peer(&id).map(|_| ()),
+        ] {
+            assert!(result.is_err());
+            assert_eq!(store.peers(), before);
+            assert_eq!(Store::open(&dir).unwrap().peers(), before);
+        }
+        assert!(!store.remove_peer(&other).unwrap(), "no-op needs no write");
+        fs::remove_dir(blocker).unwrap();
+        store.add_peer(id, "Renamed".into(), Os::MacOs).unwrap();
+        store.add_peer(other, "New".into(), Os::Windows).unwrap();
+        assert!(store.remove_peer(&id).unwrap());
+        assert_eq!(store.peers(), Store::open(&dir).unwrap().peers());
+        assert_eq!(store.peers().len(), 1);
+        assert_eq!(store.peers()[0].id, other);
         fs::remove_dir_all(dir).unwrap();
     }
 

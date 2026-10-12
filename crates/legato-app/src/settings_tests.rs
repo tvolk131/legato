@@ -139,3 +139,45 @@ async fn choosing_a_controller_always_advances_the_latest_policy() {
     assert_eq!(app.engine.config().control.updated_at, future + 2);
     assert_eq!(app.engine.config().control.controller, None);
 }
+
+#[tokio::test]
+async fn failed_unpair_keeps_the_device_and_its_arrangement_for_retry() {
+    let (dir, mut app) = app().await;
+    let id = iroh::SecretKey::from_bytes(&[7; 32]).public();
+    app.engine
+        .net()
+        .store()
+        .add_peer(id, "Peer".into(), legato_proto::Os::MacOs)
+        .unwrap();
+    app.engine
+        .update_config(|c| {
+            c.neighbors.push(legato_engine::config::Neighbor {
+                peer: id.to_string(),
+                side: legato_core::Side::Below,
+                display: 1,
+                align: Default::default(),
+                nudge: 0.0,
+                offset: None,
+            })
+        })
+        .unwrap();
+    app.refresh_paired();
+    let before = app.engine.config();
+    let blocker = dir.path().join("peers.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    let _ = app.update(Message::Unpair(id));
+    assert!(app.model.paired(&id).is_some());
+    assert_eq!(app.engine.config(), before);
+    assert!(
+        app.model
+            .notice
+            .as_ref()
+            .unwrap()
+            .1
+            .contains("Couldn't unpair")
+    );
+    std::fs::remove_dir(blocker).unwrap();
+    let _ = app.update(Message::Unpair(id));
+    assert!(app.model.paired(&id).is_none());
+    assert!(app.engine.config().neighbors.is_empty());
+}

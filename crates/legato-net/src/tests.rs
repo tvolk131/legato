@@ -600,3 +600,42 @@ async fn a_peer_that_vanishes_silently_is_found_again() {
         stay.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn failed_pairing_changes_preserve_allow_list_and_live_session() {
+    let (a, b) = (
+        node("save-a", Os::Windows).await,
+        node("save-b", Os::MacOs).await,
+    );
+    let [(_ae, session), (mut be, _bs)] = connect(&a, &b).await;
+    let blocker = a.store().dir().join("peers.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    assert!(a.unpair(&b.id()).is_err());
+    assert!(a.shared.allowed.read().unwrap().contains(&b.id()));
+    assert_eq!(a.paired_peers().len(), 1);
+    assert!(session.send(Control::Leave));
+    assert!(matches!(
+        timeout(Duration::from_secs(5), be.recv()).await.unwrap(),
+        Some(SessionEvent::Control {
+            msg: Control::Leave,
+            ..
+        })
+    ));
+    let new = PeerInfo {
+        id: iroh::SecretKey::generate().public(),
+        name: "new".into(),
+        os: Os::MacOs,
+        app_version: "test".into(),
+    };
+    assert!(a.shared.add_paired(&new).is_err());
+    assert!(!a.shared.allowed.read().unwrap().contains(&new.id));
+    assert_eq!(a.paired_peers().len(), 1);
+    std::fs::remove_dir(blocker).unwrap();
+    assert!(a.unpair(&b.id()).unwrap());
+    assert!(!a.shared.allowed.read().unwrap().contains(&b.id()));
+    assert!(a.paired_peers().is_empty());
+    assert!(matches!(
+        timeout(Duration::from_secs(5), be.recv()).await.unwrap(),
+        Some(SessionEvent::Disconnected { .. })
+    ));
+}
