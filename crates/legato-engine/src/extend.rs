@@ -645,9 +645,9 @@ pub(crate) struct Viewing {
     pub(crate) bounds: Option<Rect>,
     /// Where it's shown here, in native coordinates.
     pub(crate) area: Option<Rect>,
-    /// The area and display size the Mac was last asked to arrange for, so a request
-    /// isn't repeated when macOS nudges the display a little.
-    pub(crate) arranged_for: Option<(Rect, (f64, f64))>,
+    /// The last requested placement, so layout/client changes are noticed without
+    /// repeating requests when macOS nudges the display a little.
+    arranged_for: Option<(legato_proto::Point, Rect)>,
 }
 
 impl Viewing {
@@ -675,22 +675,18 @@ impl Viewing {
         client: Option<Rect>,
     ) -> Option<(legato_proto::Point, Rect)> {
         let (bounds, area) = (self.bounds?, self.area?);
-        let key = (area, (bounds.width, bounds.height));
-        if self.arranged_for == Some(key) {
-            return None;
-        }
         let origin = legato_core::extend::place_extra_display(
             layout,
             machine,
             area,
             (bounds.width, bounds.height),
         )?;
-        self.arranged_for = Some(key);
         let picture = legato_core::controller::fit_picture(
             (bounds.width, bounds.height),
             client.unwrap_or(area),
         );
-        Some((origin, picture))
+        let placement = (origin, picture);
+        (self.arranged_for.replace(placement) != Some(placement)).then_some(placement)
     }
 }
 
