@@ -844,21 +844,36 @@ impl Controller {
     }
 
     /// Moves from the portal onto the peer's own displays, next to the portal's display
-    /// in direction `dir`, keeping everything held: it's the same machine.
+    /// in direction `dir`, keeping everything held. Stays on the portal if no display
+    /// touches that edge at the pointer's position.
     fn portal_to_remote(
         &mut self,
         peer: MachineId,
         dir: Dir,
         return_to: Point,
         out: &mut Vec<Action>,
-    ) {
+    ) -> bool {
         let State::Portal { pos, .. } = self.state else {
-            return;
+            return false;
+        };
+        let Some(portal) = self.portal else {
+            return false;
         };
         let Some(machine) = self.layout.machine(peer) else {
-            return;
+            return false;
         };
-        let beyond = add(pos, scale(dir.unit(), 2.0));
+        let beyond = add(
+            edge_point_native(portal.remote, pos, dir),
+            scale(dir.unit(), 0.5),
+        );
+        if !machine
+            .screens
+            .displays
+            .iter()
+            .any(|d| d.bounds.contains(beyond))
+        {
+            return false;
+        }
         let cursor = self.clamp_to_machine(peer, machine.to_desk(beyond));
         self.state = State::Remote {
             peer,
@@ -869,6 +884,7 @@ impl Controller {
         self.push = None;
         out.push(Action::Capture);
         self.send_motion(peer, cursor, out);
+        true
     }
 
     fn portal_motion(
@@ -916,8 +932,9 @@ impl Controller {
         // its screen's edge towards the same peer carries on on the peer's displays.
         match self.edge_crossing(local, attempted) {
             Some((target, dir, pushing, _)) if target == portal.peer => {
-                if self.accumulate_push(now, target, dir, pushing) {
-                    self.portal_to_remote(portal.peer, dir, local, out);
+                if self.accumulate_push(now, target, dir, pushing)
+                    && self.portal_to_remote(portal.peer, dir, local, out)
+                {
                     return Verdict::Swallow;
                 }
             }

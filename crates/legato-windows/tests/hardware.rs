@@ -600,6 +600,105 @@ fn windows_key(down: bool) {
     })]);
 }
 
+/// The low-level hook can report a position above the monitor while the visible
+/// pointer stays on its top row. That still belongs to the full-screen viewer.
+#[test]
+#[ignore = "moves the cursor and shows a window"]
+fn pushing_above_the_full_screen_viewer_keeps_the_drag_at_the_top() {
+    use legato_proto::{Button, Datagram};
+
+    let local = screens();
+    let primary = local.displays.iter().find(|d| d.primary).unwrap().bounds;
+    let (layout, _) = peer_to_the_right(&local, 1512.0, 982.0);
+    let (x, y) = (primary.x as i32, primary.y as i32);
+    let (w, h) = (primary.width as i32, primary.height as i32);
+    let viewer = viewer::Viewer::open(x, y, w, h, Duration::ZERO);
+    viewer.focus();
+    let cx = x + w / 2;
+    let under = window_at(cx, y, viewer.hwnd);
+    if under != "the viewer" {
+        eprintln!("skipped: the viewer's top edge is covered by {under}");
+        return;
+    }
+    let remote = Rect::new(0.0, -primary.height, primary.width, primary.height);
+    let (capture, rx) = start_capture(ControllerConfig::default(), layout);
+    set_portal(&capture, viewer.hwnd, remote);
+    std::thread::sleep(Duration::from_millis(100));
+    // Establish the portal and a held button just below the monitor's top edge.
+    unsafe { SetCursorPos(cx, y + 1).unwrap() };
+    mouse_move(0, -1);
+    click(true);
+    std::thread::sleep(Duration::from_millis(100));
+    let started: Vec<_> = rx.try_iter().collect();
+    for _ in 0..10 {
+        mouse_move(0, -30);
+    }
+    // Release before asserting so a failure cannot leave the runner's button held.
+    click(false);
+    std::thread::sleep(Duration::from_millis(100));
+    let actions: Vec<_> = rx.try_iter().collect();
+    assert!(
+        started.iter().any(|a| matches!(
+            a,
+            Action::Send {
+                msg: Control::Button {
+                    button: Button::Left,
+                    down: true,
+                    ..
+                },
+                ..
+            }
+        )),
+        "the drag did not start: {started:?}"
+    );
+
+    let mut cursor = POINT::default();
+    unsafe { GetCursorPos(&mut cursor).unwrap() };
+    eprintln!("top-edge drag: cursor {cursor:?}, actions {actions:?}");
+    assert_eq!(cursor.y, y, "the pointer left the monitor's top edge");
+    assert!(
+        !actions.iter().any(|a| matches!(
+            a,
+            Action::Capture
+                | Action::EnterPortal { .. }
+                | Action::Send {
+                    msg: Control::Leave,
+                    ..
+                }
+        )),
+        "the drag left the viewer: {actions:?}"
+    );
+    let moves: Vec<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Datagram {
+                msg: Datagram::Motion { pos, .. },
+                ..
+            } => Some(pos),
+            _ => None,
+        })
+        .collect();
+    assert!(!moves.is_empty(), "no motion reached the Mac: {actions:?}");
+    assert!(
+        moves.iter().all(|p| (p.y - remote.top()).abs() < 1.0),
+        "motion wrapped away from the top: {moves:?}"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Send {
+                msg: Control::Button {
+                    button: Button::Left,
+                    down: false,
+                    ..
+                },
+                ..
+            }
+        )),
+        "the Mac did not receive the release: {actions:?}"
+    );
+}
+
 /// Virtual monitor mode: with the pointer over the viewer's picture, clicks and keys go
 /// to the Mac whether or not the viewer window has focus, however busy its thread is, and
 /// even with no motion since the viewer appeared or since the Mac took its cursor back.
