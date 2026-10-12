@@ -333,3 +333,16 @@ Hardware check: while sharing, unplug/reconnect a monitor and change its resolut
 scale and placement. Check both arrangement editors, cross each changed edge, repeat
 while driving the other machine, and check an open viewer's alignment. Also change a
 monitor with sharing stopped, then start sharing. Hosted tests do not simulate OS hotplug.
+
+### Confirmed file saves and failed batches
+
+Protocol 11 moves files to bidirectional streams: the receiver acknowledges only after
+writing and flushing the destination. Both machines need this protocol version. Loopback
+tests prove that delivery alone does not complete a send and that destination creation,
+write, flush, missing-acknowledgment and connection failures report failure. Truncated
+files are removed without touching existing or successfully received files.
+
+Batch tests cover cancellation during a stalled transfer, disconnect cleanup, late
+headers/completions, and a source disappearing after the first file was saved. Incomplete
+clipboard batches never become ready to paste; completed files are kept on disk. Sender
+cancellation also notifies the receiver when the send future is dropped.

@@ -70,17 +70,49 @@ pub enum SessionEvent {
 pub struct IncomingFile {
     pub header: legato_proto::FileHeader,
     recv: tokio::sync::Mutex<Option<RecvStream>>,
+    reply: tokio::sync::Mutex<Option<SendStream>>,
 }
 
 impl IncomingFile {
     /// Streams the file's bytes into `out`. Can only be called once.
     pub async fn recv(&self, out: &mut (impl tokio::io::AsyncWrite + Unpin)) -> Result<u64> {
         let mut recv = self.recv.lock().await.take().context("already received")?;
-        let copied = tokio::io::copy(&mut recv, out).await?;
+        let copied = tokio::io::copy(
+            &mut tokio::io::AsyncReadExt::take(&mut recv, self.header.size),
+            out,
+        )
+        .await?;
         if copied != self.header.size {
             bail!("expected {} bytes, got {copied}", self.header.size);
         }
+        let mut extra = [0];
+        if recv.read(&mut extra).await?.is_some() {
+            bail!("file exceeds its declared size");
+        }
         Ok(copied)
+    }
+
+    /// Acknowledge the application's save result, only after flushing its output.
+    /// A missing acknowledgment is a failed transfer, never a successful save.
+    pub async fn complete(&self, result: &Result<()>) -> Result<()> {
+        if result.is_err()
+            && let Some(mut recv) = self.recv.lock().await.take()
+        {
+            let _ = recv.stop(1u32.into());
+        }
+        let mut reply = self
+            .reply
+            .lock()
+            .await
+            .take()
+            .context("already acknowledged")?;
+        let result: std::result::Result<(), String> = result
+            .as_ref()
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}").chars().take(1024).collect());
+        write_frame(&mut reply, &result).await?;
+        reply.finish()?;
+        Ok(())
     }
 }
 
@@ -223,25 +255,40 @@ impl Session {
         });
     }
 
-    /// Streams a file to the peer, below input in priority. Resolves once it's sent.
+    /// Streams a file below input in priority. Resolves only after the receiver saves it.
     pub async fn send_file(
         &self,
         header: legato_proto::FileHeader,
         data: &mut (impl tokio::io::AsyncRead + Unpin),
     ) -> Result<()> {
-        let mut send = self.conn.open_uni().await?;
+        let (mut send, mut reply) = self.conn.open_bi().await?;
         send.set_priority(BULK_PRIORITY)?;
-        send.write_all(&[legato_proto::blob::FILE]).await?;
         let size = header.size;
         write_frame(&mut send, &header).await?;
-        let sent =
-            tokio::io::copy(&mut tokio::io::AsyncReadExt::take(data, size), &mut send).await?;
-        if sent != size {
-            bail!("file changed while sending ({sent} of {size} bytes)");
+        let sending = async {
+            let sent =
+                tokio::io::copy(&mut tokio::io::AsyncReadExt::take(data, size), &mut send).await?;
+            if sent != size {
+                bail!("file changed while sending ({sent} of {size} bytes)");
+            }
+            send.finish()?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let saved = expect_frame::<std::result::Result<(), String>>(&mut reply);
+        tokio::pin!(saved);
+        tokio::select! {
+            result = sending => result?,
+            saved = &mut saved => {
+                match saved? {
+                    Ok(()) => bail!("receiver acknowledged before the file was sent"),
+                    Err(reason) => bail!("receiver could not save the file: {reason}"),
+                }
+            }
         }
-        send.finish()?;
-        let _ = send.stopped().await;
-        Ok(())
+        let saved: std::result::Result<(), String> = timeout(Duration::from_secs(30), saved)
+            .await
+            .context("timed out waiting for the receiver to save the file")??;
+        saved.map_err(|reason| anyhow::anyhow!("receiver could not save the file: {reason}"))
     }
 
     /// Opens a stream to the peer for one [`legato_proto::video_track`].
@@ -465,7 +512,29 @@ async fn run(
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     };
+    let files = async {
+        loop {
+            let (reply, mut recv) = conn.accept_bi().await?;
+            let events = events.clone();
+            tokio::spawn(async move {
+                match timeout(HELLO_TIMEOUT, expect_frame(&mut recv)).await {
+                    Ok(Ok(header)) => {
+                        let file = Arc::new(IncomingFile {
+                            header,
+                            recv: tokio::sync::Mutex::new(Some(recv)),
+                            reply: tokio::sync::Mutex::new(Some(reply)),
+                        });
+                        let _ = events.send(SessionEvent::File { peer, file });
+                    }
+                    error => tracing::debug!(?error, "receiving file header failed"),
+                }
+            });
+        }
+        #[allow(unreachable_code)]
+        Ok::<_, anyhow::Error>(())
+    };
     let result = tokio::select! {
+        r = files => r,
         r = reader => r,
         r = datagrams => r,
         r = writer => r,
@@ -505,15 +574,6 @@ async fn receive_blob(
 ) -> Result<()> {
     let mut tag = [0u8; 1];
     recv.read_exact(&mut tag).await?;
-    if tag[0] == legato_proto::blob::FILE {
-        let header: legato_proto::FileHeader = expect_frame(&mut recv).await?;
-        let file = Arc::new(IncomingFile {
-            header,
-            recv: tokio::sync::Mutex::new(Some(recv)),
-        });
-        let _ = events.send(SessionEvent::File { peer, file });
-        return Ok(());
-    }
     if tag[0] == legato_proto::blob::VIDEO {
         let mut track = [0u8; 1];
         recv.read_exact(&mut track).await?;

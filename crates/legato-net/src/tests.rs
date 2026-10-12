@@ -291,7 +291,7 @@ async fn blobs_and_files_arrive_intact() {
         index: 0,
         purpose: legato_proto::FilePurpose::Send,
     };
-    let sender = {
+    let mut sender = {
         let session = a_session.clone();
         let header = header.clone();
         let contents = contents.clone();
@@ -312,6 +312,13 @@ async fn blobs_and_files_arrive_intact() {
         contents.len() as u64
     );
     assert_eq!(received, contents);
+    assert!(
+        timeout(Duration::from_millis(50), &mut sender)
+            .await
+            .is_err(),
+        "transport delivery is not a save acknowledgment"
+    );
+    file.complete(&Ok(())).await.unwrap();
     sender.await.unwrap().unwrap();
 }
 
