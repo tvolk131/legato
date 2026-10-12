@@ -181,3 +181,24 @@ async fn failed_unpair_keeps_the_device_and_its_arrangement_for_retry() {
     assert!(app.model.paired(&id).is_none());
     assert!(app.engine.config().neighbors.is_empty());
 }
+
+#[tokio::test]
+async fn watch_subscription_delivers_initial_and_latest_values_then_closes() {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let mut stream = std::pin::pin!(watch_stream(rx, |value| Message::ViewerShowing(*value)));
+    assert!(matches!(
+        stream.next().await,
+        Some(Message::ViewerShowing(false))
+    ));
+    // These updates must neither deadlock on a retained read guard nor replay every
+    // intermediate value when the UI next polls the subscription.
+    tx.send_replace(true);
+    tx.send_replace(false);
+    tx.send_replace(true);
+    assert!(matches!(
+        stream.next().await,
+        Some(Message::ViewerShowing(true))
+    ));
+    drop(tx);
+    assert!(stream.next().await.is_none());
+}

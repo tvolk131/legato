@@ -4,14 +4,12 @@
 
 #![cfg(target_os = "macos")]
 
-mod activity;
 mod capture;
 mod displays;
 mod inject;
 mod locks;
 mod permissions;
 
-pub use activity::ActivityMonitor;
 pub use capture::Capture;
 pub use displays::{cursor_position, screens};
 pub use inject::Injector;

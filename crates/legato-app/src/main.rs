@@ -992,26 +992,23 @@ fn decide(attempt: Attempt, accept: bool) -> Task<Message> {
 /// Notifications carry no snapshot: the UI always reads the latest config, even if
 /// an earlier notification was queued before its own settings edit.
 fn config_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
-    let engine = engine.0.clone();
-    iced::stream::channel(1, async move |mut out| {
-        let mut changes = engine.config_updates();
-        loop {
-            changes.borrow_and_update();
-            if out.send(Message::ConfigChanged).await.is_err() || changes.changed().await.is_err() {
-                return;
-            }
-        }
-    })
+    watch_stream(engine.0.config_updates(), |_| Message::ConfigChanged)
 }
 
 fn screens_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
-    let engine = engine.0.clone();
+    watch_stream(engine.0.screen_updates(), |_| Message::ScreensChanged)
+}
+
+/// Coalesce watch updates while the UI is busy, without holding a read lock while
+/// waiting for it. Config/screens remain notifications; stats carry the latest value.
+fn watch_stream<T: Send + Sync + 'static>(
+    mut updates: tokio::sync::watch::Receiver<T>,
+    message: impl Fn(&T) -> Message + Send + 'static,
+) -> impl Stream<Item = Message> {
     iced::stream::channel(1, async move |mut out| {
-        let mut changes = engine.screen_updates();
         loop {
-            changes.borrow_and_update();
-            if out.send(Message::ScreensChanged).await.is_err() || changes.changed().await.is_err()
-            {
+            let latest = message(&updates.borrow_and_update());
+            if out.send(latest).await.is_err() || updates.changed().await.is_err() {
                 return;
             }
         }
@@ -1065,18 +1062,8 @@ fn frames_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
 }
 
 fn stats_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
-    let engine = engine.0.clone();
-    iced::stream::channel(1, async move |mut out| {
-        let mut stats = engine.viewer_stats();
-        loop {
-            let latest = *stats.borrow_and_update();
-            if out.send(Message::ViewerStats(latest)).await.is_err() {
-                return;
-            }
-            if stats.changed().await.is_err() {
-                return;
-            }
-        }
+    watch_stream(engine.0.viewer_stats(), |stats| {
+        Message::ViewerStats(*stats)
     })
 }
 
