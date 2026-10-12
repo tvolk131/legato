@@ -103,6 +103,36 @@ async fn a_failed_save_does_not_publish_or_change_the_committed_config() {
 }
 
 #[test]
+fn replacing_settings_preserves_open_readers_and_publishes_the_new_file() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let before = Config::default();
+    config::save(dir.path(), &before).unwrap();
+    let mut reader = std::fs::File::open(config::path(dir.path())).unwrap();
+    let mut after = before.clone();
+    after.extend.bitrate_mbps += 1;
+    // Keep the old file open throughout the replacement, not just opportunistically
+    // as in the concurrent-reader test. Old and new readers see complete versions.
+    config::save(dir.path(), &after).unwrap();
+    assert_eq!(config::load(dir.path()).unwrap(), after);
+    let mut old_text = String::new();
+    reader.read_to_string(&mut old_text).unwrap();
+    assert_eq!(toml::from_str::<Config>(&old_text).unwrap(), before);
+    drop(reader);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
+        let attrs = std::fs::metadata(config::path(dir.path()))
+            .unwrap()
+            .file_attributes();
+        assert_eq!(attrs & FILE_ATTRIBUTE_TEMPORARY, 0);
+    }
+}
+
+#[test]
 fn readers_only_see_complete_settings_during_atomic_replacements() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
