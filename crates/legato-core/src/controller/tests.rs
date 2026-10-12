@@ -174,6 +174,56 @@ fn bottom_edges_without_a_neighbour_are_walls() {
 }
 
 #[test]
+fn reconfiguring_displays_preserves_the_remote_pointer_and_clamps_the_return_point() {
+    let mut h = Harness::new();
+    h.cross_to_mac(1920.0);
+    h.step(8, captured(0.0, 150.0));
+    h.step(8, button(Button::Left, true));
+    let before = h.c.peer_cursor_native(MAC).unwrap();
+    h.take();
+
+    // Unplug the side monitors and change the primary monitor's resolution and DPI.
+    // The Mac is consequently placed at a different desk offset.
+    let mut local = windows_triple_4k();
+    local.displays.retain(|d| d.primary);
+    local.displays[0].bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+    local.displays[0].ui_scale = 2.0;
+    local.native_per_desk = 2.0;
+    let mut layout = Layout::new(local.clone());
+    assert!(layout.place_next_to_local(MAC, macbook_16(), 0, Side::Below, Align::Center, 0.0));
+    h.c.set_layout(layout, &mut h.out);
+    assert_eq!(h.c.peer_cursor_native(MAC), Some(before));
+    assert!(h.take().is_empty(), "the drag is still held on the Mac");
+
+    // Losing the configured anchor must release the peer's held inputs and return to
+    // a real local display, even though the original return point no longer exists.
+    h.c.set_layout(Layout::new(local.clone()), &mut h.out);
+    let out = h.take();
+    assert_eq!(sent(&out), [Control::Leave]);
+    assert!(out.iter().any(
+        |a| matches!(a, Action::Release { warp } if local.displays[0].bounds.contains(*warp))
+    ));
+    assert_eq!(h.c.active_peer(), None);
+    h.step(8, button(Button::Left, false));
+    assert!(
+        h.take().is_empty(),
+        "the release cannot land on another machine"
+    );
+
+    // A fresh crossing uses the new edge, not the old 2160-pixel bottom edge.
+    let mut layout = Layout::new(local);
+    assert!(layout.place_next_to_local(MAC, macbook_16(), 0, Side::Below, Align::Center, 0.0));
+    h.c.set_layout(layout, &mut h.out);
+    for _ in 0..20 {
+        h.step(8, local_at(640.0, 719.0, 0.0, 20.0));
+        if h.c.active_peer().is_some() {
+            break;
+        }
+    }
+    assert_eq!(h.c.active_peer(), Some(MAC));
+}
+
+#[test]
 fn the_macs_own_pointer_on_its_shown_display_is_reported_to_the_viewer() {
     let mut c = mac_controller();
     let display = Rect::new(-96.0, -1080.0, 1920.0, 1080.0);

@@ -77,6 +77,7 @@ pub enum Message {
     Sharing(Result<(), String>),
     Status(Status),
     ConfigChanged,
+    ScreensChanged,
     Nearby(NearbyEvent),
     /// Open or close the "Add a device" dialog.
     AddDevice(bool),
@@ -204,7 +205,7 @@ impl App {
             add_device_open: false,
             config: engine.config(),
             push_distance: None,
-            local: legato_engine::local_screens(),
+            local: engine.screen_updates().borrow().clone(),
             known: engine.known_screens(),
             placed_us: HashMap::new(),
             active: None,
@@ -279,6 +280,9 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ScreensChanged => {
+                self.model.local = self.engine.screen_updates().borrow().clone()
+            }
             Message::ConfigChanged => self.model.config = self.engine.config(),
             Message::Init => {
                 match tray::Tray::new(self.model.sharing) {
@@ -929,6 +933,7 @@ impl App {
         Subscription::batch([
             Subscription::run_with(engine.clone(), status_stream),
             Subscription::run_with(engine.clone(), config_stream),
+            Subscription::run_with(engine.clone(), screens_stream),
             Subscription::run_with(engine.clone(), nearby_stream),
             Subscription::run_with(engine.clone(), pairing_stream),
             Subscription::run(tray::events).map(Message::Tray),
@@ -994,6 +999,20 @@ fn config_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
         loop {
             changes.borrow_and_update();
             if out.send(Message::ConfigChanged).await.is_err() || changes.changed().await.is_err() {
+                return;
+            }
+        }
+    })
+}
+
+fn screens_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
+    let engine = engine.0.clone();
+    iced::stream::channel(1, async move |mut out| {
+        let mut changes = engine.screen_updates();
+        loop {
+            changes.borrow_and_update();
+            if out.send(Message::ScreensChanged).await.is_err() || changes.changed().await.is_err()
+            {
                 return;
             }
         }

@@ -23,6 +23,7 @@ pub mod extend;
 pub mod files;
 mod platform;
 mod run;
+mod screens;
 
 pub use config::Config;
 pub use extend::{Picture, ViewerFrame, ViewerStats};
@@ -104,6 +105,7 @@ pub struct Engine {
     status: broadcast::Sender<Status>,
     sharing: Mutex<Option<Sharing>>,
     known_screens: Mutex<HashMap<EndpointId, Screens>>,
+    screens: watch::Receiver<Screens>,
     run_commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<run::RunCommand>>>,
     /// The latest picture of a Mac's extra display shown here, if any.
     viewer_frames: watch::Sender<Option<ViewerFrame>>,
@@ -133,6 +135,7 @@ impl Engine {
             status,
             sharing: Mutex::new(None),
             known_screens: Mutex::new(known_screens),
+            screens: screens::watch(local_screens(), local_screens, Duration::from_secs(1)),
             run_commands: Mutex::new(None),
             viewer_frames: watch::Sender::new(None),
             viewer_stats: watch::Sender::new(None),
@@ -250,6 +253,11 @@ impl Engine {
         self.known_screens.lock().unwrap().clone()
     }
 
+    /// Current physical displays, refreshed even while sharing is stopped.
+    pub fn screen_updates(&self) -> watch::Receiver<Screens> {
+        self.screens.clone()
+    }
+
     pub fn is_sharing(&self) -> bool {
         self.sharing
             .lock()
@@ -301,7 +309,7 @@ impl Engine {
     }
 
     async fn share(self: &Arc<Self>, stop: oneshot::Receiver<()>) -> Result<()> {
-        let screens = local_screens();
+        let screens = self.screens.borrow().clone();
         let hello = legato_proto::Hello {
             protocol: legato_proto::PROTOCOL_VERSION,
             app_version: self.net.config().app_version.clone(),

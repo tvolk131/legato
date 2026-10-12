@@ -126,12 +126,13 @@ fn send_files_in_background(
 
 pub(crate) async fn run(
     mut ctx: Ctx,
-    local: Screens,
+    mut local: Screens,
     mut events: mpsc::UnboundedReceiver<SessionEvent>,
     mut commands: mpsc::UnboundedReceiver<RunCommand>,
     mut stop: oneshot::Receiver<()>,
 ) -> Result<()> {
     platform::check_permissions()?;
+    let mut screen_updates = ctx.engine.screen_updates();
     let me = ctx.engine.net().id();
     let own_id = me.to_string();
     // Connected machines share one Caps Lock: watch this machine's, and set it to match
@@ -244,42 +245,43 @@ pub(crate) async fn run(
         };
 
     // Rebuilds the layout and tells each peer where we've put it.
-    let relayout = |peers: &HashMap<MachineId, Peer>, config: &Config, ctx: &Ctx| {
-        let may_drive = config.control.allows(&own_id);
-        let connected: Vec<ConnectedPeer<'_>> = peers
-            .iter()
-            .map(|(&machine, p)| ConnectedPeer {
-                machine,
-                id: p.session.peer.to_string(),
-                name: &p.session.remote.name,
-                screens: &p.screens,
-                placed_us_at: p.placed_us_at,
-            })
-            .collect();
-        let (layout, problems) = arrange::build(&local, &connected, config);
-        if may_drive {
-            for problem in problems {
-                ctx.status(Status::Problem(problem));
-            }
-        }
-        for (&machine, p) in peers {
-            let id = p.session.peer.to_string();
-            let ours = config
-                .neighbors
+    let relayout =
+        |local: &Screens, peers: &HashMap<MachineId, Peer>, config: &Config, ctx: &Ctx| {
+            let may_drive = config.control.allows(&own_id);
+            let connected: Vec<ConnectedPeer<'_>> = peers
                 .iter()
-                .any(|n| !n.peer.is_empty() && id.starts_with(&n.peer));
-            let offset = ours
-                .then(|| layout.machine(machine).map(|m| m.offset))
-                .flatten();
-            p.session.send(Control::Placement { offset });
-        }
-        capture.send(CaptureCommand::SetLayout(if may_drive {
-            layout.clone()
-        } else {
-            Layout::new(local.clone())
-        }));
-        layout
-    };
+                .map(|(&machine, p)| ConnectedPeer {
+                    machine,
+                    id: p.session.peer.to_string(),
+                    name: &p.session.remote.name,
+                    screens: &p.screens,
+                    placed_us_at: p.placed_us_at,
+                })
+                .collect();
+            let (layout, problems) = arrange::build(local, &connected, config);
+            if may_drive {
+                for problem in problems {
+                    ctx.status(Status::Problem(problem));
+                }
+            }
+            for (&machine, p) in peers {
+                let id = p.session.peer.to_string();
+                let ours = config
+                    .neighbors
+                    .iter()
+                    .any(|n| !n.peer.is_empty() && id.starts_with(&n.peer));
+                let offset = ours
+                    .then(|| layout.machine(machine).map(|m| m.offset))
+                    .flatten();
+                p.session.send(Control::Placement { offset });
+            }
+            capture.send(CaptureCommand::SetLayout(if may_drive {
+                layout.clone()
+            } else {
+                Layout::new(local.clone())
+            }));
+            layout
+        };
 
     // The shared desk as arranged, even when this machine may not drive the others.
     let mut layout_now = Layout::new(local.clone());
@@ -310,6 +312,13 @@ pub(crate) async fn run(
                     }
                 }
             }
+            changed = screen_updates.changed() => {
+                if changed.is_err() { break; }
+                local = screen_updates.borrow_and_update().clone();
+                ctx.engine.net().update_screens(local.clone());
+                layout_now = relayout(&local, &peers, &config, &ctx);
+                arrange(&mut viewing, viewer_window, &layout_now, &ids);
+            }
             changed = ctx.config.changed() => {
                 if changed.is_err() {
                     break;
@@ -331,7 +340,8 @@ pub(crate) async fn run(
                     clipboard = start_clipboard(new.clipboard.enabled);
                 }
                 config = new;
-                layout_now = relayout(&peers, &config, &ctx);
+                layout_now = relayout(&local, &peers, &config, &ctx);
+                arrange(&mut viewing, viewer_window, &layout_now, &ids);
             }
             Some(active) = active_rx.recv() => {
                 let id = active.and_then(|m| peers.get(&m)).map(|p| p.session.peer);
@@ -461,7 +471,8 @@ pub(crate) async fn run(
                             session,
                             placed_us_at: None,
                         });
-                        layout_now = relayout(&peers, &config, &ctx);
+                        layout_now = relayout(&local, &peers, &config, &ctx);
+                        arrange(&mut viewing, viewer_window, &layout_now, &ids);
                     }
                     SessionEvent::Control { peer, msg } => {
                         let Some(&machine) = ids.get(&peer) else { continue };
@@ -480,7 +491,8 @@ pub(crate) async fn run(
                                 if let Some(p) = peers.get_mut(&machine) {
                                     p.screens = screens;
                                 }
-                                layout_now = relayout(&peers, &config, &ctx);
+                                layout_now = relayout(&local, &peers, &config, &ctx);
+                                arrange(&mut viewing, viewer_window, &layout_now, &ids);
                             }
                             Control::Placement { offset } => {
                                 if let Some(p) = peers.get_mut(&machine) {
@@ -490,7 +502,8 @@ pub(crate) async fn run(
                                     p.placed_us_at = offset;
                                 }
                                 ctx.status(Status::PeerPlacedUs { id: peer, offset });
-                                layout_now = relayout(&peers, &config, &ctx);
+                                layout_now = relayout(&local, &peers, &config, &ctx);
+                                arrange(&mut viewing, viewer_window, &layout_now, &ids);
                             }
                             Control::CapsLock { on, clock } => {
                                 // Ties go to the machine with the lower id.
@@ -659,7 +672,8 @@ pub(crate) async fn run(
                         }
                         capture.send(CaptureCommand::Event(Event::PeerLost(machine)));
                         let _ = inject_tx.send(Input::Disconnected(peer));
-                        layout_now = relayout(&peers, &config, &ctx);
+                        layout_now = relayout(&local, &peers, &config, &ctx);
+                        arrange(&mut viewing, viewer_window, &layout_now, &ids);
                     }
                 }
             }
