@@ -29,6 +29,7 @@ impl PeerBox {
     }
 }
 
+#[derive(Clone)]
 pub struct Editor {
     /// This machine's displays in desk units, left to right.
     pub local: Vec<Rect>,
@@ -109,6 +110,45 @@ impl Editor {
     }
 }
 
+/// Keep labels inside small displays without splitting UTF-8 or shrinking them unreadably.
+fn fitted_label(label: &str, size: f32, font: iced::Font, bounds: Size) -> String {
+    use iced::advanced::text::{self, Paragraph};
+    let fits = |content: &str| {
+        let paragraph = <Renderer as text::Renderer>::Paragraph::with_text(text::Text {
+            content,
+            // Measure every wrapped line, including those below the available height.
+            bounds: Size::new(bounds.width, f32::INFINITY),
+            size: size.into(),
+            line_height: Text::default().line_height,
+            font,
+            align_x: text::Alignment::Center,
+            align_y: alignment::Vertical::Center,
+            shaping: text::Shaping::default(),
+            wrapping: text::Wrapping::default(),
+        });
+        let measured = paragraph.min_bounds();
+        measured.width <= bounds.width && measured.height <= bounds.height
+    };
+    if fits(label) {
+        return label.to_owned();
+    }
+    if !fits("…") {
+        return String::new();
+    }
+    let ends: Vec<_> = label.char_indices().map(|(i, _)| i).collect();
+    let mut low = 0;
+    let mut high = ends.len();
+    while low + 1 < high {
+        let mid = (low + high) / 2;
+        if fits(&format!("{}…", &label[..ends[mid]])) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    format!("{}…", &label[..ends[low]])
+}
+
 impl canvas::Program<Message, Theme> for Editor {
     type State = Drag;
 
@@ -175,10 +215,24 @@ impl canvas::Program<Message, Theme> for Editor {
             frame.stroke(&path, Stroke::default().with_color(stroke).with_width(1.5));
             let center = Point::new(p.x + s.width / 2.0, p.y + s.height / 2.0);
             let size = (s.height * 0.22).clamp(11.0, 22.0);
+            let sub = sub.filter(|_| s.height >= size * 2.4 + 8.0);
+            let label_bounds = Size::new((s.width - 8.0).max(0.0), (s.height - 8.0).max(0.0));
             frame.fill_text(Text {
-                content: label,
+                content: fitted_label(
+                    &label,
+                    size,
+                    iced_m3::fonts::MEDIUM,
+                    Size::new(
+                        label_bounds.width,
+                        if sub.is_some() {
+                            size * 1.3
+                        } else {
+                            label_bounds.height
+                        },
+                    ),
+                ),
                 position: sub.map_or(center, |_| Point::new(center.x, center.y - size * 0.45)),
-                max_width: s.width - 8.0,
+                max_width: label_bounds.width,
                 color: c.on_surface,
                 size: size.into(),
                 font: iced_m3::fonts::MEDIUM,
@@ -188,9 +242,14 @@ impl canvas::Program<Message, Theme> for Editor {
             });
             if let Some(sub) = sub {
                 frame.fill_text(Text {
-                    content: sub.to_string(),
+                    content: fitted_label(
+                        sub,
+                        (size * 0.7).max(10.0),
+                        iced_m3::fonts::REGULAR,
+                        Size::new(label_bounds.width, size * 1.3),
+                    ),
                     position: Point::new(center.x, center.y + size * 0.6),
-                    max_width: s.width - 8.0,
+                    max_width: label_bounds.width,
                     color: c.on_surface_variant,
                     size: (size * 0.7).max(10.0).into(),
                     font: iced_m3::fonts::REGULAR,
@@ -219,13 +278,8 @@ impl canvas::Program<Message, Theme> for Editor {
             } else {
                 c.tertiary_container
             };
-            let sub = if peer.placed {
-                None
-            } else {
-                Some("drag next to a display")
-            };
             for r in self.displays(i, state) {
-                draw_box(&mut frame, r, fill, c.primary, peer.name.clone(), sub);
+                draw_box(&mut frame, r, fill, c.primary, peer.name.clone(), None);
             }
         }
         vec![frame.into_geometry()]
@@ -252,6 +306,26 @@ impl canvas::Program<Message, Theme> for Editor {
 mod tests {
     use super::*;
     use canvas::Program;
+
+    #[test]
+    fn labels_fit_small_displays_and_keep_unicode_prefixes() {
+        let font = iced_m3::fonts::MEDIUM;
+        assert_eq!(
+            fitted_label("Mac", 14.0, font, Size::new(200.0, 40.0)),
+            "Mac"
+        );
+        for name in [
+            "Tommy's MacBook Pro — Personal Development and Design",
+            "Élodie's MacBook — 工作电脑",
+        ] {
+            let short = fitted_label(name, 14.0, font, Size::new(60.0, 36.0));
+            assert!(short.ends_with('…'), "{short}");
+            assert!(name.starts_with(short.trim_end_matches('…')), "{short}");
+            assert!(short.len() < name.len());
+        }
+        assert_eq!(fitted_label("Mac", 14.0, font, Size::new(2.0, 2.0)), "");
+        assert_eq!(fitted_label("", 14.0, font, Size::ZERO), "");
+    }
 
     #[test]
     fn drag_crossing_canvas_boundary_keeps_coordinate_space() {

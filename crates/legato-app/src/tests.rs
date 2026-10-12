@@ -143,7 +143,11 @@ fn write_png(path: &Path, (width, height, rgba): (u32, u32, &[u8])) {
 
 /// Compares the screen with its golden image (see the module docs).
 fn snapshot(ui: &mut iced_test::Simulator<'_, Message, Theme>, name: &str) {
-    let theme = crate::app_theme(false);
+    snapshot_theme(ui, name, false);
+}
+
+fn snapshot_theme(ui: &mut iced_test::Simulator<'_, Message, Theme>, name: &str, dark: bool) {
+    let theme = crate::app_theme(dark);
     // iced_test only hands the pixels over as a PNG it writes itself (named after the
     // renderer), so render into a scratch folder and read that back.
     let scratch = std::env::temp_dir().join(format!("legato-ui-{}-{name}", std::process::id()));
@@ -373,6 +377,7 @@ fn control_mode_can_be_limited_to_one_device() {
     let m = model(Page::Settings);
     let mac = m.paired[0].device.id.to_string();
     let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
+    ui.click("Any device").unwrap();
     ui.click("Only Tommy's MacBook Pro").unwrap();
     ui.click("Share copied text, images and files with paired devices")
         .unwrap();
@@ -392,6 +397,141 @@ fn control_mode_can_be_limited_to_one_device() {
 }
 
 #[test]
+fn compact_device_rows_keep_identity_and_actions_readable() {
+    for (name, width, expanded, device_name) in [
+        ("devices-compact", 640.0, false, "Tommy's MacBook Pro"),
+        (
+            "devices-compact-long-name",
+            640.0,
+            true,
+            "Tommy's MacBook Pro — Personal Development and Design",
+        ),
+        (
+            "devices-expanded-long-name",
+            920.0,
+            true,
+            "Tommy's MacBook Pro — Personal Development and Design",
+        ),
+    ] {
+        let mut m = model(Page::Devices);
+        m.rail_expanded = expanded;
+        m.paired[0].device.name = device_name.into();
+        let peer = m.paired[0].device.id;
+        let mut ui = sized_simulator((width, 480.0), crate::view::root(&m));
+        snapshot(&mut ui, name);
+        let label = ui.find(device_name).unwrap().bounds();
+        assert!(label.height <= 48.0, "{label:?}");
+        for action in ["Show as display", "Send files…", "Unpair"] {
+            let target = ui.click(action).unwrap();
+            assert_eq!(target.visible_bounds(), Some(target.bounds()));
+            assert!(target.bounds().height <= 24.0, "{action}: {target:?}");
+            assert!(target.bounds().y >= label.y + label.height);
+        }
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::ShowDisplay(id) if *id == peer))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::SendFiles(id) if *id == peer))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::Unpair(id) if *id == peer))
+        );
+    }
+}
+
+#[test]
+fn controller_picker_scales_and_preserves_saved_prefixes() {
+    let mut m = model(Page::Settings);
+    m.paired.extend((10..15).map(|n| Paired {
+        device: Device {
+            id: id(n),
+            name: format!("Workstation {n} — Development and Design"),
+            os: Some(Os::Windows),
+        },
+        connection: None,
+    }));
+    m.config.control.controller = Some(m.paired[0].device.id.to_string()[..12].into());
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    snapshot_theme(&mut ui, "settings-compact-many-devices", true);
+    let target = ui.click("Only Tommy's MacBook Pro").unwrap();
+    assert_eq!(target.visible_bounds(), Some(target.bounds()));
+    ui.click("Any device").unwrap();
+    assert!(
+        ui.into_messages()
+            .any(|m| matches!(m, Message::ControlMode(None)))
+    );
+
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    ui.click("Only Tommy's MacBook Pro").unwrap();
+    ui.click("Only this device").unwrap();
+    assert!(
+        ui.into_messages().any(
+            |msg| matches!(msg, Message::ControlMode(Some(id)) if id == m.this.id.to_string())
+        )
+    );
+
+    // A controller outside the popup's visible portion stays reachable by keyboard.
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    ui.click("Only Tommy's MacBook Pro").unwrap();
+    ui.tap_key(iced::keyboard::key::Named::End);
+    ui.tap_key(iced::keyboard::key::Named::Enter);
+    assert!(ui.into_messages().any(|msg| matches!(msg, Message::ControlMode(Some(id)) if id == m.paired.last().unwrap().device.id.to_string())));
+
+    m.config.control.controller = Some("unavailable-controller".into());
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    assert!(ui.find("Unavailable device").is_ok());
+    ui.click("Unavailable device").unwrap();
+    ui.click("Any device").unwrap();
+    assert!(
+        ui.into_messages()
+            .any(|m| matches!(m, Message::ControlMode(None)))
+    );
+}
+
+#[test]
+fn compact_arrangement_fits_and_separates_unplaced_instructions() {
+    for unplaced in [false, true] {
+        let mut m = model(Page::Arrangement);
+        if unplaced {
+            m.config.neighbors.clear();
+            m.paired[0].device.name =
+                "Tommy's MacBook Pro — Personal Development and Design".into();
+        }
+        let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+        snapshot_theme(
+            &mut ui,
+            if unplaced {
+                "arrangement-compact-unplaced"
+            } else {
+                "arrangement-compact"
+            },
+            unplaced,
+        );
+        let canvas = ui
+            .find(iced::widget::Id::new("arrangement-canvas"))
+            .unwrap();
+        assert_eq!(canvas.visible_bounds(), Some(canvas.bounds()));
+        assert!(canvas.bounds().height >= 180.0, "{canvas:?}");
+        if unplaced {
+            let hint = format!(
+                "Drag {} next to one of this device's displays.",
+                m.paired[0].device.name
+            );
+            let note = ui.find(hint).unwrap();
+            assert_eq!(note.visible_bounds(), Some(note.bounds()));
+            assert!(note.bounds().y >= canvas.bounds().y + canvas.bounds().height);
+        }
+    }
+}
+
+#[test]
 fn connected_devices_can_be_sent_files() {
     let m = model(Page::Devices);
     let mac = m.paired[0].device.id;
@@ -403,6 +543,43 @@ fn connected_devices_can_be_sent_files() {
             .iter()
             .any(|m| matches!(m, Message::SendFiles(id) if *id == mac)),
         "{messages:?}"
+    );
+}
+
+#[test]
+fn arrangement_keeps_long_diagnostics_scrollable_without_hiding_the_canvas() {
+    let mut m = model(Page::Arrangement);
+    m.problems = (0..20).map(|n| format!("Diagnostic message {n}")).collect();
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    let canvas = ui
+        .find(iced::widget::Id::new("arrangement-canvas"))
+        .unwrap()
+        .bounds();
+    assert!(canvas.height >= 100.0, "{canvas:?}");
+    assert!(
+        ui.find("Diagnostic message 19")
+            .unwrap()
+            .visible_bounds()
+            .is_none()
+    );
+    let first = ui
+        .find("Diagnostic message 0")
+        .unwrap()
+        .visible_bounds()
+        .unwrap();
+    ui.point_at(first.center());
+    ui.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+        delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y: -1000.0 },
+    })]);
+    let last = ui.find("Diagnostic message 19").unwrap();
+    let visible = last.visible_bounds().unwrap();
+    assert_eq!(visible.size(), last.bounds().size());
+    assert!(visible.y >= canvas.y + canvas.height && visible.y + visible.height <= 480.0);
+    assert_eq!(
+        ui.find(iced::widget::Id::new("arrangement-canvas"))
+            .unwrap()
+            .bounds(),
+        canvas
     );
 }
 
