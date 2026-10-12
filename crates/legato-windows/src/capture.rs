@@ -154,6 +154,7 @@ thread_local! {
 }
 
 /// Side effects that must run outside the state borrow (they can pump messages).
+#[derive(Debug)]
 enum Effect {
     Pin(POINT),
     Unpin(POINT),
