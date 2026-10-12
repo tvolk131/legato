@@ -355,13 +355,6 @@ pub(crate) async fn run(
                     }
                 }
                 Copied::Files(paths) => {
-                    let total: u64 = files::collect(&paths).map_or(u64::MAX, |f| f.iter().map(|(_, _, s)| s).sum());
-                    if total > files::MAX_CLIPBOARD_BATCH {
-                        ctx.status(Status::Problem(
-                            "Copied files are too big to share through the clipboard; send them instead.".into(),
-                        ));
-                        continue;
-                    }
                     for p in peers.values() {
                         send_files_in_background(&ctx, p.session.clone(), paths.clone(), FilePurpose::Clipboard);
                     }
