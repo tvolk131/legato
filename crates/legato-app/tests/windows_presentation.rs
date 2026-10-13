@@ -4,7 +4,6 @@
 use iced::wgpu;
 use wgpu::rwh::{RawDisplayHandle, Win32WindowHandle, WindowsDisplayHandle};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Dxgi::{DXGI_SCALING_NONE, DXGI_SCALING_STRETCH};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
     WS_OVERLAPPEDWINDOW,
@@ -61,32 +60,16 @@ impl Drop for TestWindow {
 
 #[test]
 #[ignore = "requires a Windows desktop and DX12 (WARP is sufficient)"]
-fn gpu_renders_resized_windows_without_stretching() {
+fn gpu_renders_resized_and_recreated_windows() {
     iced::futures::executor::block_on(async {
-        for (kind, scaling) in [
-            (
-                wgpu::wgt::Dx12SwapchainKind::DxgiFromHwnd,
-                DXGI_SCALING_NONE,
-            ),
-            // DirectComposition requires STRETCH; the patch must not break that path.
-            (
-                wgpu::wgt::Dx12SwapchainKind::DxgiFromVisual,
-                DXGI_SCALING_STRETCH,
-            ),
-        ] {
+        // Cover the app's default and the supported resize-diagnostic alternative.
+        for present_mode in [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo] {
             let window = TestWindow::new();
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::DX12,
-                backend_options: wgpu::BackendOptions {
-                    dx12: wgpu::Dx12BackendOptions {
-                        presentation_system: kind,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
                 ..Default::default()
             });
-            // Recreate as well as resize: a recovered surface must keep the policy.
+            // Recreate as well as resize, as when recovering a lost surface.
             for _ in 0..2 {
                 // SAFETY: the HWND outlives the surface and is owned by this thread.
                 let surface = unsafe {
@@ -109,23 +92,21 @@ fn gpu_renders_resized_windows_without_stretching() {
                     .unwrap();
                 let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
                 let mut config = surface.get_default_config(&adapter, 320, 240).unwrap();
-                config.present_mode = wgpu::PresentMode::Mailbox;
+                config.present_mode = present_mode;
+                config.desired_maximum_frame_latency = 1; // Matches Iced's compositor.
 
                 for (width, height) in [(320, 240), (640, 480), (300, 220)] {
                     window.resize(width, height);
                     config.width = width;
                     config.height = height;
                     surface.configure(&device, &config);
-                    {
-                        // SAFETY: read the descriptor only; do not mutate the HAL resource.
-                        let hal = unsafe { surface.as_hal::<wgpu::hal::api::Dx12>() }.unwrap();
-                        let swap_chain = hal.swap_chain().unwrap();
-                        let desc = unsafe { swap_chain.GetDesc1() }.unwrap();
-                        assert_eq!(desc.Scaling.0, scaling.0, "{kind:?} after {width}x{height}");
-                        assert_eq!((desc.Width, desc.Height), (width, height));
-                    }
 
                     let frame = surface.get_current_texture().unwrap();
+                    assert_eq!(
+                        (frame.texture.width(), frame.texture.height()),
+                        (width, height),
+                        "{present_mode:?} after resize",
+                    );
                     let view = frame.texture.create_view(&Default::default());
                     let mut encoder = device.create_command_encoder(&Default::default());
                     {

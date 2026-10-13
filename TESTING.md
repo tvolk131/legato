@@ -159,27 +159,50 @@ Compact-layout regressions also render the supported 640×480 minimum, long devi
 
 ### Windows resize presentation
 
-The pinned `wgpu-hal` 27.0.4 [patch](https://github.com/tvolk131/wgpu/commit/06b1e96f225ae0dc81bad26493e508400072440c)
-selects `DXGI_SCALING_NONE` for native HWND swap chains. This keeps an old frame at
-its original size and top-left position while a resized frame is being drawn;
-the normal upstream setting stretches it. DirectComposition retains its required
-`DXGI_SCALING_STRETCH`. The fork also uses registry `naga` and `wgpu-types` so only
-`wgpu-hal` is replaced. Remove the pin when an upstream release provides the same
-behavior or an equivalent configuration option.
+Legato uses the published `wgpu-hal`, with DX12 Mailbox presentation by default
+when a DX12 adapter is available. The scaling patch in [PR #62](https://github.com/tvolk131/legato/pull/62)
+was removed because its benefit for the reported main-window content wobble was
+never verified on the PC. Neither that patch nor this rollback is a verified fix.
 
 `cargo test --locked -p legato-app --test windows_presentation -- --ignored --nocapture`
-uses DX12 WARP and a real window to check the native swap-chain descriptor after
-creation, growth, shrinkage, and recreation, and submits/presents a frame each time.
-It also checks that DirectComposition still creates and presents successfully.
-Both Windows CI architectures run it in the existing `gpu_renders` step. This
-guards the graphics configuration; it does not reproduce visible resize wobble.
+uses DX12 WARP and a real HWND to exercise creation, growth, shrinkage, and surface
+recreation with both Mailbox and FIFO presentation. It checks the acquired frame's
+dimensions and submits/presents a frame at each size, using Iced's frame-latency
+setting. Both Windows CI architectures run it in the existing `gpu_renders` step.
+This is a rendering smoke test; it does not reproduce visible resize wobble.
+
+To compare presentation timing without rebuilding, quit Legato from its tray menu
+before each launch. In PowerShell in the folder containing `Legato.exe`, run:
+
+```powershell
+$env:WGPU_BACKEND = 'dx12'; $env:ICED_PRESENT_MODE = 'fifo'; .\Legato.exe
+```
+
+Repeat with `mailbox` for the baseline, keeping the binary, window size, screen,
+and scaling the same. Setting both variables holds the graphics backend constant;
+Legato respects either override instead of applying its defaults. These variables
+affect this shell and programs launched from it, not persistent Windows settings.
+Quit Legato and close that PowerShell window to return to normal launches.
 
 On the PC, drag the main window's right and bottom edges repeatedly on Devices,
 Arrangement, and Settings. Content near the top-left should remain steady except
 for intended layout changes at width breakpoints. Also check left/top resizing,
 maximize/restore, mixed monitor scaling, and resizing the Mac-display viewer.
-Brief newly exposed background at the growing edge is possible while the next
-frame catches up. The reported wobble needs confirmation on the user's GPU.
+Record whether stationary content shifts, stretches, or only reflows at a
+breakpoint, along with the app version and GPU. Compare the viewer's F10 timings
+under sustained motion too: Iced applies the presentation mode to all windows,
+and FIFO may add latency. Do not change the default based on main-window appearance
+alone.
+
+Other options have limits in Iced 0.14: `ICED_PRESENT_MODE=immediate` is a diagnostic
+only (it may tear and requires adapter support), and `ICED_BACKEND=tiny-skia` can
+isolate GPU presentation on the main window but cannot draw the viewer's video
+shader. `WGPU_DX12_PRESENTATION_SYSTEM=visual` is not a working override here:
+Iced constructs default backend options without reading that environment variable.
+Switching to DirectComposition or setting DXGI scaling therefore needs renderer
+integration changes; neither is a demonstrated remedy for this report. Start with
+the [supported presentation-mode override](https://docs.rs/iced_wgpu/0.14.0/src/iced_wgpu/settings.rs.html)
+and the PC comparison before adding platform-specific code.
 
 ### Virtual monitor mode
 
