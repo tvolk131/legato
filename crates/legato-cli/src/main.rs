@@ -224,7 +224,7 @@ async fn run(home: &Option<PathBuf>) -> Result<()> {
                 Ok(event) => {
                     if let Some(text) = legato_engine::describe(&event, name_of) {
                         match &event {
-                            Status::Problem(_) => tracing::warn!("{text}"),
+                            Status::Problem(_) | Status::FileTransferFailed { .. } => tracing::warn!("{text}"),
                             Status::Error(e) => {
                                 tracing::error!("{text}");
                                 failed = Some(e.clone());

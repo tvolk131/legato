@@ -141,6 +141,13 @@ Neither can reproduce a real Wi-Fi switch, which leaves the old connection silen
 
 ### UI snapshots
 
+Transfer-error regressions check persistent feedback across all pages, individual dismissal,
+repeated failures, immediate send errors, and scrolling multiple failures without hiding
+the Arrangement canvas. Unpair tests cover the secondary menu, confirmation and cancellation
+(including Escape), stale confirmation, failed removal, and preserving other pairings.
+Settings rows and setup/offline guidance are rendered at compact widths in light and dark
+themes; display options retain visible actions while scrolling and accurate stream-limit text.
+
 The app's UI tests drive the real views headlessly with `iced_test` and compare each screen, pixel for pixel, with a golden image in `crates/legato-app/src/snapshots/`. These screens are covered: devices, the expanded navigation rail, the "Add a device" dialog, the display options (also at the main window's default size, where they must fit without scrolling), pairing dialog, arrangement, settings, and the display viewer while it waits. They're drawn with the app's own theme (`app_theme`), which uses iced-m3's Expressive springs and shape feedback. The goldens show each screen at rest.
 
 Compact-layout regressions also render the supported 640×480 minimum, long device names, an expanded-rail preference at small and medium widths, and six paired devices. They check that device actions stay readable and clickable, controller selection preserves saved ID prefixes and works by keyboard beyond the visible menu items, and the arrangement canvas and unplaced-device instructions fit without overlapping. Selected cases use the dark theme; canvas-label tests cover Unicode names and displays too small to fit text.

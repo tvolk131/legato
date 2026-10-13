@@ -88,6 +88,8 @@ fn model(page: Page) -> Model {
         pairing: None,
         pairing_open: false,
         add_device_open: false,
+        unpair: None,
+        unpair_open: false,
         config,
         push_distance: None,
         local: Screens {
@@ -105,6 +107,7 @@ fn model(page: Page) -> Model {
         display_options_open: false,
         active: None,
         problems: vec![],
+        transfer_failures: vec![],
         notice: None,
         autostart: Some(false),
     }
@@ -247,8 +250,13 @@ fn devices_page_lists_paired_devices_and_offers_to_add_one() {
 fn with_nothing_paired_the_page_points_to_adding_a_device() {
     let mut m = model(Page::Devices);
     m.paired.clear();
-    let mut ui = simulator(crate::view::root(&m));
-    assert!(ui.find("None yet.").is_ok());
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    snapshot(&mut ui, "devices-empty");
+    assert!(ui.find("Connect your first device").is_ok());
+    assert!(
+        ui.find("Open Legato on both devices on the same network, then choose Add a device.")
+            .is_ok()
+    );
     ui.click("Add a device…").unwrap();
     assert!(
         ui.into_messages()
@@ -354,9 +362,10 @@ fn settings_toggles_send_messages() {
     let m = model(Page::Settings);
     let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     snapshot(&mut ui, "settings");
-    ui.click("Reverse the mouse wheel when this device is being controlled")
-        .unwrap();
-    ui.click("Open Legato when you log in").unwrap();
+    ui.click("Reverse mouse wheel").unwrap();
+    ui.click("Open at login").unwrap();
+    ui.click("Mac Command key").unwrap();
+    ui.click("Display performance").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(
         messages
@@ -370,6 +379,155 @@ fn settings_toggles_send_messages() {
             .any(|m| matches!(m, Message::Autostart(true))),
         "{messages:?}"
     );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| matches!(m, Message::InvertWheel(true)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| matches!(m, Message::Remap(false)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| matches!(m, Message::Stats(false)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn unpair_is_secondary_and_the_confirmation_can_be_cancelled() {
+    let mut m = model(Page::Devices);
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    assert!(ui.find("Unpair…").is_err());
+    ui.click("More").unwrap();
+    ui.simulate([iced::Event::Window(iced::window::Event::RedrawRequested(
+        iced::time::Instant::now() + Duration::from_secs(1),
+    ))]);
+    snapshot(&mut ui, "device-menu");
+    ui.click("Unpair…").unwrap();
+    assert!(
+        ui.into_messages()
+            .any(|msg| matches!(msg, Message::Unpair(id) if id == m.paired[0].device.id))
+    );
+    m.unpair = Some(m.paired[0].device.clone());
+    m.unpair_open = true;
+    for (dark, accept) in [(false, false), (true, true)] {
+        let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+        snapshot_theme(&mut ui, if dark { "unpair-dark" } else { "unpair" }, dark);
+        assert!(ui.find("Unpair device?").is_ok());
+        let target = ui.click(if accept { "Unpair" } else { "Cancel" }).unwrap();
+        assert_eq!(target.visible_bounds(), Some(target.bounds()));
+        assert!(
+            ui.into_messages()
+                .any(|msg| matches!(msg, Message::ConfirmUnpair(value) if value == accept))
+        );
+    }
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    ui.tap_key(iced::keyboard::key::Named::Escape);
+    assert!(
+        ui.into_messages()
+            .any(|msg| matches!(msg, Message::ConfirmUnpair(false)))
+    );
+}
+
+#[test]
+fn settings_rows_fit_compact_width_and_disabled_login_cannot_be_toggled() {
+    for dark in [false, true] {
+        let mut m = model(Page::Settings);
+        m.this.os = Some(Os::MacOs);
+        m.autostart = None;
+        let mut ui = sized_simulator((640.0, 1000.0), crate::view::root(&m));
+        snapshot_theme(
+            &mut ui,
+            if dark {
+                "settings-compact-dark"
+            } else {
+                "settings-compact"
+            },
+            dark,
+        );
+        for label in [
+            "Mac Command key",
+            "Reverse mouse wheel",
+            "Share clipboard",
+            "Open at login",
+        ] {
+            let target = ui.find(label).unwrap();
+            assert_eq!(target.visible_bounds(), Some(target.bounds()));
+            assert!(target.bounds().height <= 24.0);
+        }
+        assert!(ui.find("Display performance").is_err());
+        assert!(
+            ui.find("Opening at login is unavailable on this system.")
+                .is_ok()
+        );
+        ui.click("Open at login").unwrap();
+        assert!(
+            !ui.into_messages()
+                .any(|msg| matches!(msg, Message::Autostart(_)))
+        );
+    }
+}
+
+#[test]
+fn discovery_and_offline_states_explain_how_to_connect() {
+    let mut m = model(Page::Devices);
+    m.nearby.clear();
+    m.add_device_open = true;
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    snapshot_theme(&mut ui, "discovery-empty-dark", true);
+    assert!(
+        ui.find("Device not appearing?")
+            .unwrap()
+            .visible_bounds()
+            .is_some()
+    );
+    assert!(
+        ui.find("After pairing, your devices can connect across different networks.")
+            .is_ok()
+    );
+    let target = ui.click("Close").unwrap();
+    assert_eq!(target.visible_bounds(), Some(target.bounds()));
+    assert!(
+        ui.into_messages()
+            .any(|msg| matches!(msg, Message::AddDevice(false)))
+    );
+    m.add_device_open = false;
+    m.paired[0].connection = None;
+    for sharing in [false, true] {
+        m.sharing = sharing;
+        let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+        snapshot_theme(
+            &mut ui,
+            if sharing {
+                "devices-offline"
+            } else {
+                "devices-paused-dark"
+            },
+            !sharing,
+        );
+        let status = if sharing {
+            "macOS · Not connected · Open Legato there and check that both devices are online."
+        } else {
+            "macOS · Sharing is off · Turn on Sharing to reconnect."
+        };
+        let target = ui.find(status).unwrap();
+        assert_eq!(target.visible_bounds(), Some(target.bounds()));
+        assert!(ui.find("Show as display").is_err());
+        ui.click("Send files…").unwrap();
+        assert!(
+            !ui.into_messages()
+                .any(|msg| matches!(msg, Message::SendFiles(_)))
+        );
+    }
 }
 
 #[test]
@@ -379,8 +537,7 @@ fn control_mode_can_be_limited_to_one_device() {
     let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     ui.click("Any device").unwrap();
     ui.click("Only Tommy's MacBook Pro").unwrap();
-    ui.click("Share copied text, images and files with paired devices")
-        .unwrap();
+    ui.click("Share clipboard").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(
         messages
@@ -421,12 +578,13 @@ fn compact_device_rows_keep_identity_and_actions_readable() {
         snapshot(&mut ui, name);
         let label = ui.find(device_name).unwrap().bounds();
         assert!(label.height <= 48.0, "{label:?}");
-        for action in ["Show as display", "Send files…", "Unpair"] {
+        for action in ["Show as display", "Send files…", "More"] {
             let target = ui.click(action).unwrap();
             assert_eq!(target.visible_bounds(), Some(target.bounds()));
             assert!(target.bounds().height <= 24.0, "{action}: {target:?}");
             assert!(target.bounds().y >= label.y + label.height);
         }
+        ui.click("Unpair…").unwrap();
         let messages: Vec<_> = ui.into_messages().collect();
         assert!(
             messages
@@ -543,6 +701,63 @@ fn connected_devices_can_be_sent_files() {
             .iter()
             .any(|m| matches!(m, Message::SendFiles(id) if *id == mac)),
         "{messages:?}"
+    );
+}
+
+#[test]
+fn transfer_failure_feedback_is_visible_and_individually_dismissible() {
+    for dark in [false, true] {
+        let mut m = model(Page::Devices);
+        let failure = "Couldn't send files to \"Tommy's MacBook Pro\": Disk full";
+        m.transfer_failures = vec![failure.into()];
+        let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+        snapshot_theme(
+            &mut ui,
+            if dark {
+                "transfer-failure-dark"
+            } else {
+                "transfer-failure"
+            },
+            dark,
+        );
+        let target = ui.find(failure).unwrap();
+        assert_eq!(target.visible_bounds(), Some(target.bounds()));
+        ui.click("Dismiss").unwrap();
+        assert!(
+            ui.into_messages()
+                .any(|m| matches!(m, Message::DismissTransferFailure(text) if text == failure))
+        );
+    }
+}
+
+#[test]
+fn many_transfer_failures_remain_scrollable_and_leave_room_for_the_page() {
+    let mut m = model(Page::Arrangement);
+    m.transfer_failures = (0..20).map(|n| format!("Couldn't receive transfer {n}: permission denied while writing the selected destination folder.")).collect();
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    let canvas = ui
+        .find(iced::widget::Id::new("arrangement-canvas"))
+        .unwrap();
+    assert!(canvas.bounds().height >= 100.0, "{canvas:?}");
+    assert_eq!(canvas.visible_bounds(), Some(canvas.bounds()));
+    let last = m.transfer_failures.last().unwrap();
+    assert!(ui.find(last.clone()).unwrap().visible_bounds().is_none());
+    let first = ui
+        .find(m.transfer_failures[0].clone())
+        .unwrap()
+        .visible_bounds()
+        .unwrap();
+    ui.point_at(first.center());
+    ui.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+        delta: iced::mouse::ScrollDelta::Pixels {
+            x: 0.0,
+            y: -10000.0,
+        },
+    })]);
+    let target = ui.find(last.clone()).unwrap();
+    assert_eq!(
+        target.visible_bounds().unwrap().size(),
+        target.bounds().size()
     );
 }
 
@@ -729,7 +944,7 @@ fn display_options_separate_the_display_from_the_stream() {
             .any(|m| matches!(m, Message::DisplayOptionsChanged(o) if o.fps == 144))
     );
 
-    // Full 4K at 120 Hz: the display runs at 120, but the Mac encodes 4K at 60 fps.
+    // Full 4K at 120 Hz: the display runs at 120, but Legato caps the stream at 60.
     let mut m = with_display_options(Placement::FullScreen);
     if let Some(o) = &mut m.display_options {
         o.quality = Quality::Sharpest;
@@ -739,8 +954,8 @@ fn display_options_separate_the_display_from_the_stream() {
     assert!(ui.find("1080p (quicker)").is_err(), "adaptive only");
     assert!(
         ui.find(
-            "You'll see 3840×2160 at up to 60 fps. The Mac can't encode it any faster; \
-             Balanced keeps up with 120 Hz."
+            "You'll see 3840×2160 at up to 60 fps. Legato limits streaming at this resolution; \
+             Balanced allows up to 120 fps."
         )
         .is_ok()
     );
@@ -861,7 +1076,49 @@ fn display_options_fit_the_default_window() {
     // The main window's default size: every choice should fit without scrolling.
     let mut ui = sized_simulator((920.0, 640.0), crate::view::root(&m));
     snapshot(&mut ui, "display-options-default-window");
-    assert!(ui.find("Show").is_ok());
+    for label in [
+        "Resolution",
+        "Refresh rate",
+        "Stream quality",
+        "1080p (quicker)",
+        "Show",
+    ] {
+        let target = ui.find(label).unwrap();
+        assert_eq!(target.visible_bounds(), Some(target.bounds()), "{label}");
+    }
+}
+
+#[test]
+fn compact_display_options_keep_actions_visible_while_scrolling() {
+    use legato_engine::config::Placement;
+    let m = with_display_options(Placement::FullScreen);
+    let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
+    for label in ["Cancel", "Show"] {
+        let target = ui.find(label).unwrap();
+        assert_eq!(target.visible_bounds(), Some(target.bounds()));
+    }
+    let position = ui
+        .find("Resolution")
+        .unwrap()
+        .visible_bounds()
+        .unwrap()
+        .center();
+    ui.point_at(position);
+    ui.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+        delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y: -1000.0 },
+    })]);
+    snapshot_theme(&mut ui, "display-options-compact-dark", true);
+    let target = ui.find("1080p (quicker)").unwrap();
+    assert_eq!(
+        target.visible_bounds().unwrap().size(),
+        target.bounds().size()
+    );
+    ui.click("1440p (sharper)").unwrap();
+    ui.click("Cancel").unwrap();
+    assert!(
+        ui.into_messages()
+            .any(|msg| matches!(msg, Message::DisplayOptionsDone(false)))
+    );
 }
 
 /// Renders what the GPU draws, with whatever backend `ICED_TEST_BACKEND` and
