@@ -137,8 +137,9 @@ impl Receiver {
             | Control::Yield
             | Control::Placement { .. }
             | Control::ControlMode(_)
-            | Control::ExtendRequest(_)
+            | Control::ExtendRequest { .. }
             | Control::Extended { .. }
+            | Control::CursorShape { .. }
             | Control::ExtendStop { .. }
             | Control::Keyframe { .. }
             | Control::ExtendResize(_)

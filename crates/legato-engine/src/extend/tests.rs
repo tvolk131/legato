@@ -33,6 +33,7 @@ fn picture(width: u32) -> Picture {
 struct Outputs {
     frames: watch::Sender<Option<ViewerFrame>>,
     stats: watch::Sender<Option<ViewerStats>>,
+    cursor: watch::Sender<legato_proto::CursorShape>,
 }
 
 impl Outputs {
@@ -40,6 +41,7 @@ impl Outputs {
         Self {
             frames: watch::channel(None).0,
             stats: watch::channel(None).0,
+            cursor: watch::channel(legato_proto::CursorShape::Arrow).0,
         }
     }
 
@@ -48,6 +50,7 @@ impl Outputs {
             iroh::SecretKey::from_bytes(&[peer; 32]).public(),
             self.frames.clone(),
             self.stats.clone(),
+            self.cursor.clone(),
         )
     }
 
@@ -407,4 +410,111 @@ fn arrangement_refreshes_when_native_client_rect_changes() {
         viewer.arrangement(&layout, peer, Some(native)).map(|a| a.1),
         Some(expected)
     );
+}
+
+#[tokio::test]
+async fn cursor_changes_are_independent_of_video_and_scoped_to_the_viewer() {
+    use legato_proto::CursorShape::*;
+    let outputs = Outputs::new();
+    let mut cursor = outputs.cursor.subscribe();
+    let old = outputs.viewer(1);
+    cursor.borrow_and_update();
+    let generation = old.generation;
+    old.cursor(old.peer, generation, Text);
+    cursor.changed().await.unwrap();
+    assert_eq!(*cursor.borrow_and_update(), Text);
+    assert_eq!(outputs.width(), None, "no video needed to publish a shape");
+    old.cursor(old.peer, generation, Text);
+    assert!(
+        !cursor.has_changed().unwrap(),
+        "unchanged shapes don't wake the UI"
+    );
+    old.cursor(old.peer, generation, Arrow);
+    assert_eq!(
+        *cursor.borrow_and_update(),
+        Arrow,
+        "an unavailable/custom shape clears the last one"
+    );
+    old.cursor(old.peer, generation, ResizeDiagonalDown);
+    let late_worker = old.showing.clone();
+    drop(old);
+    assert_eq!(
+        *cursor.borrow_and_update(),
+        Arrow,
+        "closing/disconnecting restores an arrow"
+    );
+    let new = outputs.viewer(1);
+    assert_ne!(generation, new.generation);
+    new.cursor(new.peer, new.generation, Pointer);
+    assert_eq!(*cursor.borrow_and_update(), Pointer);
+    new.cursor(new.peer, generation, Grabbing);
+    new.cursor(
+        iroh::SecretKey::from_bytes(&[2; 32]).public(),
+        new.generation,
+        Text,
+    );
+    late_worker.set_cursor(ResizeVertical);
+    late_worker.close();
+    assert_eq!(
+        *cursor.borrow_and_update(),
+        Pointer,
+        "stale generation, wrong peer and old cleanup cannot change the new viewer"
+    );
+    new.cursor(new.peer, new.generation, ResizeHorizontal);
+    assert_eq!(*cursor.borrow_and_update(), ResizeHorizontal);
+    drop(new);
+    assert_eq!(*cursor.borrow(), Arrow);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cursor_sampling_coalesces_changes_bounds_pending_reads_and_recovers_from_a_stall() {
+    use legato_proto::CursorShape::*;
+    let (reads, mut pending) = tokio::sync::mpsc::unbounded_channel();
+    let (changes, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(super::mirror_cursor(
+        move |reply| {
+            reads.send(reply).unwrap();
+        },
+        move |shape| {
+            changes.send(shape).unwrap();
+        },
+    ));
+    pending.recv().await.unwrap().send(Pointer).unwrap();
+    assert_eq!(received.recv().await, Some(Pointer));
+    pending.recv().await.unwrap().send(Pointer).unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        received.try_recv().is_err(),
+        "don't resend an unchanged cursor"
+    );
+    let delayed = pending.recv().await.unwrap();
+    tokio::time::advance(ms(250)).await;
+    assert_eq!(
+        received.recv().await,
+        Some(Arrow),
+        "a stalled AppKit read clears the previous shape"
+    );
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(
+        pending.try_recv().is_err(),
+        "at most one main-thread read may be pending"
+    );
+    assert!(
+        received.try_recv().is_err(),
+        "don't repeat the fallback while waiting"
+    );
+    delayed.send(Text).unwrap();
+    assert_eq!(
+        received.recv().await,
+        Some(Text),
+        "resume when the main thread recovers"
+    );
+    let abandoned = pending.recv().await.unwrap();
+    drop(abandoned);
+    assert_eq!(
+        received.recv().await,
+        Some(Arrow),
+        "a failed read resets before the task ends"
+    );
+    task.await.unwrap();
 }

@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use legato_proto::Rect;
+use legato_proto::{CursorShape, Rect};
 use tokio::sync::watch;
 
 /// A picture from the Mac's extra display, ready to draw.
@@ -88,6 +88,7 @@ pub(crate) struct Showing {
     inner: Mutex<ShowingInner>,
     frames: watch::Sender<Option<ViewerFrame>>,
     stats: watch::Sender<Option<ViewerStats>>,
+    cursor: watch::Sender<CursorShape>,
 }
 
 #[derive(Debug)]
@@ -107,6 +108,7 @@ impl Showing {
     fn new(
         frames: watch::Sender<Option<ViewerFrame>>,
         stats: watch::Sender<Option<ViewerStats>>,
+        cursor: watch::Sender<CursorShape>,
     ) -> Self {
         Self {
             inner: Mutex::new(ShowingInner {
@@ -120,6 +122,7 @@ impl Showing {
             }),
             frames,
             stats,
+            cursor,
         }
     }
 
@@ -199,6 +202,7 @@ impl Showing {
         }
         self.frames.send_replace(None);
         self.stats.send_replace(None);
+        self.cursor.send_replace(CursorShape::Arrow);
     }
 
     fn is_open(&self) -> bool {
@@ -211,6 +215,18 @@ impl Showing {
         if !inner.closed {
             effect();
         }
+    }
+
+    fn set_cursor(&self, shape: CursorShape) {
+        self.when_open(|| {
+            self.cursor.send_if_modified(|current| {
+                if *current == shape {
+                    return false;
+                }
+                *current = shape;
+                true
+            });
+        });
     }
 
     fn decoder_started(self: &Arc<Self>, reader: tokio::task::AbortHandle) -> Option<Decoding> {
@@ -267,6 +283,42 @@ pub(crate) use host::Host;
 #[cfg(target_os = "macos")]
 mod queue;
 
+#[cfg(any(target_os = "macos", test))]
+async fn mirror_cursor(
+    mut read: impl FnMut(tokio::sync::oneshot::Sender<CursorShape>),
+    mut send: impl FnMut(CursorShape),
+) {
+    let mut last = None;
+    let mut publish = |shape| {
+        if last.replace(shape) != Some(shape) {
+            send(shape);
+        }
+    };
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        read(tx);
+        let sample = match tokio::time::timeout(Duration::from_millis(250), &mut rx).await {
+            Ok(sample) => sample,
+            Err(_) => {
+                // A blocked/missing AppKit loop must not leave a stale resize/hand
+                // cursor behind. Keep just this one pending read until it recovers.
+                publish(CursorShape::Arrow);
+                rx.await
+            }
+        };
+        match sample {
+            Ok(shape) => publish(shape),
+            Err(_) => {
+                publish(CursorShape::Arrow);
+                return;
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod host {
     use std::sync::Arc;
@@ -303,6 +355,7 @@ mod host {
     /// This Mac's extra display, streaming to one viewer.
     pub(crate) struct Host {
         pub(crate) peer: EndpointId,
+        generation: u64,
         session: Arc<Session>,
         stream: Arc<DisplayStream>,
         tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -397,6 +450,7 @@ mod host {
         pub(crate) async fn start(
             session: Arc<Session>,
             request: ExtendRequest,
+            generation: u64,
             name: String,
         ) -> Result<Self> {
             let (sharp_tx, sharp_rx) = queue::channel();
@@ -414,9 +468,23 @@ mod host {
             .await??;
             let stream = Arc::new(stream);
             let mut bounds = to_rect(stream.display().bounds());
-            session.send(Control::Extended { bounds });
+            session.send(Control::Extended { generation, bounds });
             log_config("showing an extra display", config);
             let mut tasks = vec![
+                tokio::spawn({
+                    let session = session.clone();
+                    let display = stream.display().id();
+                    super::mirror_cursor(
+                        move |tx| {
+                            legato_screen::mac::cursor::sample_cursor(display, move |shape| {
+                                let _ = tx.send(shape);
+                            })
+                        },
+                        move |shape| {
+                            session.send(Control::CursorShape { generation, shape });
+                        },
+                    )
+                }),
                 tokio::spawn(send_track(
                     session.clone(),
                     stream.clone(),
@@ -441,13 +509,14 @@ mod host {
                         let now = to_rect(stream.display().bounds());
                         if now != bounds {
                             bounds = now;
-                            session.send(Control::Extended { bounds });
+                            session.send(Control::Extended { generation, bounds });
                         }
                     }
                 })
             });
             Ok(Self {
                 peer: session.peer,
+                generation,
                 session,
                 stream,
                 tasks,
@@ -472,7 +541,10 @@ mod host {
         /// Tells the viewer where the display is now.
         fn report_bounds(&self) {
             let bounds = to_rect(self.stream.display().bounds());
-            self.session.send(Control::Extended { bounds });
+            self.session.send(Control::Extended {
+                generation: self.generation,
+                bounds,
+            });
         }
 
         /// Changes the display's size or frame rate, as the viewer asked.
@@ -638,6 +710,7 @@ mod viewer {
 #[derive(Debug)]
 pub(crate) struct Viewing {
     pub(crate) peer: legato_net::EndpointId,
+    pub(crate) generation: u64,
     /// Its pictures, from every track.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) showing: Arc<Showing>,
@@ -655,13 +728,27 @@ impl Viewing {
         peer: legato_net::EndpointId,
         frames: watch::Sender<Option<ViewerFrame>>,
         stats: watch::Sender<Option<ViewerStats>>,
+        cursor: watch::Sender<CursorShape>,
     ) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        cursor.send_replace(CursorShape::Arrow);
         Self {
             peer,
-            showing: Arc::new(Showing::new(frames, stats)),
+            generation: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            showing: Arc::new(Showing::new(frames, stats, cursor)),
             bounds: None,
             area: None,
             arranged_for: None,
+        }
+    }
+
+    pub(crate) fn matches(&self, peer: legato_net::EndpointId, generation: u64) -> bool {
+        self.peer == peer && self.generation == generation
+    }
+
+    pub(crate) fn cursor(&self, peer: legato_net::EndpointId, generation: u64, shape: CursorShape) {
+        if self.matches(peer, generation) {
+            self.showing.set_cursor(shape);
         }
     }
 

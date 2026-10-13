@@ -1,6 +1,7 @@
 //! The Mac side: a virtual display, captured and encoded.
 
 pub mod capture;
+pub mod cursor;
 pub mod display;
 pub mod encode;
 pub mod scale;

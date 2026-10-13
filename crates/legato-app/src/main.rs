@@ -109,6 +109,9 @@ pub enum Message {
     ViewerHandle(Option<u64>),
     /// The viewer has pictures to show (or has stopped having them).
     ViewerShowing(bool),
+    /// Wake the UI even if neither video nor the local pointer moved. The view reads
+    /// the latest watch value, so a queued notification cannot restore an old shape.
+    ViewerCursorChanged,
     ToggleFullscreen(window::Id),
     Stats(bool),
     ToggleStats(window::Id),
@@ -131,6 +134,7 @@ struct Viewer {
     window: window::Id,
     /// The Mac's pictures, and whether the first has come.
     pictures: viewer::Source,
+    cursor: tokio::sync::watch::Receiver<legato_proto::CursorShape>,
     showing: bool,
     /// Repaints the window for each new picture, while it's open.
     repaint: Option<tokio::task::AbortHandle>,
@@ -705,6 +709,7 @@ impl App {
                     viewer.showing = showing;
                 }
             }
+            Message::ViewerCursorChanged => {}
             Message::Stats(on) => {
                 self.save_config(|c| c.extend.stats = on);
             }
@@ -784,6 +789,7 @@ impl App {
             peer,
             window: id,
             pictures: self.engine.viewer_frames(),
+            cursor: self.engine.viewer_cursor(),
             showing: false,
             repaint: None,
             stats: None,
@@ -947,7 +953,10 @@ impl App {
                     .map(|s| view::stats_text(&s, viewer::display_latency(), viewer.display_worst));
                 view::viewer(
                     &self.model.name_of(&viewer.peer),
-                    viewer.showing.then(|| viewer.pictures.clone()),
+                    viewer.showing.then(|| viewer::Picture {
+                        frames: viewer.pictures.clone(),
+                        cursor: *viewer.cursor.borrow(),
+                    }),
                     stats,
                 )
             }
@@ -977,6 +986,7 @@ impl App {
             if self.viewer.is_some() {
                 Subscription::batch([
                     Subscription::run_with(engine.clone(), frames_stream),
+                    Subscription::run_with(engine.clone(), cursor_stream),
                     Subscription::run_with(engine, stats_stream),
                 ])
             } else {
@@ -1102,6 +1112,10 @@ fn stats_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
     watch_stream(engine.0.viewer_stats(), |stats| {
         Message::ViewerStats(*stats)
     })
+}
+
+fn cursor_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {
+    watch_stream(engine.0.viewer_cursor(), |_| Message::ViewerCursorChanged)
 }
 
 fn nearby_stream(engine: &EngineRef) -> impl Stream<Item = Message> + use<> {

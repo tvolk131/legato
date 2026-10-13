@@ -1176,7 +1176,10 @@ fn gpu_renders_the_dialogs_and_the_viewer() {
     let (width, height, rgba) = render(
         crate::view::viewer(
             "Tommy's MacBook Pro",
-            Some(tokio::sync::watch::channel(Some(frame)).1),
+            Some(crate::viewer::Picture {
+                frames: tokio::sync::watch::channel(Some(frame)).1,
+                cursor: legato_proto::CursorShape::Arrow,
+            }),
             None,
         ),
         (320.0, 180.0),
@@ -1203,4 +1206,32 @@ fn timers_can_be_started_from_the_ui_thread() {
     let started = std::time::Instant::now();
     iced::futures::executor::block_on(crate::after(Duration::from_millis(20)));
     assert!(started.elapsed() >= Duration::from_millis(20));
+}
+
+#[tokio::test]
+async fn cursor_watch_wakes_a_stationary_viewer_and_notifications_carry_no_stale_shape() {
+    use iced::futures::StreamExt;
+    use legato_proto::CursorShape::*;
+    let (tx, rx) = tokio::sync::watch::channel(Arrow);
+    let stream = crate::watch_stream(rx.clone(), |_| Message::ViewerCursorChanged);
+    let mut stream = std::pin::pin!(stream);
+    assert!(matches!(
+        stream.next().await,
+        Some(Message::ViewerCursorChanged)
+    ));
+    tx.send_replace(Text);
+    assert!(matches!(
+        stream.next().await,
+        Some(Message::ViewerCursorChanged)
+    ));
+    assert_eq!(*rx.borrow(), Text);
+    // A close/reopen can overtake UI notifications. The view reads the watch value,
+    // so neither a queued nor coalesced notification can reinstall the old Text.
+    tx.send_replace(Grabbing);
+    tx.send_replace(Arrow);
+    assert!(matches!(
+        stream.next().await,
+        Some(Message::ViewerCursorChanged)
+    ));
+    assert_eq!(*rx.borrow(), Arrow);
 }

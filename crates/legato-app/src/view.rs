@@ -133,12 +133,12 @@ pub fn stats_text(
 /// `stats` over it if they're shown.
 pub fn viewer(
     name: &str,
-    pictures: Option<crate::viewer::Source>,
+    pictures: Option<crate::viewer::Picture>,
     stats: Option<[String; 3]>,
 ) -> Element<'static, Message> {
     let content: Element<'static, Message> = match pictures {
         Some(pictures) => {
-            let picture = iced::widget::shader(crate::viewer::Picture(pictures))
+            let picture = iced::widget::shader(pictures)
                 .width(Length::Fill)
                 .height(Length::Fill);
             match stats {
