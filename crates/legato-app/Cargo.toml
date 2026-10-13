@@ -42,5 +42,8 @@ legato-screen.workspace = true
 iroh.workspace = true
 png = "0.18.1"
 
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62.2", features = ["Win32_Graphics_Dxgi", "Win32_UI_WindowsAndMessaging"] }
+
 [lints]
 workspace = true

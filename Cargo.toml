@@ -54,3 +54,8 @@ dbg_macro = "warn"
 # difference in speed and size this app doesn't notice.
 lto = "thin"
 strip = true
+
+# Keep native Windows content anchored while a resized frame is being drawn.
+# Based on the published wgpu-hal 27.0.4; see TESTING.md for the patch and regression.
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/tvolk131/wgpu", rev = "06b1e96f225ae0dc81bad26493e508400072440c" }

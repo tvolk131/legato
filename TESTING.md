@@ -157,6 +157,30 @@ Compact-layout regressions also render the supported 640×480 minimum, long devi
 - After a deliberate UI change, run `LEGATO_UPDATE_SNAPSHOTS=1 cargo test -p legato-app` and review the new images in the pull request.
 - The viewer's video picture is drawn by a GPU shader, which tiny-skia can't draw, so it isn't in a golden.
 
+### Windows resize presentation
+
+The pinned `wgpu-hal` 27.0.4 [patch](https://github.com/tvolk131/wgpu/commit/06b1e96f225ae0dc81bad26493e508400072440c)
+selects `DXGI_SCALING_NONE` for native HWND swap chains. This keeps an old frame at
+its original size and top-left position while a resized frame is being drawn;
+the normal upstream setting stretches it. DirectComposition retains its required
+`DXGI_SCALING_STRETCH`. The fork also uses registry `naga` and `wgpu-types` so only
+`wgpu-hal` is replaced. Remove the pin when an upstream release provides the same
+behavior or an equivalent configuration option.
+
+`cargo test --locked -p legato-app --test windows_presentation -- --ignored --nocapture`
+uses DX12 WARP and a real window to check the native swap-chain descriptor after
+creation, growth, shrinkage, and recreation, and submits/presents a frame each time.
+It also checks that DirectComposition still creates and presents successfully.
+Both Windows CI architectures run it in the existing `gpu_renders` step. This
+guards the graphics configuration; it does not reproduce visible resize wobble.
+
+On the PC, drag the main window's right and bottom edges repeatedly on Devices,
+Arrangement, and Settings. Content near the top-left should remain steady except
+for intended layout changes at width breakpoints. Also check left/top resizing,
+maximize/restore, mixed monitor scaling, and resizing the Mac-display viewer.
+Brief newly exposed background at the growing edge is possible while the next
+frame catches up. The reported wobble needs confirmation on the user's GPU.
+
 ### Virtual monitor mode
 
 The Mac encodes and Windows decodes, so the two ends are tested against each other through a committed fixture:
