@@ -10,12 +10,14 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+legato-proto.workspace = true
 tracing.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
 objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSCursor", "NSImage", "NSGraphicsContext", "NSImageRep", "objc2-core-graphics"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-core-media = "0.3.2"
@@ -49,4 +51,8 @@ objc2-core-video = "0.3.2"
 name = "mac_display_dpi"
 # The real display regression needs AppKit's event loop on the process main thread.
 # Without --ignored this harness exits without creating any display.
+harness = false
+
+[[test]]
+name = "mac_cursor_shapes"
 harness = false

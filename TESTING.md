@@ -157,6 +157,39 @@ Compact-layout regressions also render the supported 640×480 minimum, long devi
 - After a deliberate UI change, run `LEGATO_UPDATE_SNAPSHOTS=1 cargo test -p legato-app` and review the new images in the pull request.
 - The viewer's video picture is drawn by a GPU shader, which tiny-skia can't draw, so it isn't in a golden.
 
+### Virtual-display cursor shapes
+
+Protocol 13 carries cursor shapes separately from video and motion. Update both machines
+for this feature. Normal workspace tests cover reliable delivery with no video/motion,
+viewer generation/peer checks, close/reopen reset, unknown/nil-image fallback, stationary
+UI notifications, letterboxing and leaving/re-entering the picture. A paused-clock test
+checks change-only publication, the 250 ms fallback for a stalled AppKit read, recovery,
+and the one-pending-read limit.
+
+`cargo test --locked -p legato-screen --test mac_cursor_shapes` runs AppKit on the
+process main thread. It matches separately allocated copies of real macOS built-in
+cursor images (including each edge/corner and one-sided frame resize), and checks
+missing, empty, oversized and unfamiliar images. It never sets/moves the cursor or
+creates a display, and requests no permissions. Desktop access is needed for AppKit.
+
+On the real Mac/Windows pair, open the extra display and use the **Windows mouse** to
+hover over Mac text, links, and all four edges/corners of a normal window. Test both
+windowed and full-screen viewers, then use the **Mac trackpad** on the same targets.
+Keep the pointer stationary while the underlying UI changes its cursor. Check that
+letterboxing and Windows window borders keep their normal behavior, and that leaving,
+closing/reopening, disconnecting/reconnecting, resizing and switching quality do not
+leave a resize/hand cursor behind. Check normal typing, clicks, scrolling and pointer
+handover too. These real interactions remain a manual hardware check.
+
+The Mac reader samples at 20 Hz only while streaming. It compares bounded normalized
+images and hotspots against this OS's standard cursors. Custom, animated or unavailable
+images fall back to an arrow. `NSCursor.currentSystemCursor` is deprecated; the
+October 13, 2026 probe on macOS 26.6.2 observed all 12 test-page shapes on the Legato
+display without nil readings, but does not guarantee future OS support or end-to-end
+Windows behavior. The shipping Windows backend uses stock cursors: text, pointing hand,
+resizes, crosshair and prohibited have direct equivalents; grab/grabbing use the stock
+four-way move cursor, and unsupported icons such as zoom/copy/link use an arrow.
+
 ### Windows resize presentation
 
 Legato uses the published `wgpu-hal`, with DX12 Mailbox presentation by default

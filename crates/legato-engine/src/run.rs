@@ -391,10 +391,11 @@ pub(crate) async fn run(
                             {
                                 s.send(Control::ExtendStop { reason: String::new() });
                             }
-                            viewing = Some(Viewing::new(
-                                to, frames.clone(), ctx.engine.viewer_stats.clone(),
-                            ));
-                            session.send(Control::ExtendRequest(request));
+                            let view = Viewing::new(
+                                to, frames.clone(), ctx.engine.viewer_stats.clone(), ctx.engine.viewer_cursor.clone(),
+                            );
+                            session.send(Control::ExtendRequest { request, generation: view.generation });
+                            viewing = Some(view);
                         }
                         None => ctx.status(Status::ExtendEnded {
                             id: to,
@@ -523,7 +524,7 @@ pub(crate) async fn run(
                                     ctx.status(Status::Problem(format!("Couldn't save controller settings: {e:#}")));
                                 }
                             }
-                            Control::ExtendRequest(request) => {
+                            Control::ExtendRequest { request, generation } => {
                                 let Some(session) = peers.get(&machine).map(|p| p.session.clone()) else {
                                     continue;
                                 };
@@ -533,7 +534,7 @@ pub(crate) async fn run(
                                         capture.send(CaptureCommand::SetShown(None));
                                         old.stop().await;
                                     }
-                                    match extend::Host::start(session.clone(), request, "Legato".into()).await {
+                                    match extend::Host::start(session.clone(), request, generation, "Legato".into()).await {
                                         Ok(h) => {
                                             // While this Mac's own pointer is on it, the viewer
                                             // shows its cursor there.
@@ -556,18 +557,23 @@ pub(crate) async fn run(
                                 }
                                 #[cfg(not(target_os = "macos"))]
                                 {
-                                    let _ = request;
+                                    let _ = (request, generation);
                                     session.send(Control::ExtendStop {
                                         reason: "only a Mac can show an extra display".into(),
                                     });
                                 }
                             }
-                            Control::Extended { bounds } => {
-                                if let Some(v) = viewing.as_mut().filter(|v| v.peer == peer) {
+                            Control::Extended { generation, bounds } => {
+                                if let Some(v) = viewing.as_mut().filter(|v| v.matches(peer, generation)) {
                                     v.bounds = Some(bounds);
                                     ctx.status(Status::Extended { id: peer, bounds });
                                     set_portal(&viewing, viewer_window, &ids);
                                     arrange(&mut viewing, viewer_window, &layout_now, &ids);
+                                }
+                            }
+                            Control::CursorShape { generation, shape } => {
+                                if let Some(v) = &viewing {
+                                    v.cursor(peer, generation, shape);
                                 }
                             }
                             Control::ExtendResize(request) => {

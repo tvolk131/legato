@@ -116,6 +116,7 @@ pub struct Engine {
     /// The latest picture of a Mac's extra display shown here, if any.
     viewer_frames: watch::Sender<Option<ViewerFrame>>,
     viewer_stats: watch::Sender<Option<ViewerStats>>,
+    viewer_cursor: watch::Sender<legato_proto::CursorShape>,
 }
 
 impl Engine {
@@ -145,6 +146,7 @@ impl Engine {
             run_commands: Mutex::new(None),
             viewer_frames: watch::Sender::new(None),
             viewer_stats: watch::Sender::new(None),
+            viewer_cursor: watch::Sender::new(legato_proto::CursorShape::Arrow),
         }))
     }
 
@@ -218,6 +220,11 @@ impl Engine {
     /// How the extra display shown here is streaming, updated twice a second.
     pub fn viewer_stats(&self) -> watch::Receiver<Option<ViewerStats>> {
         self.viewer_stats.subscribe()
+    }
+
+    /// Cursor shape changes, independent of video frames and pointer motion.
+    pub fn viewer_cursor(&self) -> watch::Receiver<legato_proto::CursorShape> {
+        self.viewer_cursor.subscribe()
     }
 
     /// Changes from the UI or a peer, including while sharing is stopped.

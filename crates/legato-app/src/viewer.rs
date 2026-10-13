@@ -81,14 +81,71 @@ fn log_gpu_errors(device: &wgpu::Device) {
 }
 
 /// Draws the newest picture from its source, letterboxed into the widget's bounds.
-pub struct Picture(pub Source);
+pub struct Picture {
+    pub frames: Source,
+    pub cursor: legato_proto::CursorShape,
+}
 
 impl<Message> shader::Program<Message> for Picture {
     type State = ();
     type Primitive = Primitive;
 
     fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> Primitive {
-        Primitive(self.0.borrow().clone())
+        Primitive(self.frames.borrow().clone())
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &(),
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        let frames = self.frames.borrow();
+        let Some(frame) = frames.as_ref() else {
+            return mouse::Interaction::None;
+        };
+        let picture = legato_core::controller::fit_picture(
+            (frame.nv12.width as f64, frame.nv12.height as f64),
+            legato_proto::Rect::new(
+                bounds.x as f64,
+                bounds.y as f64,
+                bounds.width as f64,
+                bounds.height as f64,
+            ),
+        );
+        if cursor
+            .position()
+            .is_some_and(|p| picture.contains(legato_proto::Point::new(p.x as f64, p.y as f64)))
+        {
+            interaction(self.cursor)
+        } else {
+            mouse::Interaction::None
+        }
+    }
+}
+
+fn interaction(shape: legato_proto::CursorShape) -> mouse::Interaction {
+    use legato_proto::CursorShape as C;
+    use mouse::Interaction as I;
+    match shape {
+        C::Arrow => I::Idle,
+        C::Text => I::Text,
+        C::Pointer => I::Pointer,
+        C::Grab => I::Grab,
+        C::Grabbing => I::Grabbing,
+        C::Crosshair => I::Crosshair,
+        C::NotAllowed => I::NotAllowed,
+        C::Copy => I::Copy,
+        C::Alias => I::Alias,
+        C::ContextMenu => I::ContextMenu,
+        C::ResizeHorizontal => I::ResizingHorizontally,
+        C::ResizeVertical => I::ResizingVertically,
+        C::ResizeDiagonalUp => I::ResizingDiagonallyUp,
+        C::ResizeDiagonalDown => I::ResizingDiagonallyDown,
+        C::ResizeColumn => I::ResizingColumn,
+        C::ResizeRow => I::ResizingRow,
+        C::ZoomIn => I::ZoomIn,
+        C::ZoomOut => I::ZoomOut,
     }
 }
 
@@ -400,3 +457,84 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(rgb, 1.0);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::widget::shader::Program;
+    use legato_proto::CursorShape as C;
+
+    #[test]
+    fn remote_cursor_only_applies_over_the_live_letterboxed_picture() {
+        let frame = std::sync::Arc::new(legato_engine::Picture {
+            nv12: legato_screen::Nv12 {
+                width: 1920,
+                height: 1080,
+                stride: 1920,
+                data: vec![],
+            },
+            decoded_at: std::time::Instant::now(),
+            mac: Duration::ZERO,
+            network: Duration::ZERO,
+            decode: Duration::ZERO,
+        });
+        let (tx, frames) = tokio::sync::watch::channel(Some(frame));
+        let mut picture = Picture {
+            frames,
+            cursor: C::ResizeDiagonalUp,
+        };
+        let bounds = Rectangle {
+            x: 40.0,
+            y: 20.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let read = |picture: &Picture, at: mouse::Cursor| {
+            <Picture as Program<()>>::mouse_interaction(picture, &(), bounds, at)
+        };
+        let center = mouse::Cursor::Available(iced::Point::new(400.0, 300.0));
+        assert_eq!(
+            read(&picture, center),
+            mouse::Interaction::ResizingDiagonallyUp
+        );
+        // Both letterbox bars, the window's outer edges, and leaving the window.
+        for at in [(400.0, 50.0), (400.0, 610.0), (10.0, 300.0), (840.0, 300.0)] {
+            assert_eq!(
+                read(&picture, mouse::Cursor::Available(at.into())),
+                mouse::Interaction::None
+            );
+        }
+        assert_eq!(
+            read(&picture, mouse::Cursor::Unavailable),
+            mouse::Interaction::None
+        );
+        // Shape changes apply at the same position, with the same decoded frame.
+        for (shape, expected) in [
+            (C::Pointer, mouse::Interaction::Pointer),
+            (C::Text, mouse::Interaction::Text),
+            (C::Arrow, mouse::Interaction::Idle),
+            (
+                C::ResizeDiagonalDown,
+                mouse::Interaction::ResizingDiagonallyDown,
+            ),
+        ] {
+            picture.cursor = shape;
+            assert_eq!(read(&picture, center), expected);
+        }
+        assert_eq!(
+            read(&picture, mouse::Cursor::Unavailable),
+            mouse::Interaction::None
+        );
+        assert_eq!(
+            read(&picture, center),
+            mouse::Interaction::ResizingDiagonallyDown,
+            "re-entering uses the latest shape"
+        );
+        tx.send_replace(None);
+        assert_eq!(
+            read(&picture, center),
+            mouse::Interaction::None,
+            "a stopped viewer cannot leave a remote cursor"
+        );
+    }
+}

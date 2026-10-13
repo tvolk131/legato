@@ -140,6 +140,29 @@ async fn connect(a: &Net, b: &Net) -> [(mpsc::UnboundedReceiver<SessionEvent>, A
 }
 
 #[tokio::test]
+async fn cursor_updates_arrive_in_order_without_video_or_motion() {
+    use legato_proto::CursorShape::*;
+    let (a, b) = (
+        node("cursor-viewer", Os::Windows).await,
+        node("cursor-host", Os::MacOs).await,
+    );
+    let [(mut events, _viewer), (_host_events, host)] = connect(&a, &b).await;
+    for shape in [Pointer, ResizeDiagonalUp, Text, Arrow] {
+        host.send(Control::CursorShape {
+            generation: 27,
+            shape,
+        });
+    }
+    for shape in [Pointer, ResizeDiagonalUp, Text, Arrow] {
+        let event = timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_matches!(event, SessionEvent::Control { peer, msg } if peer == b.id() && msg == Control::CursorShape { generation: 27, shape });
+    }
+}
+
+#[tokio::test]
 async fn paired_peers_connect_and_exchange_input() {
     let (a, b) = (node("a", Os::Windows).await, node("b", Os::MacOs).await);
     let [(mut a_events, a_session), (mut b_events, b_session)] = connect(&a, &b).await;

@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible wire changes.
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 13;
 
 /// ALPN for the input-sharing session. Only paired peers may use it.
 pub const SESSION_ALPN: &[u8] = b"legato/1";
@@ -134,6 +134,31 @@ pub enum Button {
     Forward,
 }
 
+/// Native viewer cursors. Unknown/custom Mac images and unavailable cursor readings
+/// become `Arrow`; cursor pixels never travel over the network.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CursorShape {
+    #[default]
+    Arrow,
+    Text,
+    Pointer,
+    Grab,
+    Grabbing,
+    Crosshair,
+    NotAllowed,
+    Copy,
+    Alias,
+    ContextMenu,
+    ResizeHorizontal,
+    ResizeVertical,
+    ResizeDiagonalUp,
+    ResizeDiagonalDown,
+    ResizeColumn,
+    ResizeRow,
+    ZoomIn,
+    ZoomOut,
+}
+
 /// Scroll amounts.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Scroll {
@@ -189,11 +214,22 @@ pub enum Control {
     ControlMode(ControlMode),
     /// Virtual monitor mode, viewer → Mac: add a display of this many pixels and stream it
     /// to me.
-    ExtendRequest(ExtendRequest),
+    ExtendRequest {
+        request: ExtendRequest,
+        /// Chosen by the viewer, fresh each time it opens a display.
+        generation: u64,
+    },
     /// Mac → viewer: the display exists at `bounds` (the Mac's native coordinates);
     /// frames follow on a video stream.
     Extended {
+        generation: u64,
         bounds: Rect,
+    },
+    /// Mac → viewer: the cursor on this display changed, independently of video or
+    /// pointer motion. Reliable delivery also handles a stationary pointer.
+    CursorShape {
+        generation: u64,
+        shape: CursorShape,
     },
     /// Either side: stop showing the extra display. `reason` is shown if it isn't empty.
     ExtendStop {
@@ -483,6 +519,38 @@ mod tests {
     }
 
     #[test]
+    fn cursor_shapes_and_viewer_generations_round_trip() {
+        use CursorShape::*;
+        for shape in [
+            Arrow,
+            Text,
+            Pointer,
+            Grab,
+            Grabbing,
+            Crosshair,
+            NotAllowed,
+            Copy,
+            Alias,
+            ContextMenu,
+            ResizeHorizontal,
+            ResizeVertical,
+            ResizeDiagonalUp,
+            ResizeDiagonalDown,
+            ResizeColumn,
+            ResizeRow,
+            ZoomIn,
+            ZoomOut,
+        ] {
+            for generation in [0, 1, u64::MAX] {
+                let msg = Control::CursorShape { generation, shape };
+                let bytes = encode_frame(&msg);
+                assert_eq!(decode_frame::<Control>(&bytes[4..]).unwrap(), msg);
+                assert!(bytes.len() < 20, "cursor updates contain no image payload");
+            }
+        }
+    }
+
+    #[test]
     fn control_round_trips() {
         let msgs = [
             Control::Hello(hello()),
@@ -502,18 +570,22 @@ mod tests {
             },
             Control::Scroll(Scroll::Wheel { x: 0.0, y: -120.0 }),
             Control::Yield,
-            Control::ExtendRequest(ExtendRequest {
-                width: 3840,
-                height: 2160,
-                hidpi: true,
-                stream_width: 2560,
-                stream_height: 1440,
-                moving_width: 1920,
-                moving_height: 1080,
-                fps: 60,
-                bitrate: 40_000_000,
-            }),
+            Control::ExtendRequest {
+                generation: 41,
+                request: ExtendRequest {
+                    width: 3840,
+                    height: 2160,
+                    hidpi: true,
+                    stream_width: 2560,
+                    stream_height: 1440,
+                    moving_width: 1920,
+                    moving_height: 1080,
+                    fps: 60,
+                    bitrate: 40_000_000,
+                },
+            },
             Control::Extended {
+                generation: 41,
                 bounds: Rect::new(-1920.0, 0.0, 1920.0, 1080.0),
             },
             Control::ExtendStop {
