@@ -5,7 +5,7 @@ use iced::{Alignment, Length, Size};
 use iced_m3::dialog::{dialog, modal};
 use iced_m3::{
     ButtonSize, ButtonVariant, Element, MenuItem, NavigationItem, TypeScale, app_bar, badged,
-    button, button_group, card, icon, icon_button, list, list_item, loading_indicator,
+    button, button_group, card, icon, icon_button, list, list_item, loading_indicator, menu,
     navigation_rail, slider, snackbar, split_button, switch, typography,
 };
 use legato_core::Layout;
@@ -51,6 +51,7 @@ fn window_contents(m: &Model, size: Size) -> Element<'_, Message> {
         .on_toggle(Message::ToggleSharing);
     let body = column![
         app_bar("Legato").action(sharing),
+        transfer_failures(m),
         responsive(move |size| {
             let width = (size.width - 48.0).max(0.0);
             let content = match m.page {
@@ -78,6 +79,7 @@ fn window_contents(m: &Model, size: Size) -> Element<'_, Message> {
     );
     let main = modal(main, add_device_dialog(m), m.add_device_open);
     let main = modal(main, display_options_dialog(m), m.display_options_open);
+    let main = modal(main, unpair_dialog(m), m.unpair_open);
     let main = iced_m3::focus::scope(modal(main, pairing_dialog(m), m.pairing_open));
     // Draws nothing; see `GpuErrors`. A layer on top, so it doesn't move anything.
     iced::widget::stack![
@@ -202,22 +204,53 @@ fn body(text: impl Into<String>) -> Element<'static, Message> {
     typography(text.into(), TypeScale::BodyMedium).into()
 }
 
-fn devices(m: &Model, width: f32) -> Element<'_, Message> {
-    let this = card(
-        column![
-            typography(m.this.name.clone(), TypeScale::TitleLarge),
-            body(format!(
-                "{} · {}",
-                os_name(m.this.os),
-                m.this.id.fmt_short()
-            )),
+fn transfer_failures(m: &Model) -> Option<Element<'_, Message>> {
+    if m.transfer_failures.is_empty() {
+        return None;
+    }
+    let failures = column(m.transfer_failures.iter().map(|text| {
+        row![
+            container(body(text.clone())).width(Length::Fill),
+            button("Dismiss")
+                .variant(ButtonVariant::Text)
+                .on_press(Message::DismissTransferFailure(text.clone())),
         ]
-        .spacing(4),
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .into()
+    }))
+    .spacing(8);
+    Some(
+        container(
+            container(
+                column![
+                    typography("File transfers need attention", TypeScale::TitleSmall),
+                    container(scrollable(failures).height(Length::Shrink)).max_height(80),
+                ]
+                .spacing(8),
+            )
+            .padding(12)
+            .width(Length::Fill)
+            .style(|theme: &iced_m3::Theme| container::Style {
+                background: Some(theme.colors.error_container.into()),
+                text_color: Some(theme.colors.on_error_container),
+                border: iced::border::rounded(12),
+                ..Default::default()
+            }),
+        )
+        .padding([8, 24])
+        .into(),
     )
-    .width(Length::Fill);
+}
 
+fn devices(m: &Model, width: f32) -> Element<'_, Message> {
     let paired: Element<'_, Message> = if m.paired.is_empty() {
-        body("None yet.")
+        column![
+            typography("Connect your first device", TypeScale::TitleMedium),
+            body("Open Legato on both devices on the same network, then choose Add a device."),
+        ]
+        .spacing(8)
+        .into()
     } else {
         list(m.paired.iter().map(|p| {
             let status = match (&p.connection, m.active == Some(p.device.id)) {
@@ -229,8 +262,11 @@ fn devices(m: &Model, width: f32) -> Element<'_, Message> {
                     format!("Connected via relay · {:.0} ms", rtt.as_secs_f64() * 1000.0)
                 }
                 (Some(None), false) => "Connected".to_string(),
-                (None, _) if m.sharing => "Not connected: is Legato running there?".to_string(),
-                (None, _) => "Not connected".to_string(),
+                (None, _) if m.sharing => {
+                    "Not connected · Open Legato there and check that both devices are online."
+                        .to_string()
+                }
+                (None, _) => "Sharing is off · Turn on Sharing to reconnect.".to_string(),
             };
             let send = button("Send files…").variant(ButtonVariant::Tonal);
             let send = if p.connection.is_some() {
@@ -257,9 +293,10 @@ fn devices(m: &Model, width: f32) -> Element<'_, Message> {
             let actions = row![
                 display,
                 send,
-                button("Unpair")
-                    .variant(ButtonVariant::Text)
-                    .on_press(Message::Unpair(p.device.id)),
+                menu(
+                    "More",
+                    [MenuItem::new("Unpair…", Message::Unpair(p.device.id)).destructive(true)]
+                ),
             ]
             .spacing(8)
             .align_y(Alignment::Center);
@@ -301,15 +338,35 @@ fn devices(m: &Model, width: f32) -> Element<'_, Message> {
     };
 
     column![
-        heading("This device"),
-        this,
+        heading("Devices"),
+        body(format!(
+            "This device: {} · {}",
+            m.this.name,
+            os_name(m.this.os)
+        )),
         heading("Paired devices"),
         paired,
         container(add).padding([8, 0]),
-        body("Drop files on this window to send them to the device you're using."),
+        (!m.paired.is_empty())
+            .then(|| body("Drop files on this window to send them to the device you're using.")),
     ]
     .spacing(8)
     .into()
+}
+
+fn unpair_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
+    let Some(device) = &m.unpair else {
+        return dialog(column![]);
+    };
+    dialog(column![
+        typography("Unpair device?", TypeScale::HeadlineSmall),
+        body(format!("Unpair \"{}\"? Sharing with this device will stop. You'll need to pair again to reconnect.", device.name)),
+    ].spacing(16))
+    .actions(row![
+        button("Cancel").variant(ButtonVariant::Text).on_press(Message::ConfirmUnpair(false)),
+        button("Unpair").variant(ButtonVariant::Text).on_press(Message::ConfirmUnpair(true)),
+    ].spacing(8))
+    .on_dismiss(Message::ConfirmUnpair(false))
 }
 
 /// Legato devices on this network that aren't paired with this one.
@@ -322,12 +379,14 @@ fn unpaired(m: &Model) -> impl Iterator<Item = &crate::model::Device> {
 fn add_device_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
     let found: Vec<_> = unpaired(m).collect();
     let found: Element<'_, Message> = if found.is_empty() {
-        row![
-            container(loading_indicator()).width(32).height(32),
-            body("Looking for Legato on this network…"),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center)
+        column![
+            row![
+                container(loading_indicator()).width(32).height(32),
+                body("Looking for Legato on this network…"),
+            ].spacing(12).align_y(Alignment::Center),
+            typography("Device not appearing?", TypeScale::TitleSmall),
+            body("Keep Legato open on both devices and check that they are on the same network. A VPN or a guest network may prevent discovery."),
+        ].spacing(12)
         .into()
     } else {
         list(found.into_iter().map(|n| {
@@ -346,6 +405,7 @@ fn add_device_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
                  network as this one."
             ),
             found,
+            body("After pairing, your devices can connect across different networks."),
         ]
         .spacing(16),
     )
@@ -482,57 +542,90 @@ fn arrangement(m: &Model) -> Element<'_, Message> {
     .into()
 }
 
+fn setting_row<'a>(
+    title: &str,
+    description: &str,
+    on: bool,
+    action: Option<fn(bool) -> Message>,
+) -> Element<'a, Message> {
+    let toggle = switch(on);
+    let item = list_item(title).supporting_text(description);
+    match action {
+        Some(action) => item
+            .trailing(toggle.on_toggle(action))
+            .on_press(action(!on))
+            .into(),
+        None => item.trailing(toggle).disabled(true).into(),
+    }
+}
+
 fn settings(m: &Model, width: f32) -> Element<'_, Message> {
     let push = m.push_distance.unwrap_or(m.config.switching.push_distance) as f32;
-    let mut col = column![
-        heading("Switching"),
-        body(format!(
-            "Edge resistance: {push:.0}. How far to keep pushing past a shared edge before the \
-             cursor moves to the other device."
-        )),
-        slider(0.0..=100.0, push)
-            .step(5.0)
-            .labeled(true)
-            .on_change(Message::PushDistance)
-            .on_release(Message::SaveSettings),
-        heading("Control"),
-        body("Which device's keyboard and mouse can move onto the others. This applies to all your paired devices."),
-        control_mode(m, width),
-        heading("Keyboard"),
-        switch(m.config.keys.remap == Remap::Auto)
-            .label("On Macs, use the key next to the space bar as Command")
-            .on_toggle(Message::Remap),
-        heading("Scrolling"),
-        switch(m.config.scrolling.invert_wheel)
-            .label("Reverse the mouse wheel when this device is being controlled")
-            .on_toggle(Message::InvertWheel),
-        heading("Clipboard"),
-        switch(m.config.clipboard.enabled)
-            .label("Share copied text, images and files with paired devices")
-            .on_toggle(Message::Clipboard),
-    ]
-    .spacing(8);
+    let input = list([
+        setting_row(
+            "Mac Command key",
+            "On Macs, use the key next to the space bar as Command.",
+            m.config.keys.remap == Remap::Auto,
+            Some(Message::Remap),
+        ),
+        setting_row(
+            "Reverse mouse wheel",
+            "Reverse scrolling when this device is controlled by another device.",
+            m.config.scrolling.invert_wheel,
+            Some(Message::InvertWheel),
+        ),
+    ]);
+    let mut general = vec![setting_row(
+        "Share clipboard",
+        "Share copied text, images and files with paired devices.",
+        m.config.clipboard.enabled,
+        Some(Message::Clipboard),
+    )];
     if m.this.os == Some(legato_proto::Os::Windows) {
-        col = col.push(heading("Mac display"));
-        col = col.push(
-            switch(m.config.extend.stats)
-                .label("Show frame rate and delays over the picture (F10)")
-                .on_toggle(Message::Stats),
-        );
+        general.push(setting_row(
+            "Display performance",
+            "Show frame rate and delays over the Mac display. Toggle with F10.",
+            m.config.extend.stats,
+            Some(Message::Stats),
+        ));
     }
-    col = col.push(heading("General"));
-    col = col.push(match m.autostart {
-        Some(on) => switch(on)
-            .label("Open Legato when you log in")
-            .on_toggle(Message::Autostart),
-        None => switch(false).label("Open Legato when you log in (unavailable)"),
-    });
-    col.push(heading("About"))
-        .push(body(format!("Legato {}", m.version)))
-        .push(body(format!("Device id: {}", m.this.id)))
-        .push(body(format!("Settings folder: {}", m.state_dir)))
-        .push(Space::new().height(16))
-        .into()
+    general.push(setting_row(
+        "Open at login",
+        if m.autostart.is_some() {
+            "Open Legato when you log in."
+        } else {
+            "Opening at login is unavailable on this system."
+        },
+        m.autostart.unwrap_or(false),
+        m.autostart
+            .map(|_| Message::Autostart as fn(bool) -> Message),
+    ));
+    column![
+        heading("Input"),
+        body("Choose whose keyboard and mouse can control your paired devices."),
+        control_mode(m, width),
+        field(
+            "Edge resistance",
+            slider(0.0..=100.0, push)
+                .step(5.0)
+                .labeled(true)
+                .on_change(Message::PushDistance)
+                .on_release(Message::SaveSettings),
+            Some(format!(
+                "{push:.0} · How far to push past a shared edge before switching devices."
+            ))
+        ),
+        input,
+        heading("Sharing and startup"),
+        list(general),
+        heading("About"),
+        body(format!("Legato {}", m.version)),
+        body(format!("Device id: {}", m.this.id)),
+        body(format!("Settings folder: {}", m.state_dir)),
+        Space::new().height(16),
+    ]
+    .spacing(8)
+    .into()
 }
 
 fn control_mode(m: &Model, width: f32) -> Element<'_, Message> {
@@ -766,9 +859,9 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
                     .find(|&q| {
                         request_with(q).is_some_and(|r| legato_core::extend::frames_sent(&r) >= hz)
                     });
-                note.push_str(" The Mac can't encode it any faster");
+                note.push_str(" Legato limits streaming at this resolution");
                 note.push_str(&match quicker {
-                    Some(q) => format!("; {} keeps up with {hz} Hz.", quality_name(q)),
+                    Some(q) => format!("; {} allows up to {hz} fps.", quality_name(q)),
                     None => ".".to_string(),
                 });
             }
@@ -789,25 +882,23 @@ fn display_options_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
                 hz.min(legato_core::extend::max_fps(w, h))
             ),
             (_, None) => format!(
-                "You'll see the window's full size, at up to {hz} fps if the Mac can encode \
-                 it that fast: 60 at 4K, 120 at 1440p, 144 at 1080p."
+                "You'll see the window's full size. Legato limits streaming to 60 fps at 4K, \
+                 120 at 1440p and 144 at 1080p, up to your chosen {hz} Hz."
             ),
         },
     };
 
     let content = column![
-        typography(
-            format!("Show \"{name}\" as a display"),
-            TypeScale::HeadlineSmall
-        ),
-        field("Where", where_, where_note),
+        column![
+            typography("Display options", TypeScale::HeadlineSmall),
+            body(name)
+        ]
+        .spacing(4),
+        field("Show on", where_, where_note),
+        field("Resolution", size_choice, None),
+        field("Refresh rate", refresh_choice, Some(display_note)),
         field(
-            "The Mac's display",
-            column![size_choice, refresh_choice].spacing(6),
-            Some(display_note)
-        ),
-        field(
-            "Stream",
+            "Stream quality",
             column![quality_choice]
                 .push((o.quality == Quality::Adaptive).then_some(moving_choice))
                 .spacing(6),

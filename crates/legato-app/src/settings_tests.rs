@@ -14,6 +14,59 @@ async fn app() -> (tempfile::TempDir, App) {
 }
 
 #[tokio::test]
+async fn transfer_failures_survive_navigation_and_success_until_dismissed() {
+    let (_dir, mut app) = app().await;
+    let peer = iroh::SecretKey::from_bytes(&[11; 32]).public();
+    app.engine
+        .net()
+        .store()
+        .add_peer(peer, "Studio PC".into(), legato_proto::Os::Windows)
+        .unwrap();
+    app.refresh_paired();
+    let failure = Status::FileTransferFailed {
+        peer,
+        sending: true,
+        reason: "Disk full".into(),
+    };
+    for _ in 0..2 {
+        let _ = app.update(Message::Status(failure.clone()));
+    }
+    assert_eq!(app.model.transfer_failures.len(), 1);
+    let text = app.model.transfer_failures[0].clone();
+    assert!(text.contains("Disk full") && text.contains("Studio PC"));
+    let _ = app.update(Message::Status(Status::FileTransferFailed {
+        peer,
+        sending: false,
+        reason: "Permission denied".into(),
+    }));
+    let _ = app.update(Message::Status(Status::FilesSent {
+        to: peer,
+        bytes: 42,
+    }));
+    let _ = app.update(Message::DismissNotice);
+    for page in [Page::Devices, Page::Settings, Page::Arrangement] {
+        let _ = app.update(Message::Page(page));
+        let mut ui = iced_test::simulator(view::root(&app.model));
+        assert!(ui.find(text.clone()).unwrap().visible_bounds().is_some());
+    }
+    let _ = app.update(Message::DismissTransferFailure(text.clone()));
+    assert_eq!(app.model.transfer_failures.len(), 1);
+    assert!(app.model.transfer_failures[0].contains("receive files from"));
+    assert!(app.model.problems.is_empty());
+    // A fresh occurrence of an acknowledged failure must be shown again.
+    let _ = app.update(Message::Status(failure));
+    assert_eq!(app.model.transfer_failures.len(), 2);
+    // Immediate send failures use the same persistent feedback.
+    let _ = app.update(Message::FilesPicked(peer, vec!["missing-file".into()]));
+    assert!(
+        app.model
+            .transfer_failures
+            .iter()
+            .any(|p| p.contains("sharing isn't running"))
+    );
+}
+
+#[tokio::test]
 async fn local_settings_preserve_a_newer_peer_policy_before_the_ui_refreshes() {
     let (dir, mut app) = app().await;
     let messages = [
@@ -167,6 +220,7 @@ async fn failed_unpair_keeps_the_device_and_its_arrangement_for_retry() {
     let blocker = dir.path().join("peers.tmp");
     std::fs::create_dir(&blocker).unwrap();
     let _ = app.update(Message::Unpair(id));
+    let _ = app.update(Message::ConfirmUnpair(true));
     assert!(app.model.paired(&id).is_some());
     assert_eq!(app.engine.config(), before);
     assert!(
@@ -179,8 +233,55 @@ async fn failed_unpair_keeps_the_device_and_its_arrangement_for_retry() {
     );
     std::fs::remove_dir(blocker).unwrap();
     let _ = app.update(Message::Unpair(id));
+    let _ = app.update(Message::ConfirmUnpair(true));
     assert!(app.model.paired(&id).is_none());
     assert!(app.engine.config().neighbors.is_empty());
+}
+
+#[tokio::test]
+async fn unpair_requires_confirmation_and_removes_only_the_selected_peer() {
+    let (dir, mut app) = app().await;
+    let peers = [7, 8].map(|n| iroh::SecretKey::from_bytes(&[n; 32]).public());
+    for id in peers {
+        app.engine
+            .net()
+            .store()
+            .add_peer(id, format!("Peer {id}"), legato_proto::Os::MacOs)
+            .unwrap();
+        app.engine
+            .update_config(|c| {
+                c.neighbors.push(legato_engine::config::Neighbor {
+                    peer: id.to_string(),
+                    side: legato_core::Side::Below,
+                    display: 1,
+                    align: Default::default(),
+                    nudge: 0.0,
+                    offset: None,
+                })
+            })
+            .unwrap();
+    }
+    app.refresh_paired();
+    let before = app.engine.config();
+    let _ = app.update(Message::Unpair(peers[0]));
+    assert!(app.model.unpair_open);
+    assert_eq!(app.model.paired.len(), 2);
+    let _ = app.update(Message::ConfirmUnpair(false));
+    assert!(!app.model.unpair_open);
+    // A stale confirm after cancellation must not remove anything.
+    let _ = app.update(Message::ConfirmUnpair(true));
+    assert_eq!(app.model.paired.len(), 2);
+    assert_eq!(app.engine.config(), before);
+    let _ = app.update(Message::Unpair(peers[1]));
+    let _ = app.update(Message::ConfirmUnpair(true));
+    assert!(!app.model.unpair_open);
+    assert!(app.model.paired(&peers[0]).is_some());
+    assert!(app.model.paired(&peers[1]).is_none());
+    let config = legato_engine::config::load(dir.path()).unwrap();
+    assert_eq!(config.neighbors.len(), 1);
+    assert_eq!(config.neighbors[0].peer, peers[0].to_string());
+    let _ = app.update(Message::Unpair(peers[1]));
+    assert!(!app.model.unpair_open);
 }
 
 #[tokio::test]

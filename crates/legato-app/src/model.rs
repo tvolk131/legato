@@ -64,6 +64,9 @@ pub struct Model {
     pub pairing_open: bool,
     /// The "Add a device" dialog, listing unpaired devices nearby, is open.
     pub add_device_open: bool,
+    /// Keep the selected identity while the confirmation dialog animates closed.
+    pub unpair: Option<Device>,
+    pub unpair_open: bool,
     pub config: Config,
     /// A slider drag that has not been committed yet.
     pub push_distance: Option<f64>,
@@ -74,6 +77,8 @@ pub struct Model {
     /// Which peer this machine is driving, or which peer drives it.
     pub active: Option<EndpointId>,
     pub problems: Vec<String>,
+    /// Transfer failures stay visible on every page until individually dismissed.
+    pub transfer_failures: Vec<String>,
     pub notice: Option<(u64, String)>,
     pub autostart: Option<bool>,
     /// The Mac whose extra display is shown here (virtual monitor mode).

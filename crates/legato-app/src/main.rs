@@ -87,6 +87,7 @@ pub enum Message {
     ConfirmPair(bool),
     PairFinished(Result<PairOutcome, String>),
     Unpair(EndpointId),
+    ConfirmUnpair(bool),
     DropPeer(EndpointId, legato_proto::Point),
     PushDistance(f32),
     SaveSettings,
@@ -100,6 +101,7 @@ pub enum Message {
     FileDropped(std::path::PathBuf),
     FlushDrops,
     DismissNotice,
+    DismissTransferFailure(String),
     /// Virtual monitor mode: show this Mac's extra display in a window here.
     ShowDisplay(EndpointId),
     StopDisplay,
@@ -203,6 +205,8 @@ impl App {
             pairing: None,
             pairing_open: false,
             add_device_open: false,
+            unpair: None,
+            unpair_open: false,
             config: engine.config(),
             push_distance: None,
             local: engine.screen_updates().borrow().clone(),
@@ -210,6 +214,7 @@ impl App {
             placed_us: HashMap::new(),
             active: None,
             problems: Vec::new(),
+            transfer_failures: Vec::new(),
             notice: None,
             autostart: platform::autostart_enabled(),
             viewing: None,
@@ -268,6 +273,12 @@ impl App {
     fn notify(&mut self, text: impl Into<String>) {
         self.next_notice += 1;
         self.model.notice = Some((self.next_notice, text.into()));
+    }
+
+    fn transfer_failed(&mut self, text: String) {
+        if !self.model.transfer_failures.contains(&text) {
+            self.model.transfer_failures.push(text);
+        }
     }
 
     fn start_sharing(&self) -> Task<Message> {
@@ -457,6 +468,18 @@ impl App {
                 }
             }
             Message::Unpair(id) => {
+                self.model.unpair = self.model.paired(&id).map(|p| p.device.clone());
+                self.model.unpair_open = self.model.unpair.is_some();
+            }
+            Message::ConfirmUnpair(accept) => {
+                if !self.model.unpair_open {
+                    return Task::none();
+                }
+                self.model.unpair_open = false;
+                let Some(device) = self.model.unpair.as_ref().filter(|_| accept) else {
+                    return Task::none();
+                };
+                let id = device.id;
                 if let Err(e) = self.engine.net().unpair(&id) {
                     self.notify(format!("Couldn't unpair: {e:#}"));
                     return Task::none();
@@ -517,7 +540,10 @@ impl App {
                 if !paths.is_empty()
                     && let Err(e) = self.engine.send_files(id, paths)
                 {
-                    self.notify(format!("Couldn't send: {e:#}"));
+                    self.transfer_failed(format!(
+                        "Couldn't send files to \"{}\": {e:#}",
+                        self.model.name_of(&id)
+                    ));
                 }
             }
             Message::FileDropped(path) => {
@@ -544,13 +570,19 @@ impl App {
                 match target {
                     Some(id) => {
                         if let Err(e) = self.engine.send_files(id, paths) {
-                            self.notify(format!("Couldn't send: {e:#}"));
+                            self.transfer_failed(format!(
+                                "Couldn't send files to \"{}\": {e:#}",
+                                self.model.name_of(&id)
+                            ));
                         }
                     }
-                    None => self.notify("Connect a device first to send it files."),
+                    None => self.transfer_failed("Connect a device first to send it files.".into()),
                 }
             }
             Message::DismissNotice => self.model.notice = None,
+            Message::DismissTransferFailure(text) => {
+                self.model.transfer_failures.retain(|p| p != &text)
+            }
             Message::SystemTheme(mode) => self.dark = mode == iced::theme::Mode::Dark,
             Message::ShowDisplay(peer) => {
                 if let Some(viewer) = &self.viewer {
@@ -872,6 +904,11 @@ impl App {
             Status::FilesSending { to, count } => {
                 let name = self.model.name_of(&to);
                 self.notify(format!("Sending {count} item(s) to \"{name}\"…"));
+            }
+            failed @ Status::FileTransferFailed { .. } => {
+                self.transfer_failed(
+                    legato_engine::describe(&failed, |id| self.model.name_of(id)).unwrap(),
+                );
             }
             Status::FilesSent { to, bytes } => {
                 let name = self.model.name_of(&to);

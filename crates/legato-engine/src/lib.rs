@@ -71,6 +71,12 @@ pub enum Status {
     },
     /// A whole batch of files arrived.
     FilesReceived(files::Received),
+    /// A send or receive failed; keep the peer and reason available to the UI.
+    FileTransferFailed {
+        peer: EndpointId,
+        sending: bool,
+        reason: String,
+    },
     /// Virtual monitor mode: the Mac `id` added the display this machine asked for, at
     /// `bounds` in its coordinates (sent again if it moves).
     Extended {
@@ -467,6 +473,19 @@ pub fn describe(status: &Status, name_of: impl Fn(&EndpointId) -> String) -> Opt
                 legato_proto::FilePurpose::Clipboard => ", ready to paste".to_string(),
                 _ => format!(" in {}", files::downloads_dir().display()),
             }
+        ),
+        Status::FileTransferFailed {
+            peer,
+            sending,
+            reason,
+        } => format!(
+            "Couldn't {} \"{}\": {reason}",
+            if *sending {
+                "send files to"
+            } else {
+                "receive files from"
+            },
+            name_of(peer),
         ),
         Status::ExtendEnded { id, reason } if !reason.is_empty() => {
             format!(

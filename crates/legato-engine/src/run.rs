@@ -102,7 +102,6 @@ fn send_files_in_background(
     purpose: FilePurpose,
 ) {
     let status = ctx.engine.status.clone();
-    let name = session.remote.name.clone();
     tokio::spawn(async move {
         let _ = status.send(Status::FilesSending {
             to: session.peer,
@@ -116,9 +115,11 @@ fn send_files_in_background(
                 });
             }
             Err(e) => {
-                let _ = status.send(Status::Problem(format!(
-                    "Couldn't send files to \"{name}\": {e:#}"
-                )));
+                let _ = status.send(Status::FileTransferFailed {
+                    peer: session.peer,
+                    sending: true,
+                    reason: format!("{e:#}"),
+                });
             }
         }
     });
@@ -374,7 +375,11 @@ pub(crate) async fn run(
                 RunCommand::SendFiles { to, paths, purpose } => {
                     match by_peer.read().unwrap().get(&to).cloned() {
                         Some(session) => send_files_in_background(&ctx, session, paths, purpose),
-                        None => ctx.status(Status::Problem("That device isn't connected.".into())),
+                        None => ctx.status(Status::FileTransferFailed {
+                            peer: to,
+                            sending: true,
+                            reason: "That device isn't connected.".into(),
+                        }),
                     }
                 }
                 RunCommand::Extend { to, request } => {
@@ -438,7 +443,11 @@ pub(crate) async fn run(
                 }
                 Err(e) => {
                     inbox.failed(&info);
-                    ctx.status(Status::Problem(format!("Couldn't receive a file: {e:#}")));
+                    ctx.status(Status::FileTransferFailed {
+                        peer: info.from,
+                        sending: false,
+                        reason: format!("{e:#}"),
+                    });
                 }
             },
             event = events.recv() => {
