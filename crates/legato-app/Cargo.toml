@@ -22,6 +22,8 @@ legato-engine.workspace = true
 legato-net.workspace = true
 legato-proto.workspace = true
 rfd = { version = "0.17.2", default-features = false }
+# Use iced's existing SVG rasterizer for the native tray's RGBA image.
+resvg = { version = "0.45.1", default-features = false }
 tokio = { workspace = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true

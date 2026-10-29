@@ -96,6 +96,7 @@ jobs:
             Copy-Item $out/legato.exe $dir/
           }
           Copy-Item README.md, LICENSE $dir/
+          Copy-Item -Recurse licenses $dir/
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
       - name: package (macOS)
         if: runner.os == 'macOS' && github.ref != 'refs/heads/main'
@@ -104,6 +105,7 @@ jobs:
           out="target/${{ matrix.target }}/release"
           mkdir "$dir"
           cp "$out/legato" README.md LICENSE "$dir/"
+          cp -R licenses "$dir/"
           if [ -f "$out/legato-app" ]; then
             app="$dir/Legato.app/Contents"
             mkdir -p "$app/MacOS"

@@ -32,7 +32,7 @@ The spikes were removed on 2026-09-30, once the real crates covered what they te
 | Mouse and keyboard on macOS, Windows, X11 | **High** | Synergy has used the same techniques for 15+ years. All the OS APIs are reachable through `objc2-core-graphics`, `windows` and `x11rb`. |
 | Mouse and keyboard on Wayland | **Medium on GNOME/KDE, low elsewhere** | Wayland blocks global capture by design. You need portals + libei (GNOME 46+, KDE 6.1+), wlroots-specific protocols, or evdev/uinput with elevated privileges. |
 | Networking with iroh | **High** | 1.0 shipped 2026-06-15 and 1.2.0 is current. It gives authenticated, end-to-end encrypted QUIC, mDNS on the LAN, and datagrams. |
-| UI with iced + iced-m3 | **Medium-high** | They resolve and compile together (iced 0.14.0 + iced-m3 0.1.0-beta.2). iced-m3 is a very new beta. |
+| UI with iced + iced-m3 | **Medium-high** | iced 0.14.0 + iced-m3 0.1.0-beta.6, with official offline Material Symbols. iced-m3 remains a beta. |
 | Clipboard (text, images) | **High, except GNOME Wayland** | `arboard` and `clipboard-rs` cover it. GNOME needs the portal Clipboard API. |
 | File drag-and-drop | **Low for fully native, high for simplified** | No open-source KVM has shipped reliable cross-machine drag-and-drop. Do it in phases (§8). |
 
@@ -46,7 +46,7 @@ The spikes were removed on 2026-09-30, once the real crates covered what they te
 | `iroh-mdns-address-lookup` | 0.5.0 | mDNS was moved out of core iroh in 1.0. Still 0.x, and it already had a breaking change in August. |
 | `iroh-tickets` | 1.0.0 | Compact, QR-friendly strings that encode an endpoint's address. |
 | `iced` | 0.14.0 | Still the latest release. 0.14.x subcrate patches are still landing. Uses winit 0.30.13. |
-| `iced-m3` | 0.1.0-beta.2 | Pins `iced = "=0.14.0"`, so the app is locked to that exact iced version. |
+| `iced-m3` | 0.1.0-beta.6 | Pins `iced = "=0.14.0"`. The optional `material-symbols` feature supplies all application and tray icons. See [the upgrade notes](docs/iced-m3-upgrade.md). |
 | `tray-icon` / `muda` | 0.25.1 / 0.20 | 0.25 adds a GTK-free Linux backend (`ksni`). |
 | `objc2-core-graphics` / `objc2-app-kit` | 0.3.2 | macOS event taps, event posting, cursor warping, pasteboard. |
 | `windows` | 0.62.2 | Windows low-level hooks, Raw Input, `SendInput`, OLE. |

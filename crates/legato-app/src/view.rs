@@ -3,9 +3,10 @@
 use iced::widget::{Space, canvas, column, container, responsive, row, scrollable};
 use iced::{Alignment, Length, Size};
 use iced_m3::dialog::{dialog, modal};
+use iced_m3::material_symbols::{Fill, IconName, Style, Symbol};
 use iced_m3::{
     ButtonSize, ButtonVariant, Element, MenuItem, NavigationItem, TypeScale, app_bar, badged,
-    button, button_group, card, icon, icon_button, list, list_item, loading_indicator, menu,
+    button, button_group, card, icon_button, list, list_item, loading_indicator, menu,
     navigation_rail, slider, snackbar, split_button, switch, typography,
 };
 use legato_core::Layout;
@@ -16,7 +17,6 @@ use legato_proto::format_pairing_code;
 
 use crate::Message;
 use crate::editor::{Editor, PeerBox};
-use crate::icons;
 use crate::model::{Model, Page, PairingStage, os_name};
 
 pub fn root(m: &Model) -> Element<'_, Message> {
@@ -28,7 +28,7 @@ fn window_contents(m: &Model, size: Size) -> Element<'_, Message> {
     let can_expand = size.width >= 900.0;
     let expanded = m.rail_expanded && can_expand;
     let header: Element<'_, Message> = if can_expand {
-        icon_button(icon(icons::menu()))
+        icon_button(Symbol::new(IconName::Menu).style(Style::Rounded))
             .on_press(Message::ToggleRail)
             .into()
     } else {
@@ -36,10 +36,14 @@ fn window_contents(m: &Model, size: Size) -> Element<'_, Message> {
     };
     let rail = navigation_rail(
         [
-            NavigationItem::new(Page::Devices, "Devices", icon(icons::devices())),
-            NavigationItem::new(Page::Arrangement, "Arrangement", icon(icons::arrangement())),
-            NavigationItem::new(Page::Settings, "Settings", icon(icons::settings())),
-        ],
+            (Page::Devices, "Devices", IconName::Devices),
+            (Page::Arrangement, "Arrangement", IconName::Dashboard),
+            (Page::Settings, "Settings", IconName::Settings),
+        ]
+        .map(|(page, label, name)| {
+            let symbol = Symbol::new(name).style(Style::Rounded);
+            NavigationItem::new(page, label, symbol).selected_icon(symbol.fill(Fill::Filled))
+        }),
         Some(m.page),
     )
     .header(header)
