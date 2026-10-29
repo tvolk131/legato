@@ -2305,13 +2305,25 @@ dependencies = [
 
 [[package]]
 name = "iced-m3"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a98295a5439c7c620bcbfcf6fb73b9599fb8b6b71205834e9fe64cea52c194e7"
+checksum = "76dcd660ec0b4c39dcecb2b7009d23ecb4c61aa2a2e882eb44bd7327e168adfc"
 dependencies = [
  "iced",
+ "iced-m3-material-symbols",
  "material-colors",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "iced-m3-material-symbols"
+version = "0.1.0-beta.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fe98fed761e7a25d9db73cd283c48996460e3bd23bd830a9a6d67599e02dcb6"
+dependencies = [
+ "flate2",
+ "iced_core",
+ "serde_json",
 ]
 
 [[package]]
@@ -3108,6 +3120,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "png 0.18.1",
+ "resvg",
  "rfd",
  "tempfile",
  "tokio",
@@ -5717,15 +5730,15 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.145"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c"
 dependencies = [
  "itoa",
  "memchr",
+ "ryu",
  "serde",
  "serde_core",
- "zmij",
 ]
 
 [[package]]
@@ -8150,12 +8163,6 @@ name = "zlib-rs"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
-
-[[package]]
-name = "zmij"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zune-core"

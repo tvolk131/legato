@@ -47,7 +47,7 @@ impl Tray {
             &PredefinedMenuItem::separator(),
             &quit,
         ])?;
-        let (rgba, w, h) = crate::icons::tray_rgba();
+        let (rgba, w, h) = crate::icons::tray_rgba()?;
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("Legato")

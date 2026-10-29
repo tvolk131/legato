@@ -151,6 +151,10 @@ themes; display options retain visible actions while scrolling and accurate stre
 The app's UI tests drive the real views headlessly with `iced_test` and compare each screen, pixel for pixel, with a golden image in `crates/legato-app/src/snapshots/`. These screens are covered: devices, the expanded navigation rail, the "Add a device" dialog, the display options (also at the main window's default size, where they must fit without scrolling), pairing dialog, arrangement, settings, and the display viewer while it waits. They're drawn with the app's own theme (`app_theme`), which uses iced-m3's Expressive springs and shape feedback. The goldens show each screen at rest.
 
 Compact-layout regressions also render the supported 640×480 minimum, long device names, an expanded-rail preference at small and medium widths, and six paired devices. They check that device actions stay readable and clickable, controller selection preserves saved ID prefixes and works by keyboard beyond the visible menu items, and the arrangement canvas and unplaced-device instructions fit without overlapping. Selected cases use the dark theme; canvas-label tests cover Unicode names and displays too small to fit text.
+Navigation snapshots use official Rounded Material Symbols, with filled artwork for
+the selected destination. Check the native screen-sharing tray symbol separately on
+macOS and Windows; it is rasterized from the same embedded catalog rather than drawn
+by the UI snapshot renderer.
 - They're rendered with tiny-skia on the CPU. `.cargo/config.toml` sets `ICED_TEST_BACKEND=tiny-skia` so local runs match CI.
 - Device ids in the sample data are fixed, so nothing on screen changes between runs.
 - On a mismatch, the test writes the new rendering and a diff (changed pixels in red) to `target/snapshots/`. CI uploads them as an artifact.
