@@ -28,6 +28,7 @@ Push the cursor across the shared edge, and keep pushing a little past it. Touch
 
 - [RESEARCH.md](RESEARCH.md): feasibility research, architecture and decisions
 - [TESTING.md](TESTING.md): testing strategy
+- [macOS release signing](docs/macos-signing.md): credentials, notarization, and test builds
 
 ## License
 
