@@ -18,9 +18,13 @@ on:
       tag:
         description: Existing tag to (re)build
         required: true
+      publish:
+        description: Publish the packages to GitHub Releases (otherwise artifacts only)
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   # A newer push to main supersedes a cache warm-up that's still running; releases always
@@ -53,6 +57,19 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
+      - name: validate release tag
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Expected a version tag such as v0.3.0-alpha.31."
+            exit 1
+          fi
+          git show-ref --verify "refs/tags/$TAG"
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/$TAG^{commit}")" ]; then
+            echo "::error::The checked-out source does not match the requested tag."
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -70,7 +87,7 @@ jobs:
         with:
           # One cache per target, shared by main's warm-ups and the tags' releases.
           shared-key: release-${{ matrix.target }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: build
         shell: bash
         run: |
@@ -80,7 +97,7 @@ jobs:
           if [ -d crates/legato-app ]; then packages="$packages -p legato-app"; fi
           cargo build --locked --release $packages --target ${{ matrix.target }}
       - name: package (Windows)
-        if: runner.os == 'Windows' && github.ref != 'refs/heads/main'
+        if: runner.os == 'Windows' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
         shell: pwsh
         run: |
           $dir = "legato-$env:TAG-${{ matrix.name }}"
@@ -99,24 +116,112 @@ jobs:
           Copy-Item -Recurse licenses $dir/
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
       - name: package (macOS)
-        if: runner.os == 'macOS' && github.ref != 'refs/heads/main'
+        if: runner.os == 'macOS' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
+          set -euo pipefail
+          umask 077
+          for name in APPLE_CERTIFICATE_P12 APPLE_CERTIFICATE_PASSWORD APPLE_API_PRIVATE_KEY \
+                      APPLE_API_KEY_ID APPLE_API_ISSUER_ID APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing $name; macOS releases require signing and notarization."
+              exit 1
+            fi
+          done
+          if [[ ! "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "::error::APPLE_TEAM_ID must be the 10-character Apple Developer Team ID."
+            exit 1
+          fi
+
+          work="$(mktemp -d "$RUNNER_TEMP/legato-signing.XXXXXX")"
+          keychain="$work/signing.keychain-db"
+          cleanup() {
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -rf "$work"
+          }
+          trap cleanup EXIT
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$work/certificate.p12"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$work/notary.p8"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$work/certificate.p12" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$keychain_password" "$keychain" >/dev/null
+          identity="$(security find-identity -v -p codesigning "$keychain" |
+            awk -v team="($APPLE_TEAM_ID)" '/"Developer ID Application:/ && index($0, team) { print $2 }')"
+          if [[ ! "$identity" =~ ^[[:xdigit:]]{40}$ ]]; then
+            echo "::error::Expected exactly one valid Developer ID Application identity for APPLE_TEAM_ID."
+            exit 1
+          fi
+
+          umask 022
           dir="legato-$TAG-${{ matrix.name }}"
           out="target/${{ matrix.target }}/release"
           mkdir "$dir"
           cp "$out/legato" README.md LICENSE "$dir/"
           cp -R licenses "$dir/"
-          if [ -f "$out/legato-app" ]; then
-            app="$dir/Legato.app/Contents"
-            mkdir -p "$app/MacOS"
-            cp "$out/legato-app" "$app/MacOS/Legato"
-            sed "s/__VERSION__/${TAG#v}/" packaging/macos/Info.plist > "$app/Info.plist"
-            # Ad-hoc signature until there's a Developer ID.
-            codesign --force --deep --sign - "$dir/Legato.app"
+          app="$dir/Legato.app"
+          mkdir -p "$app/Contents/MacOS"
+          cp "$out/legato-app" "$app/Contents/MacOS/Legato"
+          version="${TAG#v}"
+          # Apple's bundle versions are numeric; the app and archive retain the full tag.
+          sed "s/__VERSION__/${version%%-*}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          plutil -replace CFBundleVersion -string "$GITHUB_RUN_NUMBER" "$app/Contents/Info.plist"
+          for item in "$dir/legato" "$app"; do
+            codesign --force --sign "$identity" --keychain "$keychain" \
+              --options runtime --timestamp "$item"
+            codesign --verify --strict --verbose=2 "$item"
+          done
+
+          # Notarize both the app and CLI. Apple accepts ZIPs, but not tar.gz archives.
+          ditto -c -k --keepParent "$dir" "$work/submission.zip"
+          diagnostics="$RUNNER_TEMP/legato-notarization"
+          mkdir -p "$diagnostics"
+          notary_auth=(--key "$work/notary.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID")
+          submit_exit=0
+          xcrun notarytool submit "$work/submission.zip" "${notary_auth[@]}" \
+            --wait --timeout 45m --output-format json > "$diagnostics/submission.json" || submit_exit=$?
+          cat "$diagnostics/submission.json"
+          submission_id="$(plutil -extract id raw -o - "$diagnostics/submission.json" 2>/dev/null || true)"
+          if [ -n "$submission_id" ]; then
+            xcrun notarytool log "$submission_id" "${notary_auth[@]}" "$diagnostics/log.json"
+            cat "$diagnostics/log.json"
           fi
+          status="$(plutil -extract status raw -o - "$diagnostics/submission.json" 2>/dev/null || true)"
+          if [ "$submit_exit" -ne 0 ] || [ "$status" != Accepted ]; then
+            echo "::error::Apple did not accept this submission; see the notarization diagnostics."
+            exit 1
+          fi
+          xcrun stapler staple "$app"
           tar czf "$dir.tar.gz" "$dir"
+
+          # Validate the actual download after extracting it, including the stapled ticket.
+          mkdir "$work/verify"
+          tar xzf "$dir.tar.gz" -C "$work/verify"
+          verified="$work/verify/$dir"
+          codesign --verify --strict --verbose=2 "$verified/legato"
+          codesign --verify --deep --strict --verbose=2 "$verified/Legato.app"
+          xcrun stapler validate "$verified/Legato.app"
+          spctl --assess --type execute --verbose=2 "$verified/Legato.app"
       - uses: actions/upload-artifact@v7
-        if: github.ref != 'refs/heads/main'
+        if: always() && runner.os == 'macOS' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+        with:
+          name: macos-notarization-diagnostics
+          path: ${{ runner.temp }}/legato-notarization/*.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
         with:
           name: ${{ matrix.name }}
           path: |
@@ -126,8 +231,10 @@ jobs:
 
   publish:
     needs: build
-    if: github.ref != 'refs/heads/main'
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -136,6 +243,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          # Platform names end in x64/arm64; keep notarization logs out of the release.
+          pattern: '*64'
       - name: create or update the prerelease
         env:
           GH_TOKEN: ${{ github.token }}
