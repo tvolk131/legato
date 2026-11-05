@@ -113,7 +113,8 @@ jobs:
             Copy-Item $out/legato.exe $dir/
           }
           Copy-Item README.md, LICENSE $dir/
-          Copy-Item -Recurse licenses $dir/
+          # Older tags predate the bundled third-party assets and their notices.
+          if (Test-Path licenses) { Copy-Item -Recurse licenses $dir/ }
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
       - name: package (macOS)
         if: runner.os == 'macOS' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
@@ -170,7 +171,8 @@ jobs:
           out="target/${{ matrix.target }}/release"
           mkdir "$dir"
           cp "$out/legato" README.md LICENSE "$dir/"
-          cp -R licenses "$dir/"
+          # Older tags predate the bundled third-party assets and their notices.
+          if [ -d licenses ]; then cp -R licenses "$dir/"; fi
           app="$dir/Legato.app"
           mkdir -p "$app/Contents/MacOS"
           cp "$out/legato-app" "$app/Contents/MacOS/Legato"
