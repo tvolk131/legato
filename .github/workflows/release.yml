@@ -1,6 +1,6 @@
-# Publishes a GitHub prerelease with downloadable binaries when a version tag is pushed,
+# Publishes a GitHub release with downloadable binaries when a version tag is pushed,
 # e.g. `git tag v0.1.0-alpha.1 && git push origin v0.1.0-alpha.1`. Release notes come from
-# docs/releases/<tag>.md if it exists.
+# docs/releases/<tag>.md if it exists. Tags with a prerelease suffix stay prereleases.
 #
 # Pushes to main run the same builds but only to fill the cache: a tag's run can restore
 # caches made on main (not ones from other tags), so a release then only rebuilds
@@ -73,6 +73,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: validate release versions
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/legato-metadata.json"
+          if ! jq -e --arg version "${TAG#v}" \
+              '.packages | length > 0 and all(.version == $version)' \
+              "$RUNNER_TEMP/legato-metadata.json" >/dev/null; then
+            echo "::error::Release tag $TAG must match every workspace package version."
+            jq -r '.packages[] | "\(.name): \(.version)"' "$RUNNER_TEMP/legato-metadata.json"
+            exit 1
+          fi
       # Real-time scanning of every file the compiler writes slows Windows builds a lot.
       - name: keep Defender out of the build (Windows)
         if: runner.os == 'Windows'
@@ -249,15 +261,19 @@ jobs:
           merge-multiple: true
           # Platform names end in x64/arm64; keep notarization logs out of the release.
           pattern: '*64'
-      - name: create or update the prerelease
+      - name: create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes="docs/releases/$TAG.md"
           [ -f "$notes" ] || { echo "Build of $TAG." > /tmp/notes.md; notes=/tmp/notes.md; }
           assets=(dist/*.zip dist/*.tar.gz)
+          prerelease=false
+          if [[ "$TAG" == *-* ]]; then prerelease=true; fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${assets[@]}" --clobber
+            gh release edit "$TAG" --prerelease="$prerelease"
           else
-            gh release create "$TAG" "${assets[@]}" --prerelease --title "Legato $TAG" --notes-file "$notes"
+            gh release create "$TAG" "${assets[@]}" --verify-tag --prerelease="$prerelease" \
+              --title "Legato $TAG" --notes-file "$notes"
           fi
