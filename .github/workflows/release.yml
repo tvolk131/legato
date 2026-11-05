@@ -155,6 +155,8 @@ jobs:
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
+          # codesign requires the identity's keychain on the user's search list.
+          security list-keychains -d user -s "$keychain"
           security import "$work/certificate.p12" -k "$keychain" \
             -P "$APPLE_CERTIFICATE_PASSWORD" -f pkcs12 -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
