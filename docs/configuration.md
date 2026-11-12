@@ -39,10 +39,10 @@ be resolved). Files received for clipboard pasting use the system temporary dire
 under `legato-clipboard`. Do not delete that cache while its file list is still
 needed for pasting.
 
-Clipboard text is limited to 8 MiB, images to 8192×8192 pixels, and a copied-file
-batch to 512 MiB. Encoded clipboard blobs are also bounded by the protocol's
-64 MiB limit. Use an explicit send for larger file batches; explicit sends have
-no configured total-byte cap. They still depend on destination disk space.
+Clipboard text is limited to 8 MiB, images to 67,108,864 total pixels (8192×8192),
+and a copied-file batch to 512 MiB. Encoded clipboard blobs are also bounded by
+the protocol's 64 MiB limit. Use an explicit send for larger file batches; explicit
+sends have no configured total-byte cap. They still depend on destination disk space.
 
 ## Reporting a problem
 
