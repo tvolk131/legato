@@ -2,8 +2,9 @@
 //! other machines.
 //!
 //! The tap runs the [`Controller`] synchronously for every event and drops the ones it
-//! swallows. While the cursor is on another machine, the Mac's cursor is hidden and held
-//! in the middle of the main display; motion comes from the events' delta fields.
+//! swallows. While the cursor is on another machine, the Mac's cursor is hidden and
+//! warped to a park point. Real trackpads can still move it despite dropped events;
+//! motion uses per-event deltas, with a correction for the first event after a warp.
 
 use std::ffi::{CStr, c_void};
 use std::ptr::NonNull;
@@ -207,7 +208,8 @@ impl TapState {
             {
                 let (dx, dy) = self.motion(ev);
                 if self.pin.is_some() {
-                    // Dropped at the HID tap, so the hidden cursor doesn't move.
+                    // Forward per-event motion: dropping the event does not guarantee
+                    // the hidden cursor stays at the park point.
                     self.handle(Event::CapturedMotion {
                         delta: Point::new(dx, dy),
                     })

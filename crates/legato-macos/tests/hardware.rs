@@ -1,6 +1,6 @@
 //! Tests against the real window server. They move the cursor (and put it back), so they
 //! are ignored by default: `cargo test -p legato-macos -- --ignored --test-threads=1`.
-//! They need Accessibility access for the app running them.
+//! They need Accessibility and Input Monitoring access for the app running them.
 #![cfg(target_os = "macos")]
 
 use std::sync::Arc;

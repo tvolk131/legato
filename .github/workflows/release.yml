@@ -1,6 +1,9 @@
 # Publishes a GitHub release with downloadable binaries when a version tag is pushed,
 # e.g. `git tag v0.1.0-alpha.1 && git push origin v0.1.0-alpha.1`. Release notes come from
-# docs/releases/<tag>.md if it exists. Tags with a prerelease suffix stay prereleases.
+# docs/releases/<tag>.md if it exists. Tags must match workspace package versions.
+# Suffixed tags stay prereleases; unsuffixed tags create regular releases. Mac packages
+# require Developer ID signing and notarization. workflow_dispatch can build an existing
+# tag without publishing; see docs/macos-signing.md and docs/releases/0.3.0-plan.md.
 #
 # Pushes to main run the same builds but only to fill the cache: a tag's run can restore
 # caches made on main (not ones from other tags), so a release then only rebuilds

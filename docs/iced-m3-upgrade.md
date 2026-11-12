@@ -1,5 +1,8 @@
 # iced-m3 beta.4 → beta.6
 
+This is the historical beta.6 upgrade record, not a dependency-upgrade checklist.
+Check the current manifests and lockfile before applying its version-specific notes.
+
 Checked against crates.io on October 29, 2026. Legato pins `iced-m3` to
 `0.1.0-beta.6` and enables its optional `material-symbols` feature.
 
