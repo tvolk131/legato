@@ -45,7 +45,8 @@ pub struct ViewerStats {
     /// The longest wait between pictures while they were coming (pauses of more than a
     /// quarter of a second are the screen standing still, not a stutter).
     pub longest_gap: Duration,
-    /// Pictures the Mac skipped (the network backed up) or its encoder dropped.
+    /// Pictures superseded while waiting for the encoder, skipped under network
+    /// backpressure, or dropped by the encoder.
     pub skipped: u32,
     /// Adaptive quality: the picture shown is the smaller one sent while the screen
     /// moves.

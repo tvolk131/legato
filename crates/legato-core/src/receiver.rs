@@ -163,7 +163,8 @@ impl Receiver {
                     out.push(Inject::MoveTo { pos });
                 }
             }
-            // For the capture of a machine showing this one's display, not injection.
+            // Shared-pointer reports go to the capture/controller path for parking,
+            // handover and viewer alignment; they do not inject input here.
             Datagram::Pointer { .. } => {}
         }
     }

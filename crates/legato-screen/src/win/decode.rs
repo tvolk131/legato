@@ -1,5 +1,9 @@
 //! H.264 decoding with Media Foundation's built-in decoder, in low-latency mode (a frame
 //! comes out for every frame that goes in).
+//!
+//! A startup fixture checks D3D11 hardware decoding and NV12 readback. Setup or live
+//! decoding failures use software; a live failure keeps this track in software for
+//! the session. Decode timings include GPU wait and CPU readback/copy.
 
 use std::mem::ManuallyDrop;
 use std::time::Instant;

@@ -1,106 +1,60 @@
-# Testing strategy
+# Testing guide
 
-Target platforms are **macOS and Windows**, in both directions (Mac→Windows and Windows→Mac).
+Supported platforms are macOS 26+ on Apple silicon and Windows 11 on x64 and
+ARM64, in both directions. Builds require Rust 1.99+; current stable runs the
+platform suites and releases. The MSRV job only type-checks on Rust 1.99.
 
-Building from source requires **Rust 1.99 or newer**. CI checks the workspace with
-Rust 1.99 as the minimum supported Rust version (MSRV); platform tests and release
-builds use the current stable toolchain.
+## Current CI and local checks
 
-The approach:
-- Make most behaviour testable without a real OS.
-- Test the thin OS layers against one shared contract.
-- Keep a small two-machine lab for what only real hardware shows.
+[ci.yml](.github/workflows/ci.yml) runs on every PR, pushes to `main` and
+`release/**`, and manual dispatch. It has no documentation path filter.
 
-| Layer | What it catches | Runs | Where |
-|---|---|---|---|
-| 1. Pure core | Logic, state-machine, geometry, protocol and keymap bugs | Every PR | Any OS (fast) |
-| 2. In-process network | End-to-end event flow, loss/reorder, disconnects, version skew | Every PR | Any OS |
-| 3. OS conformance | Regressions in each OS backend (injection, capture, swallowing) | Every PR | GitHub-hosted `macos-latest` + `windows-latest` |
-| 4. Cross-OS lab | Mac↔Windows interop, keyboard layouts, devices, displays, feel | Per milestone + pre-release | Real MacBook + triple-monitor Windows PC (manual, and test-harness mode) |
+| Job | Current coverage |
+| --- | --- |
+| Formatting on Ubuntu | `cargo fmt --all --check`; no Linux application support or platform tests |
+| macOS, Windows x64, Windows ARM64 | Workspace Clippy/tests with warnings denied |
+| Selected platform tests | Ignored macOS/Windows input tests; Windows app GPU/presentation tests using DX12 WARP |
+| Rust 1.99 on macOS | `cargo check --locked --workspace` |
 
----
+Run appropriate checks locally from the repository root:
 
-## 0. Design for testability (prerequisite)
+```sh
+cargo fmt --all --check
+RUSTFLAGS='-D warnings' cargo clippy --locked --workspace --all-targets
+RUSTFLAGS='-D warnings' cargo test --locked --workspace
+```
 
-- **Thin OS layers behind traits:** `Capture`, `Emulate`, `Clipboard`, `Displays`. They exchange platform-neutral types:
-  - keys as USB HID usage codes
-  - positions in the receiving machine's coordinates, with an explicit scale factor
-  - scroll in units of 120 plus a pixel variant
-  - buttons as an enum
-- **A pure, deterministic core** that never touches the OS. It holds:
-  - the edge and switch state machine, and the virtual cursor
-  - layout geometry and DPI scaling
-  - held-key and held-button tracking, release-all
-  - modifier remapping (Cmd↔Ctrl)
-  - key-repeat policy
-  - clipboard sync and echo suppression
-- **An injectable clock** (`trait Clock`), so dwell times, heartbeat timeouts and repeat timers can be tested without sleeping.
-- **Tag every injected event:** `kCGEventSourceUserData` on macOS, `dwExtraInfo` on Windows. Capture uses the tag to ignore its own injected events, and tests can turn that filter off so a test can inject and then capture.
-- **An injectable transport:** the session talks to a `Transport` trait. Production uses iroh; tests use an in-memory implementation with fault injection.
+On PowerShell set `$env:RUSTFLAGS = '-D warnings'` before the Cargo commands.
+Normal Mac tests include display enumeration and main-thread AppKit cursor reads;
+they need desktop access even though disruptive input/capture tests are ignored.
+Hosted runners' permission state and synthetic input do not establish real-device
+behavior. There is no self-hosted Windows runner.
 
----
+For a Windows API type-check from Mac, install the target and select crates that
+do not require native Windows build dependencies:
 
-## 1. Pure-core tests
+```sh
+rustup target add x86_64-pc-windows-msvc
+cargo check --locked --target x86_64-pc-windows-msvc -p legato-windows -p legato-screen
+```
 
-**Property tests (`proptest`)** over random sequences of input events, edge crossings, disconnects and timeouts. These invariants must always hold:
-- After `Leave`, disconnect or heartbeat timeout, the other machine holds **zero** keys or buttons.
-- Every key-up and button-up goes to the **same machine** as its matching down, even if a switch happened in between.
-- The virtual cursor always stays inside the other machine's screen rectangles.
-- Locally, events are either swallowed or passed through, never both, and never forwarded while the mode is `Local`.
-- OS auto-repeat events are never forwarded. Only the receiving side repeats.
+Full app/engine Windows builds belong in the hosted Windows environment. A
+cross-check is not a Windows runtime test.
 
-**Geometry fixtures.** Save `display-info` dumps from real setups as JSON fixtures:
-- a laptop alone
-- a laptop plus an external monitor at mixed DPI
-- stacked monitors
-- offset monitors with gaps
-- a rotated monitor
-- Windows at 150% scaling next to a Retina Mac
+## Current regression coverage
 
-Table-driven tests on these fixtures check:
-- which edges are outer edges versus boundaries between local monitors
-- how an entry point maps onto the other machine's screen
-- speed scaling across DPI
-- clamping inside gaps between monitors
+Pure core tests exercise layout geometry, shared-pointer handover/parking, portals,
+held input, key mapping, repeat timing, control policies, and Caps Lock. Protocol
+messages round-trip through postcard; proptest feeds arbitrary bytes to decoders.
+Leaving or disconnecting releases remote keys/buttons and drops their routes;
+later physical releases are swallowed rather than sent to a newly active target.
+`Enter` carries position/sequence only; Caps Lock has separate synchronization.
 
-**Keymap table.**
-- Every macOS virtual keycode and Windows set-1 scancode (including E0-extended keys) must round-trip through the HID code.
-- Keys that exist on only one OS (Fn, Menu/App, Insert, PrtSc, ISO/JIS extras) go in an explicit, reviewed allowlist.
-- Snapshot the whole table with `insta` so any change is visible in review.
-- Test the Cmd↔Ctrl and Option↔Alt remap tables separately.
-
-**Wire protocol.**
-- Round-trip every message type with serde/postcard.
-- Fuzz the decoder with `cargo-fuzz`: every frame decoder and the datagram parser. They parse input from the network.
-- Version compatibility: commit the encoded bytes of each message type for every release to `tests/fixtures/proto/vN/`. Version N must decode version N−1 fixtures, or reject them with a clear version error. Never let an old fixture crash the decoder.
-
-**Record and replay.**
-- Add a debug `--record` flag that writes the raw captured event stream, with timestamps, to a file.
-- Record real devices: Magic Trackpad (continuous scroll plus momentum), Magic Mouse, a Windows precision touchpad, a 1 kHz gaming mouse, and fast typing including chords.
-- Replay those recordings through the core and snapshot what goes out on the wire. That's how you catch "scrolling feels wrong" bugs.
-
----
-
-## 2. In-process network tests
-
-- Run two real iroh endpoints in one test, as `legato-net`'s tests do: a scripted fake `Capture` on one side and a recording fake `Emulate` on the other. Assert that the emulator received the exact expected sequence.
-- **Fault injection** through an in-memory `Transport`:
-  - drop, duplicate, reorder and delay datagrams
-  - add jitter
-  - stall the control stream
-  - Assert that motion stays correct because newer positions supersede older ones, and that keys and buttons are never lost.
-- **Disconnect cases:**
-  - Kill the connection while a key is held: the other machine releases it.
-  - Hit the heartbeat timeout: the controlling machine returns to `Local`.
-  - Reconnect: the session resumes cleanly, with no duplicated `Enter`.
-- **Version skew:** CI builds the previous release tag and runs the suite with the controlling machine at N and the other at N−1, and the reverse. This covers ALPN negotiation and graceful refusal.
-- **Pairing:**
-  - Both sides derive the same 6-digit code.
-  - An unpaired `EndpointId` is rejected on the session ALPN.
-  - The pairing ALPN is rate-limited.
-  - A revoked peer is rejected on its next connection.
-
----
+Loopback tests use real iroh endpoints for pairing acceptance/listening gates,
+rejection of unpaired sessions, input, clipboard/file/video transport, updated
+screens, cursor shapes, and failed persistence. They do not run a previous-release
+matrix or an injectable loss/reorder transport. Pairing has one-at-a-time gating
+and timeouts, not an attempt-rate limiter.
 
 File receive regressions use isolated temporary directories and a real loopback transfer. They check that sanitized names and nested folders remain distinct, simultaneous receives never truncate existing files, batch ids are scoped to their sender, and a truncated transfer removes only its own partial file. These run with the normal engine tests.
 
@@ -108,36 +62,106 @@ Settings regressions exercise actual app actions and the config subscription: an
 
 Input-routing regressions use the injection thread's peer selector with the real core receiver, without injecting OS events. They cover delayed motion from the previous controller after a handover (including a higher sequence number), held-key/button release, unrelated peer disconnects, local takeover, leave, duplicate packets, and sequence wraparound. Peer pointer reports retain their separate capture/controller path.
 
-## 3. OS conformance suite (CI on hosted runners)
 
-GitHub-hosted `macos-latest` and `windows-latest` runners can inject input:
-- enigo runs its input integration tests on them.
-- Someone measured that `macos-14` runners grant Accessibility, and that `CGEventPost` moves the cursor there.
+### Live physical-display changes
 
-Write **one conformance suite, run against each backend**. Every OS backend must pass the same tests:
-- Inject key down/up for every allowlisted key; capture sees the same HID code and direction.
-- Inject an absolute move to (x, y); the cursor ends up within 1 px, per display.
-- A scroll of +120 produces one notch, and continuous pixel scroll arrives as pixels.
-- Button down, move, button up produces a drag (macOS: the `*MouseDragged` event types); two quick clicks produce a double-click.
-- While capture is in `Remote` mode, an injected event does **not** reach a focused test window.
-- A held key repeats at the local OS rate, from the receiving side's own repeat timer.
-- Modifier sync: after `Enter` with Shift set, typing `a` gives `A`.
-- Clipboard round-trips text (including CRLF/LF), HTML, a PNG and a file list.
+Display enumeration runs once a second off the sharing loop and updates the arrangement
+editor even while sharing is stopped. Tests inject resolution, DPI, origin and monitor
+count changes; empty/transient enumeration retains the last usable desk. Core tests
+preserve a held drag's native peer position when the shared layout moves, clamp the local
+return point after unplugging, and cross at the new edge. Loopback tests verify updated
+screens reach both an existing session and the next handshake. Legato's Mac virtual
+display remains excluded by the platform enumerator.
 
-Setup notes:
-- Verify with a tiny iced/winit test window that logs key codes, characters, mouse positions and scroll deltas.
-- Run with `--test-threads=1`, because all tests share the global cursor.
-- Gate the suite behind a `desktop-tests` feature (or `#[ignore]`) so plain `cargo test` stays headless.
+Hardware check: while sharing, unplug/reconnect a monitor and change its resolution,
+scale and placement. Check both arrangement editors, cross each changed edge, repeat
+while driving the other machine, and check an open viewer's alignment. Also change a
+monitor with sharing stopped, then start sharing. Hosted tests do not simulate OS hotplug.
 
-Limits: runners are single-display VMs with no real input devices, and their permission state (TCC) differs from users' machines. This is a regression net, not proof the app feels right.
+Native capture also re-pins its hidden cursor when local displays change during a remote
+visit. A Windows unit test supplies a moved/shrunken primary monitor, verifies the new
+pin effect without making OS calls, and checks that the next hook movement sends only
+its four-by-three-pixel delta while preserving the held drag. Repeated unchanged layouts
+must not re-pin. The core regression covers preserving the peer position and ending a
+visit safely if its configured anchor disappears; the native effect also reinitializes
+macOS's first-motion-after-warp handling.
 
-### Connecting from anywhere (needs the internet, ignored by default)
+Viewer-placement regressions change the peer's desk position and native client rectangle
+without resizing the viewer. The new placement must be sent; identical placements and
+macOS nudges must not repeat requests. The arrangement editor's actual canvas handler is
+tested dragging out of and back through all four edges with a nonzero canvas origin.
 
-`cargo test -p legato-net -- --ignored` runs two tests with mDNS off, using n0's public relays and DNS:
-- **Without the local network:** two paired devices restart knowing nothing about each other's addresses. They must find each other through n0's DNS and connect, first through a relay. Takes about 0.3 s.
-- **Moving networks:** one device drops off and comes back at a new address while the other keeps running, once as the side that dials and once as the side that waits. Each reconnects in about 3.5 s.
+### Confirmed file saves and failed batches
 
-Neither can reproduce a real Wi-Fi switch, which leaves the old connection silently dead rather than closed. For that, look in `legato-app.log`: it records every connect and disconnect with its path and reason, and whether the machine is reachable through a relay.
+Protocol 11 moves files to bidirectional streams: the receiver acknowledges only after
+writing and flushing the destination. Both machines need this protocol version. Loopback
+tests prove that delivery alone does not complete a send and that destination creation,
+write, flush, missing-acknowledgment and connection failures report failure. Truncated
+files are removed without touching existing or successfully received files.
+
+Batch tests cover cancellation during a stalled transfer, disconnect cleanup, late
+headers/completions, and a source disappearing after the first file was saved. Incomplete
+clipboard batches never become ready to paste; completed files are kept on disk. Sender
+cancellation also notifies the receiver when the send future is dropped.
+
+### Folder traversal and links
+
+Transfers resolve links within each selected folder, preserving their relative names.
+Nested links outside the selection, ancestor cycles and dangling links fail the scan
+before any files are sent. Explicitly selecting a link selects its target. Canonical
+manifest paths prevent changing an alias after scanning from redirecting that entry.
+This is not a filesystem snapshot: moving/replacing source files can still fail a send.
+
+The same background scan prepares explicit sends, drops and clipboard files, with the
+clipboard size limit checked against that manifest. Cross-platform tests create file
+and directory links, exercise repeated internal targets and rejected traversal, and
+retarget an alias after scanning. A deterministic current-thread-runtime test blocks
+the scanner while another async task continues; limit and overflow tests use manifests
+without allocating large files.
+
+### Empty directories in transfers
+
+Protocol 12 distinguishes a directory from a zero-byte file. Loopback tests send mixed
+folders and entirely empty selections through Send, Drop, and Clipboard, preserving
+nested empty directories, empty files, existing destinations, and batch completion.
+Reservation tests also cover sanitized directory-name collisions and directory entries
+arriving after their children. Both peers must use the updated protocol.
+
+## Opt-in tests
+
+Read each test's prerequisites before running it on a user's desktop. Input tests
+can move the cursor, type, change Caps Lock, and interact with foreground windows;
+clipboard tests modify real contents. Run disruptive suites serially. Permissions
+must belong to the responsible process running this build.
+
+| Command (all start with `cargo test --locked`) | Current CI? | Prerequisites / effects |
+| --- | --- | --- |
+| `-p legato-macos -- --ignored --test-threads=1` | macOS | Accessibility and Input Monitoring; cursor, keys, Caps Lock |
+| `-p legato-windows -- --ignored --test-threads=1 --nocapture` | Windows x64/ARM64 | Interactive desktop; cursor, keyboard, Caps Lock, test windows |
+| `-p legato-app gpu_renders -- --ignored --nocapture` | Windows x64/ARM64 | `ICED_TEST_BACKEND=wgpu`, `WGPU_BACKEND=dx12`; WARP rendering/presentation |
+| `-p legato-net -- --ignored` | No | Public relays/DNS; Unix silent-drop case starts/freezes helper processes |
+| `-p legato-cli --test receive_e2e -- --ignored --test-threads=1` | No | Mac, Accessibility and Input Monitoring; launches real CLI and moves cursor |
+| `-p legato-cli --test clipboard_e2e -- --ignored --test-threads=1` | No | Mac; launches CLI, writes clipboard and restores original text |
+| `-p legato-screen --test mac_display -- --ignored --test-threads=1` | No | Mac; creates/removes a virtual display |
+| `-p legato-screen --test mac_display_dpi -- --ignored --test-threads=1` | No | Mac/AppKit; changes display modes and arrangement, reopens displays |
+| `-p legato-screen --test mac_stream -- --ignored --test-threads=1` | No | Mac Screen Recording; creates display and captures/encodes it |
+| `-p legato-screen --release --test mac_encoder -- --ignored --nocapture` | No | Mac hardware encoder/scaling benchmarks |
+| `-p legato-screen --release --test win_decode hardware_decodes_the_mac_stream_without_fallback -- --ignored --nocapture` | No | Physical Windows GPU; requires hardware decode without fallback |
+
+### Connecting from anywhere
+
+The ignored network suite disables mDNS and uses n0's public relays and DNS:
+
+- Paired peers restart without cached addresses and find each other.
+- A peer closes and restarts at a new address while the other keeps running.
+- On Unix, a helper process is frozen to model a silently dead old connection;
+  a new process with the same identity must reconnect. `helper_node` is an ignored
+  subprocess entry point, not a separate connectivity scenario.
+
+These models do not replace a real Wi-Fi/Ethernet or hotspot switch. Save
+`legato-app.log` connection path, disconnect reason, and relay-reachability lines.
+
+## UI, display and platform coverage
 
 ### UI snapshots
 
@@ -249,9 +273,9 @@ The Mac encodes and Windows decodes, so the two ends are tested against each oth
 - **Decoder fallback (Windows, every PR):** run the fixture through automatic selection and forced software, then reset a used decoder after a simulated failure and decode from a fresh keyframe. Repeated recovery stays in software. Hosted runners do not verify physical GPU decoding.
 - **D3D11 readback (Windows, every PR):** WARP textures exercise Media Foundation's DXGI buffers, array-slice selection, staging reuse and resize, and visible pictures shorter than their textures. Pure buffer checks cover row padding, coded-height padding, invalid dimensions, and truncated data.
 - **Hardware decoder (Windows, ignored):** `cargo test -p legato-screen --release --test win_decode hardware_decodes_the_mac_stream_without_fallback -- --ignored --nocapture` requires the GPU startup check and color fixture to pass without fallback. For the actual 4K performance check, use Sharpest with sustained scrolling/window motion for a minute. Confirm `H.264 decoding: D3D11 hardware on ... (NV12 readback)` in the Windows log, compare F10 decode/total timings against alpha.26's roughly 13–15 ms decode, and check colors, text, adaptive quality, resize, close/reopen, and sleep/wake. Readback is included in decode time. A fallback reason in the log is an actionable result, not a hardware pass.
-- **Windows decode timing (alpha.29):** pure tests validate the five-second aggregation, per-input averages, independent maxima, counts, window reset, and separation after resolution/backend changes. Existing software-fixture and WARP readback checks cover the instrumented paths. On the PC, leave the Mac on alpha.28, run the Windows alpha.29 app, and open 4K **Sharpest** for about a minute with sustained scrolling/window motion, followed by a still interval. Save the backend line, several `H.264 decode timing` summaries, and an F10 screenshot. `input_ms` includes sample preparation and `ProcessInput`; `output_ms` times `ProcessOutput`; `gpu_wait_ms` spans staging-copy submission through blocking `Map`; `cpu_copy_ms` includes NV12 allocation and row copying. Values are averages per successful input, and `worst_*` values are independent maxima. `other_ms` is the remaining decoder overhead. Separate decoder ids/resolutions keep adaptive tracks distinguishable. GPU wait can include queued decoding, so do not call it pure transfer time. No extra GPU flush, synchronization query, or pipeline change is introduced. Actual RTX 3070 stage timings remain pending until the user runs the update.
+- **Windows decode timing (alpha.29):** pure tests validate the five-second aggregation, per-input averages, independent maxima, counts, window reset, and separation after resolution/backend changes. Existing software-fixture and WARP readback checks cover the instrumented paths. Run the same candidate build on both machines (their protocol versions must match), and open 4K **Sharpest** for about a minute with sustained scrolling/window motion, followed by a still interval. Save the backend line, several `H.264 decode timing` summaries, and an F10 screenshot. `input_ms` includes sample preparation and `ProcessInput`; `output_ms` times `ProcessOutput`; `gpu_wait_ms` spans staging-copy submission through blocking `Map`; `cpu_copy_ms` includes NV12 allocation and row copying. Values are averages per successful input, and `worst_*` values are independent maxima. `other_ms` is the remaining decoder overhead. Separate decoder ids/resolutions keep adaptive tracks distinguishable. GPU wait can include queued decoding, so do not call it pure transfer time. No extra GPU flush, synchronization query, or pipeline change is introduced. No physical RTX 3070 per-stage timing results are recorded; collect them on the current candidate.
 - **Virtual display (macOS, ignored):** the display appears with the requested point and pixel size and Legato's vendor and product ids. It switches to 144 Hz and to other sizes while shown (in about 0.2–0.3 s), and goes away when dropped. A process without an AppKit application can only show one virtual display in its lifetime (CoreGraphics stops reporting modes for later ones in that process), so each display test is in its own test binary.
-- **Virtual-display mode changes (macOS):** the normal suite checks mode matching against ambiguous 1080p, unscaled 4K, Retina 4K, and wrong-refresh descriptions. `cargo test -p legato-screen --test mac_display_dpi -- --ignored --nocapture` runs AppKit on the main thread while a worker creates and arranges displays, alternates 1080p/144 Hz and Retina 4K/60 Hz, changes refresh, and recovers from forced low-DPI and unscaled modes. It covers reopening both within one process and across fresh processes. AppKit matters: the CLI-only version reproduced a stale mode error, but the old implementation also recovers when AppKit processes notifications. This test validates supported transitions, not a reproduction of the user's persistent app failure. Confirm repeated resolution-option changes and reopening from the Windows viewer on the installed update.
+- **Virtual-display mode changes (macOS):** the normal suite checks mode matching against ambiguous 1080p, unscaled 4K, Retina 4K, and wrong-refresh descriptions. `cargo test -p legato-screen --test mac_display_dpi -- --ignored --nocapture` runs AppKit on the main thread while a worker creates and arranges displays, alternates 1080p/144 Hz and Retina 4K/60 Hz, changes refresh, and recovers from forced low-DPI and unscaled modes. It covers reopening both within one process and across fresh processes. AppKit matters: the CLI-only version reproduced a stale mode error, but the old implementation also recovers when AppKit processes notifications. This test validates supported transitions, not a reproduction of the user's persistent app failure. The user confirmed recovery on alpha.28 after installation and permission restoration, but the cause remains unproven. Recheck repeated resolution-option changes and reopening from the Windows viewer on the current candidate.
 - **Encode latency (macOS, ignored benchmark):** `cargo test -p legato-screen --release --test mac_encoder -- --ignored --nocapture`. On Apple silicon, each frame takes about 16 ms at 4K and 8 ms at 1440p when forced out right away. Left to itself, VideoToolbox keeps about five frames in flight (about 80 ms at 60 fps), so the stream waits for each frame.
 - **Scaling (macOS, every PR):** a picture scaled down on the GPU for adaptive quality keeps its colours and encodes. `scaling_latency` (ignored benchmark) times 4K scaled to 1080p and 1440p: about 3 ms either way.
 - **Adaptive quality (pure):** small changes stay on the sharp track, and so does a single big one; sustained movement switches to the moving track at once and back after 150 ms of stillness, with one touch-up later. The sharp track keeps to its frame rate without losing the last picture, keyframes go to the track asked for, and a picture held up by the network is sent once it clears. The viewer shows the newest picture of either track and merges both tracks' stats.
@@ -300,21 +324,15 @@ Lab checklist:
 
 ---
 
-## 4. Cross-OS lab
+## Manual two-machine lab
 
-**Hardware:**
-- The real MacBook and the triple-monitor Windows PC. There's deliberately **no self-hosted CI runner**. Windows builds come from hosted CI artifacts and are run by hand; later, the test-harness mode below reports results back over iroh.
-- A Windows VM on the Mac is fine for the day-to-day loop. Turn off the hypervisor's mouse integration, because it fights capture.
+Use the real MacBook and triple-monitor Windows PC, with the same candidate on
+both. A Windows VM helps iteration but cannot verify physical pointing devices or
+GPU decoding; disable its mouse integration when testing capture.
 
-**Test-harness mode** (debug builds only, on a separate ALPN such as `legato/test/1`). It reports:
-- cursor position and current screen
-- text typed into the harness window
-- clipboard contents
-- display configuration
-- held keys
-- diagnostics counters
-
-A driver on the controlling machine runs scripted scenarios in both directions and asserts on the state the other machine reports.
+The broader manual matrix below is a coverage goal, not a record of completed runs.
+The focused [0.3.0 hardware gates](docs/releases/0.3.0-plan.md#hardware-gates-before-final)
+are the release checklist.
 
 **Matrix:**
 
@@ -327,15 +345,15 @@ A driver on the controlling machine runs scripted scenarios in both directions a
 | Displays | Single, dual, mixed DPI, arranged left/right/above |
 | Network | Same Wi-Fi, Ethernet↔Wi-Fi, different networks (relay then direct), VPN on one side |
 
-**Layout typing test:** type every printable key on each layout pair, with and without Shift and Option/AltGr, and compare the harness's recorded characters against an expected table.
+**Layout typing test:** type every printable key on each layout pair, with and without Shift and Option/AltGr, and compare the typed characters against an expected table. A cross-machine automated harness is not implemented.
 
 **Mac vs Windows differences to test explicitly:**
 - coordinates: points vs physical pixels, and speed parity across DPI
 - natural-scrolling direction
-- Cmd↔Ctrl remapping
+- default Alt→Command and Win→Option remapping when driving Mac, and configured alternatives
 - double-click timing
 - text clipboard line endings (`\n` vs `\r\n`)
-- clipboard HTML (Windows CF_HTML has header offsets)
+- HTML clipboard support is not implemented; test only text, images and file lists
 - clipboard images (TIFF/PNG vs DIB)
 - **file names in transfers:**
   - `:` is legal on Mac but not on Windows
@@ -346,7 +364,7 @@ A driver on the controlling machine runs scripted scenarios in both directions a
   - Unicode normalisation (NFC vs NFD)
 
 **Exploratory checklist** (run before each release):
-- [ ] A focused macOS password field (Secure Input): switching is blocked and a warning shows
+- [ ] Test a focused macOS password field (Secure Input). Automatic switching prevention and a warning are not implemented; record actual behavior and loss of input as a validation gap.
 - [ ] A UAC prompt appears while controlling the Windows machine
 - [ ] Typing into an elevated window (Task Manager): expected failure mode and message
 - [ ] Sleep and wake on each side while connected
@@ -360,123 +378,47 @@ A driver on the controlling machine runs scripted scenarios in both directions a
 
 ---
 
-## 5. Latency, soak and field diagnostics
+## Future testing ideas (not implemented)
 
-**Latency.** The other machine echoes each `Motion.seq` back with its inject timestamp. The controlling machine then computes capture→inject→ack round trips without needing synchronised clocks.
-- Record p50/p99/max in each lab session, with and without a concurrent file transfer.
-- Alert if p99 regresses by more than 20%.
-- For a final feel check, film both screens with a 240 fps phone camera to get end-to-end latency.
+The following are proposals from the original testing strategy, not current CI or
+application capabilities:
 
-**Soak.** Run the lab overnight with randomised scripted input and switches. Check for:
-- no memory growth (iroh issues #4509/#4390 are relevant)
-- no dropped hooks or taps
-- no stuck keys
-- steady reconnect behaviour
+- Shared OS-backend conformance suite for injection/capture/scroll/drag/repeat.
+  Current native suites test selected cases separately. Modifier state on `Enter`
+  and HTML clipboard transport would first require implementation changes.
+- Injectable clock, platform traits and a transport that simulates datagram loss,
+  duplication, reordering, jitter and stalled streams.
+- Recorded physical-device event streams, a `--record` flag, and replay fixtures.
+- `cargo-fuzz` targets, nightly fuzzing/soaks, and previous-release compatibility
+  fixtures/matrix. Current decoder proptests are not a fuzzing job.
+- A debug cross-machine harness on a separate ALPN (for example `legato/test/1`)
+  that reports cursor, text, clipboard, displays and held keys. No such mode ships.
+- Input latency acknowledgments with inject timestamps, p50/p99 alerts, and a
+  diagnostics panel for loss, hook/tap failures and Secure Input. Current viewer
+  F10 timings and logs are separate diagnostics.
 
-**Built-in diagnostics counters,** shown in a debug panel and saved with logs. These are the silent failures users will report as "it randomly stopped working":
-- macOS event tap disabled (by timeout or by user input)
-- Windows low-level hook callback took over N ms, or the hook was re-registered
-- datagram loss %
-- reconnects
-- time spent on the relay vs a direct path
-- Secure Input blocks
+Manual overnight use can still look for memory growth, reconnect failures,
+disabled hooks/taps and stuck input. A high-frame-rate camera can measure visible
+end-to-end latency without implying an input-ack protocol exists.
 
----
+## Packaging and permissions on clean machines
 
-## 6. Packaging and permissions (clean machines)
+Test downloaded packages, not just development builds. Follow the
+[signing guide](docs/macos-signing.md) and
+[release plan](docs/releases/0.3.0-plan.md) for signed-install/upgrade gates.
 
-Permission behaviour depends on the signature and the install, so development builds won't reveal it.
-
-- **macOS:** use Tart VM snapshots (Apple silicon) with a fresh user, and test the signed and notarized build:
-  - the Accessibility prompt and flow, and relaunch after granting
-  - the Local Network prompt (bundled apps only; binaries run from Terminal are exempt)
-  - `LSUIElement` (no dock icon)
-  - launch at login
-  - an upgrade keeps the permission grant (same signing identity and bundle id)
-- **Windows:** use Hyper-V or UTM snapshots:
-  - the installer adds its firewall rule
-  - discovery on a "Public" network profile, where mDNS is blocked, shows the expected fallback message
-  - SmartScreen with a signed build
-  - launch at login
-  - uninstall removes the hooks, the autostart entry and the firewall rule
-
----
-
-## Suggested CI layout
-
-| Trigger | Jobs |
-|---|---|
-| Every PR | Layers 1 and 2 on Linux/macOS/Windows; layer 3 on `macos-latest` + `windows-latest`; clippy, fmt; a short fuzz smoke run (~60 s per target) |
-| Nightly (hosted) | Long fuzz runs; the full conformance suite on every hosted runner (macOS, Windows x64, Windows ARM64) |
-| Pre-release | Full lab matrix, the exploratory checklist, clean-machine packaging tests, the version-skew suite against the last two releases |
+- On a fresh Mac user or VM, test Accessibility, Input Monitoring, Screen Recording,
+  Local Network access, menu-bar-only behavior, launch at login and an upgrade
+  between two builds with the same signing team/bundle ID. Distinguish the first
+  ad-hoc-to-Developer-ID transition from signed-upgrade retention.
+- On Windows, test the extracted ZIP's app/CLI, firewall behavior on the intended
+  network profile, launch at login, and cleanup after quitting. There is no
+  installer or automatic firewall/uninstall workflow; Windows code signing is not
+  part of the current release workflow.
 
 ## References
 
 - [enigo integration workflow](https://github.com/enigo-rs/enigo/blob/main/.github/workflows/integration.yml)
-- [AutoControlGUI #482: macOS runner TCC measurements](https://github.com/Integration-Automation/AutoControlGUI/pull/482)
-- [runner-images #1567: Accessibility on macOS runners](https://github.com/actions/runner-images/issues/1567)
-- [Tart (macOS VMs)](https://github.com/cirruslabs/tart)
-
-### Live physical-display changes
-
-Display enumeration runs once a second off the sharing loop and updates the arrangement
-editor even while sharing is stopped. Tests inject resolution, DPI, origin and monitor
-count changes; empty/transient enumeration retains the last usable desk. Core tests
-preserve a held drag's native peer position when the shared layout moves, clamp the local
-return point after unplugging, and cross at the new edge. Loopback tests verify updated
-screens reach both an existing session and the next handshake. Legato's Mac virtual
-display remains excluded by the platform enumerator.
-
-Hardware check: while sharing, unplug/reconnect a monitor and change its resolution,
-scale and placement. Check both arrangement editors, cross each changed edge, repeat
-while driving the other machine, and check an open viewer's alignment. Also change a
-monitor with sharing stopped, then start sharing. Hosted tests do not simulate OS hotplug.
-
-Native capture also re-pins its hidden cursor when local displays change during a remote
-visit. A Windows unit test supplies a moved/shrunken primary monitor, verifies the new
-pin effect without making OS calls, and checks that the next hook movement sends only
-its four-by-three-pixel delta while preserving the held drag. Repeated unchanged layouts
-must not re-pin. The core regression covers preserving the peer position and ending a
-visit safely if its configured anchor disappears; the native effect also reinitializes
-macOS's first-motion-after-warp handling.
-
-Viewer-placement regressions change the peer's desk position and native client rectangle
-without resizing the viewer. The new placement must be sent; identical placements and
-macOS nudges must not repeat requests. The arrangement editor's actual canvas handler is
-tested dragging out of and back through all four edges with a nonzero canvas origin.
-
-### Confirmed file saves and failed batches
-
-Protocol 11 moves files to bidirectional streams: the receiver acknowledges only after
-writing and flushing the destination. Both machines need this protocol version. Loopback
-tests prove that delivery alone does not complete a send and that destination creation,
-write, flush, missing-acknowledgment and connection failures report failure. Truncated
-files are removed without touching existing or successfully received files.
-
-Batch tests cover cancellation during a stalled transfer, disconnect cleanup, late
-headers/completions, and a source disappearing after the first file was saved. Incomplete
-clipboard batches never become ready to paste; completed files are kept on disk. Sender
-cancellation also notifies the receiver when the send future is dropped.
-
-### Folder traversal and links
-
-Transfers resolve links within each selected folder, preserving their relative names.
-Nested links outside the selection, ancestor cycles and dangling links fail the scan
-before any files are sent. Explicitly selecting a link selects its target. Canonical
-manifest paths prevent changing an alias after scanning from redirecting that entry.
-This is not a filesystem snapshot: moving/replacing source files can still fail a send.
-
-The same background scan prepares explicit sends, drops and clipboard files, with the
-clipboard size limit checked against that manifest. Cross-platform tests create file
-and directory links, exercise repeated internal targets and rejected traversal, and
-retarget an alias after scanning. A deterministic current-thread-runtime test blocks
-the scanner while another async task continues; limit and overflow tests use manifests
-without allocating large files.
-
-### Empty directories in transfers
-
-Protocol 12 distinguishes a directory from a zero-byte file. Loopback tests send mixed
-folders and entirely empty selections through Send, Drop, and Clipboard, preserving
-nested empty directories, empty files, existing destinations, and batch completion.
-Reservation tests also cover sanitized directory-name collisions and directory entries
-arriving after their children. Both peers must use the updated protocol.
+- [Hosted Mac TCC measurements](https://github.com/Integration-Automation/AutoControlGUI/pull/482)
+- [Runner Accessibility discussion](https://github.com/actions/runner-images/issues/1567)
+- [Tart macOS VMs](https://github.com/cirruslabs/tart)

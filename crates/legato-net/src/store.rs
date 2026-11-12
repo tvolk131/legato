@@ -1,8 +1,7 @@
 //! On-disk state: this machine's identity key and the list of paired peers.
 //!
-//! The identity key is kept in a file readable only by the current user. It moves to the
-//! OS keychain once builds are signed: on macOS, every unsigned rebuild would otherwise
-//! trigger a keychain access prompt.
+//! The identity key is kept in a file readable only by the current user. OS keychain
+//! storage is not implemented. Developer ID signing does not migrate existing keys.
 
 use std::collections::HashSet;
 use std::fs;

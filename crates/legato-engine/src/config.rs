@@ -149,8 +149,9 @@ impl Default for Extend {
 }
 
 impl Extend {
-    /// What to ask the Mac for to show a display of about `width`×`height` pixels: a
-    /// size the pipeline takes, and no faster than the Mac can encode at that size.
+    /// What to ask the Mac for to show about `width`×`height` pixels, preserving the
+    /// chosen display refresh rate. The host separately limits the stream's frame rate
+    /// to what it can encode at the requested stream size.
     pub fn request_for(&self, width: u32, height: u32) -> legato_proto::ExtendRequest {
         use legato_core::extend::{fit_within, prefers_hidpi, usable_size};
         let (width, height) = usable_size(width, height);

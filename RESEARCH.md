@@ -1,12 +1,22 @@
 # Legato: feasibility research
 
-Researched 2026-09-24. Versions are the latest on crates.io on that date. The code in `spikes/` was compiled and run on macOS arm64 only. Nothing has been built or run on Windows or Linux yet.
+Research began on 2026-09-24, with later implementation and investigation notes.
+The original spikes ran on macOS arm64; current CI also tests Windows x64 and
+ARM64. Dependency candidates and Linux/X11/Wayland material below are historical
+research, not a supported-platform or installed-dependency list.
+
+For the implemented crate map, protocol, and runtime behavior, read
+[the current architecture](docs/architecture.md). Use [TESTING.md](TESTING.md) for
+actual checks and [the release plan](docs/releases/0.3.0-plan.md) for readiness.
+Sections 1–13 retain original proposals where marked; §4.5–4.7 and §14 record
+subsequent implementation lessons. Historical proposals do not imply a feature
+or test exists.
 
 The spikes were removed on 2026-09-30, once the real crates covered what they tested. The paths below are in git history, up to commit `53bc624`.
 
 ---
 
-## Decisions so far (2026-09-24)
+## Project decisions (reconciled November 2026)
 
 | Topic | Decision |
 |---|---|
@@ -15,11 +25,11 @@ The spikes were removed on 2026-09-30, once the real crates covered what they te
 | License | MIT. We can't depend on lan-mouse (GPL-3.0) crates; it's a clean-room reference only. |
 | Control model | A setting, switchable at runtime: **follow input** (whichever machine's keyboard or mouse you touch takes over) or **designated controller**. That means a symmetric core: every machine runs capture *and* emulation, and the layout is replicated to all peers. |
 | Discovery and connectivity | Automatic LAN discovery via mDNS, with no copy/paste or QR. Paired peers connect both locally and remotely (mDNS + pkarr/DNS + relay). |
-| Identity key storage | OS keychain (macOS Keychain / Windows Credential Manager) via the `keyring` crate. |
-| macOS signing | No Apple Developer ID yet. The CLI phase runs from Terminal; bundled dev builds use a self-signed certificate. |
+| Identity key storage | A private `identity.key` file. OS keychain migration is not implemented. |
+| macOS signing | Current release workflow requires Developer ID signing and notarization; older published alphas were ad-hoc signed. Signed-upgrade permission retention needs hardware validation. |
 | Name | **Legato**, repo `tvolk131/legato`. Renamed from the working name "synergy-rs" because Synergy is a Symless trademark. |
-| Primary use case | A triple-monitor **Windows PC drives a MacBook**, using the Windows keyboard and mouse. Build Windows capture + macOS injection first. macOS capture only needs to detect local input so it can hand control back; Windows injection comes later. |
-| Future: virtual monitor | **macOS shown on Windows** (§14). The inverse and all Linux support are skipped. |
+| Primary use case | A triple-monitor **Windows PC drives a MacBook**, using the Windows keyboard and mouse. Capture and injection now work in both directions. |
+| Virtual monitor | **macOS shown on Windows** (§14). The inverse and all Linux support are skipped. |
 
 ---
 
@@ -64,36 +74,11 @@ The spikes were removed on 2026-09-30, once the real crates covered what they te
 
 ## 3. Architecture
 
-```
-┌──────────────────────────────── one process ────────────────────────────────┐
-│  main thread: iced::daemon (tray icon, settings window, iced-m3 widgets)    │
-│        ▲ Subscription::run(stream::channel)       │ commands (mpsc)          │
-│        │ events: peers, status, layout            ▼                          │
-│  ┌─────────────────────── engine (own tokio runtime) ───────────────────┐   │
-│  │  session state machine · layout model · clipboard sync · file xfer   │   │
-│  │  iroh Endpoint + Router (ALPN "legato/1", "legato/pair/1")           │   │
-│  └──────▲───────────────────────────────────────────────┬──────────────┘   │
-│         │ lock-free channel (+ shared atomic mode flag)  │                  │
-│  ┌──────┴──────────────┐                     ┌───────────▼─────────────┐    │
-│  │ capture thread      │                     │ emulation               │    │
-│  │ CGEventTap run loop │                     │ CGEventPost / SendInput │    │
-│  │ / LL-hook msg loop  │                     │ / XTest / libei / uinput│    │
-│  │ / XI2 / libei recv  │                     └─────────────────────────┘    │
-│  └─────────────────────┘                                                    │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-- **Hooks get their own OS threads.** macOS event taps need a CFRunLoop, and Windows low-level hooks need a message loop. Windows silently removes a hook whose callback takes longer than about 1 s, and macOS disables taps on timeout. So the hook callbacks do constant-time work and push events to a channel.
-- **The "swallow or pass through" decision is synchronous.** The hook has to return its verdict immediately and can't `await` the engine. The current mode (`Local`, or `Remote(peer)`) must therefore live in an atomic that the hook thread can read.
-- **Engine and UI are separate.** Keep a clean boundary between the engine (crate `legato-core`) and the UI so they can later be split into a headless daemon plus a UI client, as lan-mouse does. Start with a single process: on macOS, permission grants are tied to one signed binary, and one process is simpler.
-- **Sending from the hook thread is possible.** iroh's `Connection::send_datagram` is synchronous and works from a plain OS thread with no tokio context (verified in `spikes/iroh-probe/src/bin/thread.rs`). Motion could go straight from the capture thread if that channel hop ever matters.
-
-Suggested workspace:
-- `proto`: wire types, using serde + postcard.
-- `input`: `Capture` / `Emulate` traits with one module per OS.
-- `net`: iroh endpoint, pairing, session.
-- `core`: layout, edge state machine, clipboard.
-- `app`: iced + iced-m3 UI and tray.
+The [current architecture](docs/architecture.md) replaces the initial workspace
+sketch. `legato-core` contains pure state machines; `legato-engine` integrates
+networking, OS backends, clipboard, files and streaming for both front ends.
+Native hook/event-tap callbacks run synchronously on dedicated OS threads so
+swallowing input never waits for the async engine or UI.
 
 ---
 
@@ -149,96 +134,6 @@ Recommendation: **send absolute positions by default, with a relative mode as an
 
 ---
 
-## 5. Keyboard
-
-**Send physical key positions, not characters.** Use the USB HID usage code on the wire and convert to and from native codes with the `keycode` crate:
-- evdev on Linux (the xkb code is evdev + 8)
-- Windows set-1 scancodes (extended keys are E0-prefixed)
-- macOS virtual keycodes
-
-This behaves like plugging the keyboard into the client. The client's own layout, IME, dead keys and shortcuts all work. Synergy instead sends keysym-like "KeyIDs" and tries to reproduce the server's *character* on the client, and that has been its longest-running bug source (Deskflow issue #4280 has 143 comments). Optionally add a per-client "Unicode text" mode later, using `KEYEVENTF_UNICODE` on Windows and `CGEventKeyboardSetUnicodeString` on macOS.
-
-Rules for correctness:
-- **Modifier and lock sync.** The `Enter` message carries the server's modifier state and Caps/Num Lock, and the client reconciles its own state.
-  - What Legato does (0.3.0-alpha.23): connected machines share one Caps Lock, whether or not either is driving the other (`legato_core::locks`).
-  - Each machine reads its real Caps Lock ten times a second and tells its peers when it changes (`Control::CapsLock`). A machine that hears of a newer change sets its own, which updates its keyboard's light too.
-  - Changes carry a Lamport clock, so crossing changes end the same on both, with ties going to the lower endpoint id. On connecting, each announces its state.
-  - The Caps Lock key itself is never forwarded: it toggles the machine it's pressed on, and the sync carries it over.
-  - On macOS, the state is read from `CGEventSourceFlagsState` and set with IOKit's `IOHIDSetModifierLockState`. The activity tap ignores Caps-Lock-only flag changes, so a synced change doesn't count as the Mac being used.
-  - On Windows, the state is read with `GetKeyState` and set with a tagged Caps Lock press.
-  - Num Lock and Scroll Lock have no Mac counterpart, so they aren't shared.
-- **Auto-repeat has one owner.** The server drops OS-generated repeat events. Clients repeat held keys themselves:
-  - macOS and Windows: injected held keys don't auto-repeat, so run a timer using the client's own repeat delay and rate (lan-mouse uses 500 ms / 32 ms).
-  - X11 and Wayland: the display server or compositor already handles repeat.
-- **No stuck keys.**
-  - Both sides track which keys and buttons are held.
-  - On `Leave`, disconnect or heartbeat timeout, the client releases everything it pressed.
-  - The server remembers where each key-*down* went and sends the matching key-*up* to the same place, even if you switched screens in between.
-  - Key and button events travel on the reliable stream, never as datagrams.
-- **Special combos.**
-  - Cmd+Tab, the Win key and similar can be captured with active taps and hooks.
-  - Ctrl+Alt+Del can't be captured on Windows. Injecting it needs `SendSAS` from a SYSTEM service.
-  - The UAC prompt, lock screen and login screen run on the Windows secure desktop, which is only reachable from a SYSTEM service (Deskflow runs one, and it's fragile). Defer this.
-- **macOS Secure Event Input.** When a password field (or 1Password, etc.) is focused, *keyboard* events stop reaching every event tap. A macOS server would then type the "remote" keystrokes locally. Check `IsSecureEventInputEnabled()`, and warn or refuse to switch while it's on.
-
----
-
-## 6. Networking with iroh
-
-### 6.1 Why iroh fits
-
-- **Identity is an ed25519 key.** The handshake is TLS 1.3 with raw public keys, so `conn.remote_id()` is cryptographically authenticated. Traffic is end-to-end encrypted even through a relay; the relay sees only IPs, timing and volume.
-- **LAN-only mode.** `presets::Minimal` + `MdnsAddressLookup` works with zero config and no internet: dial by `EndpointId` and mDNS resolves the address (verified).
-- **Measured round-trip times (spike, 2000 round trips):** datagram p50 **118 µs** / p99 ~500 µs; bi-stream p50 104 µs; LAN connect ~3 ms. Both endpoints were on the *same host*, so this measures stack overhead, not Wi-Fi. For context, a 1 kHz mouse reports every 1 ms, and added latency becomes noticeable at around 16 ms.
-- **Optional "over the internet" mode.** `presets::N0` or a self-hosted `iroh-relay` handles NAT hole-punching and upgrades from relay to direct (about 76 ms in the spike, a best case). n0 reports that about 90% of network setups end up with a direct connection.
-- **Decision (2026-09-24): discover on the LAN, connect from anywhere.** Unpaired devices are found only via mDNS on the local network. Paired devices dial each other by `EndpointId`, using mDNS, pkarr/DNS and relays together (`address_lookup` adds to the list each time it's called). Verified in `spikes/iroh-probe/src/bin/hybrid.rs`:
-  - The mDNS peer connected in 735 ms over a direct LAN path.
-  - The peer without mDNS connected in 240 ms via the relay, and switched to a direct path 80 ms later. Both peers were on the same host, so that upgrade is a best case.
-
-### 6.2 Protocol layout (one connection per peer pair)
-
-| Channel | Carries | Why |
-|---|---|---|
-| ALPN `legato/1` | The session. Only paired peers are allowed, enforced centrally in an `EndpointHooks::after_handshake` hook (`spikes/iroh-probe/src/bin/hook.rs`). | Bump the ALPN version on incompatible changes. |
-| ALPN `legato/pair/1` | Pairing. Open to anyone, rate-limited. | See §6.3. |
-| **Control bi-stream** | `Hello {proto, name, screens}`, layout, `Enter {x, y, mods, locks}`, `Leave`, `Key`, `Button`, `Scroll`, clipboard offers, `ReleaseAll`. Length-prefixed postcard frames. | Reliable and ordered, so key and button events are never lost. |
-| **Datagrams** | `Motion {seq, x, y}` (or `{seq, dx, dy}` in relative mode), coalesced to ≤1 kHz. Datagrams from a previous visit to the screen are ignored because `Enter` carries a baseline `seq`. Also ping/pong every 250 ms for liveness. | Unreliable is fine for motion because only the newest position matters, and it avoids head-of-line blocking during Wi-Fi loss bursts. |
-| **Uni-streams, one per transfer** | Clipboard payloads and files. Header `{kind, name, size, blake3}` plus a resume offset. Use `set_priority` below the control stream and an app-level rate cap. | Keeps bulk data from queuing ahead of input. Datagrams and streams share one congestion window. |
-
-```rust
-// Verified against iroh 1.2.0 (see spikes/iroh-probe)
-let ep = Endpoint::builder(presets::N0)                 // relays + pkarr/DNS (swap in own relay later)
-    .secret_key(sk)                                     // persist sk.to_bytes()
-    .portmapper_config(PortmapperConfig::Disabled)      // avoids macOS firewall prompt
-    .transport_config(QuicTransportConfig::builder()
-        .keep_alive_interval(Duration::from_secs(1)).build())
-    .address_lookup(MdnsAddressLookup::builder().service_name("legato"))
-    .hooks(PairedOnly(allow_list.clone()))
-    .alpns(vec![KVM_ALPN.to_vec(), PAIR_ALPN.to_vec()])
-    .bind().await?;
-let router = Router::builder(ep.clone()).accept(KVM_ALPN, KvmHandler { .. }).spawn();
-let conn = ep.connect(peer_id, KVM_ALPN).await?;       // mDNS resolves the id
-conn.send_datagram(motion_bytes)?;                      // sync; drops oldest if buffer is full
-```
-
-Set `max_idle_timeout` to about 3–5 s so a dead client is detected quickly and control snaps back to the server. If `max_datagram_size()` returns `None`, fall back to a stream. The spike measured 1162 bytes, far more than a motion message needs.
-
-### 6.3 Pairing
-
-This is verified in `spikes/iroh-probe/src/bin/pair.rs`.
-
-1. The new machine connects on `legato/pair/1`, found via mDNS or a 77-character ticket string / QR code.
-2. Both sides compute a short code from the TLS session:
-   ```rust
-   conn.export_keying_material(&mut [0u8;4], b"legato pairing SAS v1", b"")
-   ```
-   Each takes the value mod 10⁶ and shows it as a 6-digit code. The two sides produced the identical code in the test.
-3. The user confirms the codes match on both machines, and each adds the other's `EndpointId` to its allow-list.
-
-Because the code is derived from the live TLS session, a man-in-the-middle can't make the two codes match. lan-mouse only verifies the peer in one direction, and Barrier had CVE-2021-42072; this design avoids both of those mistakes.
-
-The mDNS `user_data` field (≤245 bytes, unauthenticated) can advertise a display name for the "nearby devices" list.
-
 ### 4.5 Windows: low-level hooks and raw input
 - Windows doesn't call a process's own `WH_KEYBOARD_LL` hook while one of its windows is in front, if the process is registered for raw keyboard input. winit registers every app for raw mouse and keyboard input, for `DeviceEvent`s, which iced doesn't use. So with Legato's viewer or main window in front, the hook never saw a key: typing on the Mac's display went to Windows, and so did typing meant for a MacBook driven over the edge.
 - Raw input registrations are per process (one target per device type, and the last one wins). The capture therefore takes the mouse's for itself and removes the keyboard's, both when it starts and again whenever a portal is set.
@@ -261,6 +156,101 @@ The pointer has one position, shared by both machines, and whichever machine's m
 - **Losing the peer** while parked brings the cursor back where it left this machine.
 - Protocol 8 (0.3.0-alpha.17), then 9 (0.3.0-alpha.18, `ExtendArrange` gained `picture`). Older versions don't connect, since this only works if both machines park and report.
 
+## 5. Keyboard
+
+**Send physical key positions, not characters.** Use the USB HID usage code on the wire and convert to and from native codes with the `keycode` crate:
+- evdev on Linux (the xkb code is evdev + 8)
+- Windows set-1 scancodes (extended keys are E0-prefixed)
+- macOS virtual keycodes
+
+This behaves like plugging the keyboard into the client. The client's own layout, IME, dead keys and shortcuts all work. Synergy instead sends keysym-like "KeyIDs" and tries to reproduce the server's *character* on the client, and that has been its longest-running bug source (Deskflow issue #4280 has 143 comments). Optionally add a per-client "Unicode text" mode later, using `KEYEVENTF_UNICODE` on Windows and `CGEventKeyboardSetUnicodeString` on macOS.
+
+Rules for correctness:
+- **Modifier and lock sync.** The original plan included modifier/lock state on entry. Current `Enter` carries position and sequence only; held-modifier sync on entry is not implemented. Caps Lock is synchronized separately:
+  - What Legato does (0.3.0-alpha.23): connected machines share one Caps Lock, whether or not either is driving the other (`legato_core::locks`).
+  - Each machine reads its real Caps Lock ten times a second and tells its peers when it changes (`Control::CapsLock`). A machine that hears of a newer change sets its own, which updates its keyboard's light too.
+  - Changes carry a Lamport clock, so crossing changes end the same on both, with ties going to the lower endpoint id. On connecting, each announces its state.
+  - The Caps Lock key itself is never forwarded: it toggles the machine it's pressed on, and the sync carries it over.
+  - On macOS, the state is read from `CGEventSourceFlagsState` and set with IOKit's `IOHIDSetModifierLockState`. The activity tap ignores Caps-Lock-only flag changes, so a synced change doesn't count as the Mac being used.
+  - On Windows, the state is read with `GetKeyState` and set with a tagged Caps Lock press.
+  - Num Lock and Scroll Lock have no Mac counterpart, so they aren't shared.
+- **Auto-repeat has one owner.** The server drops OS-generated repeat events. Clients repeat held keys themselves:
+  - macOS and Windows: injected held keys don't auto-repeat, so run a timer using the client's own repeat delay and rate (lan-mouse uses 500 ms / 32 ms).
+  - X11 and Wayland: the display server or compositor already handles repeat.
+- **No stuck keys.**
+  - Both sides track which keys and buttons are held.
+  - On `Leave`, disconnect or heartbeat timeout, the client releases everything it pressed.
+  - Leaving releases remote held inputs and drops their routes. Later physical releases are swallowed so they cannot become unmatched ups on another machine. A drag that remains within one Mac visit preserves its held button.
+  - Key and button events travel on the reliable stream, never as datagrams.
+- **Special combos.**
+  - Cmd+Tab, the Win key and similar can be captured with active taps and hooks.
+  - Ctrl+Alt+Del can't be captured on Windows. Injecting it needs `SendSAS` from a SYSTEM service.
+  - The UAC prompt, lock screen and login screen run on the Windows secure desktop, which is only reachable from a SYSTEM service (Deskflow runs one, and it's fragile). Defer this.
+- **macOS Secure Event Input.** When a password field (or 1Password, etc.) is focused, *keyboard* events stop reaching every event tap. A macOS server would then type the "remote" keystrokes locally. Detecting this and warning or preventing switching remains unimplemented; the password-field sequence is a manual validation gap.
+
+---
+
+## 6. Networking with iroh
+
+### 6.1 Why iroh fits
+
+- **Identity is an ed25519 key.** The handshake is TLS 1.3 with raw public keys, so `conn.remote_id()` is cryptographically authenticated. Traffic is end-to-end encrypted even through a relay; the relay sees only IPs, timing and volume.
+- **LAN-only mode.** `presets::Minimal` + `MdnsAddressLookup` works with zero config and no internet: dial by `EndpointId` and mDNS resolves the address (verified).
+- **Measured round-trip times (spike, 2000 round trips):** datagram p50 **118 µs** / p99 ~500 µs; bi-stream p50 104 µs; LAN connect ~3 ms. Both endpoints were on the *same host*, so this measures stack overhead, not Wi-Fi. For context, a 1 kHz mouse reports every 1 ms, and added latency becomes noticeable at around 16 ms.
+- **Optional "over the internet" mode.** `presets::N0` or a self-hosted `iroh-relay` handles NAT hole-punching and upgrades from relay to direct (about 76 ms in the spike, a best case). n0 reports that about 90% of network setups end up with a direct connection.
+- **Decision (2026-09-24): discover on the LAN, connect from anywhere.** Unpaired devices are found only via mDNS on the local network. Paired devices dial each other by `EndpointId`, using mDNS, pkarr/DNS and relays together (`address_lookup` adds to the list each time it's called). Verified in `spikes/iroh-probe/src/bin/hybrid.rs`:
+  - The mDNS peer connected in 735 ms over a direct LAN path.
+  - The peer without mDNS connected in 240 ms via the relay, and switched to a direct path 80 ms later. Both peers were on the same host, so that upgrade is a best case.
+
+### 6.2 Protocol layout (one connection per peer pair)
+
+Current implementation (protocol 13; see `legato-proto` and `legato-net`):
+
+| Channel | Carries | Behavior |
+| --- | --- | --- |
+| ALPN `legato/1` | Sessions between paired peers | Incompatible messages bump `PROTOCOL_VERSION`; Hello rejects mismatches. |
+| ALPN `legato/pair/1` | User-confirmed pairing | Listening-mode gate, one concurrent attempt and timeouts; no attempt-rate limiter. |
+| Control bi-stream | Hello, input, placement/screens, Caps Lock, display lifecycle and cursor shapes | Length-prefixed postcard; `Enter` carries `seq` and `pos`, without modifiers/locks. |
+| Datagrams | Absolute `Motion {seq, pos}` and shared-pointer `Pointer {seq, pos}` | Newest sequence wins; no relative mode or app-level ping/pong. |
+| Uni-streams | Clipboard text/PNG and one ordered stream per video track | Lower priority than input. |
+| Per-entry bi-streams | File/directory headers, payload and save acknowledgment | Files are acknowledged after write/flush; directories after creation. No hash/resume field. |
+
+The following endpoint code is the historical spike, not the app's configuration:
+
+```rust
+// Verified against iroh 1.2.0 (see spikes/iroh-probe)
+let ep = Endpoint::builder(presets::N0)                 // relays + pkarr/DNS (swap in own relay later)
+    .secret_key(sk)                                     // persist sk.to_bytes()
+    .portmapper_config(PortmapperConfig::Disabled)      // avoids macOS firewall prompt
+    .transport_config(QuicTransportConfig::builder()
+        .keep_alive_interval(Duration::from_secs(1)).build())
+    .address_lookup(MdnsAddressLookup::builder().service_name("legato"))
+    .hooks(PairedOnly(allow_list.clone()))
+    .alpns(vec![KVM_ALPN.to_vec(), PAIR_ALPN.to_vec()])
+    .bind().await?;
+let router = Router::builder(ep.clone()).accept(KVM_ALPN, KvmHandler { .. }).spawn();
+let conn = ep.connect(peer_id, KVM_ALPN).await?;       // mDNS resolves the id
+conn.send_datagram(motion_bytes)?;                      // sync; drops oldest if buffer is full
+```
+
+The current endpoint uses a one-second keep-alive and five-second idle timeout. The spike measured a maximum datagram size of 1162 bytes, far more than a motion message needs. A stream fallback for unavailable datagrams was a proposal, not an implemented path.
+
+### 6.3 Pairing
+
+The initial spike was `spikes/iroh-probe/src/bin/pair.rs`; current pairing lives
+in `legato-net/src/pairing.rs`.
+
+1. Discover the new machine through LAN mDNS and enable pairing on both devices.
+   Ticket-string and QR pairing are not implemented.
+2. Both sides export four bytes from the live TLS session using
+   `legato pairing code v1`, reduce the value modulo 10⁶, and format it as a code
+   such as `042 917`.
+3. Compare and accept the code on both machines before either records the peer.
+
+Code comparison binds user confirmation to the TLS connection; the six-digit
+code must actually be checked. The mDNS display name is unauthenticated discovery
+metadata, not proof of peer identity.
+
 ### 6.4 iroh gotchas
 
 - **Keep one connection per peer.** iroh issues #4509 and #4390 report unbounded memory growth with two or more connections to the same peer; the fixes aren't merged as of 1.2.0.
@@ -274,15 +264,18 @@ The pointer has one position, shared by both machines, and whichever machine's m
 
 ## 7. Clipboard
 
-Model: **eagerly announce, push small payloads on switch, and handle large ones explicitly.**
+The implemented engine polls native clipboard change counters, reads supported
+contents through arboard, and pushes copied text/PNG images to connected peers
+while sharing. It remembers remote contents to suppress echoes. It does not send
+clipboard offers, wait for a pointer switch, or transport HTML.
 
-- **Watching for changes:** `clipboard-rs`'s watcher polls `changeCount` on macOS, uses `AddClipboardFormatListener` on Windows, and uses XFixes selection events on X11.
-  - wlroots and KDE Wayland: the `ext-`/`wlr-data-control` protocols (via `wl-clipboard-rs`).
-  - **GNOME Wayland** implements neither. Use the portal Clipboard interface attached to the RemoteDesktop session, which a Wayland client needs for input anyway.
-- **Sync:** when the machine with focus gets a new clipboard, it sends a `ClipboardOffer {formats, size}`. When the cursor enters another screen, text, HTML and images below a size cap are pushed to it, as Synergy does. Real paste-time lazy fetching needs native delayed rendering on each OS (`WM_RENDERFORMAT`, `NSPasteboardItemDataProvider`, X11 INCR). That's a later optimisation.
-- **Echo loops:** remember the hash of content you set from a remote peer, so your own watcher doesn't send it straight back.
-- **Files on the clipboard (MVP):** transfer the files into a cache folder, then set a file list on the destination clipboard with arboard `set().file_list()` (CF_HDROP on Windows, NSURL on macOS, `text/uri-list` on Linux). Mouse Without Borders does this. arboard doesn't write `x-special/gnome-copied-files`, so pasting in Nautilus may need clipboard-rs.
-- **macOS 15.4+ pasteboard privacy:** reading the pasteboard without user interaction can show an alert. Reading `changeCount` reportedly doesn't. Test this with a bundled, signed build.
+Copied files use acknowledged file streams into a temporary cache. The destination
+file list becomes pasteable only after the full batch arrives. See
+[configuration and limits](docs/configuration.md). Lazy paste-time fetching and
+native delayed rendering remain proposals.
+
+macOS pasteboard privacy must be checked with the actual signed package; Terminal
+and a bundled app can have different permission behavior.
 
 ---
 
@@ -293,7 +286,13 @@ History:
 - Mouse Without Borders supports one file up to 100 MB, saved to a folder on the Desktop.
 - Apple Universal Control is the only polished implementation. It uses file promises over private frameworks.
 
-### 8.1 Mechanics
+### 8.1 Original mechanics proposal
+
+The implemented paths are explicit send, copied files, and Windows edge drag.
+Finder drag-out and native drops at the remote pointer remain unimplemented.
+The historical uni-stream transfer proposal below was superseded by acknowledged
+bidirectional file streams; see [the current architecture](docs/architecture.md).
+
 
 **Source side: detecting a drag at the moment the cursor hits the edge with the left button held**
 
@@ -306,7 +305,7 @@ History:
 
 **Target side: completing the drop**
 
-- **MVP:** on the remote mouse-up, save the files to `~/Downloads/legato/` and notify, the Mouse Without Borders approach. A "drop icon" overlay can follow the cursor while dragging.
+- **MVP:** on the remote mouse-up, save the files to `Downloads/Legato` and notify, the Mouse Without Borders approach. A "drop icon" overlay can follow the cursor while dragging.
 - **Native drop (macOS and Windows):** once the files have arrived:
   1. Move a tiny transparent iced window under the injected cursor.
   2. Inject a mouse-down.
@@ -318,7 +317,7 @@ History:
   - `drag` needs GTK on Linux, so it's unusable here.
   - winit 0.30 only accepts drops *into* windows. winit 0.31 (beta) adds `start_drag` for AppKit, Win32 and Wayland, but iced won't pick it up before its next major version.
 
-### 8.2 Recommended phases
+### 8.2 Original phased proposal (partly superseded; see §12)
 
 1. **"Send files to…"** Drop files onto the app window (iced `FileDropped`) or use a tray menu entry. They land in the other machine's Downloads folder. Also sync copied files through the clipboard, with a size cap.
 2. **Drag across the edge, then drop anywhere, files saved to Downloads.** macOS reads the drag pasteboard; Windows and X11 use the catcher window.
@@ -333,30 +332,36 @@ History:
 - **Engine bridge:** `Subscription::run(fn() -> impl Stream)` with `iced::stream::channel`. The stream's first item is an `mpsc::Sender` for sending commands back to the engine. In 0.14, `Subscription::map` requires a non-capturing closure; use `.with(value)` to pass context.
 - **Tray:** `tray-icon` + `muda`, with events polled or bridged from their channels. On macOS, create the tray *after* the event loop starts (on the first `update`, not in `boot`).
 - **No dock icon (macOS):** `LSUIElement=true` in Info.plist for bundled builds. For `cargo run`, call `NSApplication::setActivationPolicy(Accessory)` via objc2-app-kit.
-- **Autostart and single instance:** `auto-launch` 0.6. Use `interprocess` local sockets for single-instance plus a "show window" IPC, rather than the stale `single-instance` crate.
+- **Autostart and single instance:** `auto-launch` handles start at login. A `legato.lock` OS file lock excludes another engine using the same state directory. The proposed local-socket “show window” IPC is not implemented.
 - **Screen-arrangement editor:** implement `canvas::Program<Message, iced_m3::Theme>` with hit-testing, a drag offset, `Action::publish(MoveScreen)` + `capture()`, and `mouse::Interaction::Grab`/`Grabbing`. The compile spike's version is about 80 lines; snapping and a "touching but not overlapping" rule are extra.
-- **Monitor geometry:** use `display-info` (`DisplayInfo::all()` gives x, y, w, h, scale and primary). iced only exposes `monitor_size(window_id)`. Re-read on hot-plug, either with native callbacks (`CGDisplayRegisterReconfigurationCallback`, `WM_DISPLAYCHANGE`, RandR) or by polling.
-- **iced-m3 specifics:**
+- **Monitor geometry:** native macOS/Windows enumeration runs once a second off the sharing loop, even while sharing is stopped. The originally considered `display-info` crate is not used.
+- **Original iced-m3 integration notes (check current upstream APIs before reusing):**
   - Your app uses `iced_m3::Theme`, and the crate provides `Element<'a, M> = iced::Element<'a, M, Theme>`.
   - Plain iced widgets and all of `iced_aw` are styled for `iced::Theme`, so wrap them in `widget::themer(Some(theme.iced()), …)`. `canvas` needs no wrapping.
   - Screen readers aren't supported.
   - Windows and Linux interaction, IME, and mixed-DPI scaling are listed as untested.
-- **Notes on iced-m3's `Cargo.toml` (as its maintainer would care):** the exact pins `material-colors = "=0.4.2"` and `unicode-segmentation = "=1.13.3"` will cause resolution conflicts downstream as soon as another dependency needs a newer version. Caret requirements avoid this. The `iced = "=0.14.0"` pin is defensible, but it means apps move in lockstep with iced-m3 releases.
+- **Notes on the originally inspected iced-m3 `Cargo.toml` (as its maintainer would care):** the exact pins `material-colors = "=0.4.2"` and `unicode-segmentation = "=1.13.3"` will cause resolution conflicts downstream as soon as another dependency needs a newer version. Caret requirements avoid this. The `iced = "=0.14.0"` pin is defensible, but it means apps move in lockstep with iced-m3 releases.
 
 ---
 
 ## 10. Permissions and packaging
 
+Current releases use portable archives; there is no Windows installer. See the
+[signing guide](docs/macos-signing.md) for required Mac credentials and validation.
+Linux rows below are original research outside the supported scope.
+
 | OS | What's needed |
 |---|---|
-| macOS | **Accessibility** permission, needed for both the active event tap and event posting. It includes Input Monitoring. **A stable Developer ID signature:** macOS ties the grant to the signature, and with ad-hoc signing every rebuild loses it. `NSLocalNetworkUsageDescription`, because LAN UDP and multicast need the Local Network permission on macOS 15+ (binaries run from Terminal are exempt, so this won't show up during `cargo run`). `LSUIElement`. Notarization for distribution. |
-| Windows | Nothing for the basics. Add a firewall rule in the installer; mDNS is blocked on "Public" network profiles. Declare PerMonitorV2 DPI awareness in the manifest. Controlling elevated windows needs elevation or `uiAccess` (signed + installed under Program Files). UAC prompts and the lock screen need a SYSTEM service. |
+| macOS | **Accessibility** permission, needed for both the active event tap and event posting. Input Monitoring is a separate grant checked by Legato; Screen Recording is needed to host the extra display. **A stable Developer ID signature:** macOS ties the grant to the signature, and with ad-hoc signing every rebuild loses it. `NSLocalNetworkUsageDescription`, because LAN UDP and multicast need the Local Network permission on macOS 15+ (binaries run from Terminal are exempt, so this won't show up during `cargo run`). `LSUIElement`. Notarization for distribution. |
+| Windows | Nothing for the basics. Allow firewall access for the intended network; mDNS may be blocked on “Public” network profiles. No installer manages firewall rules. Declare PerMonitorV2 DPI awareness in the manifest. Controlling elevated windows needs elevation or `uiAccess` (signed + installed under Program Files). UAC prompts and the lock screen need a SYSTEM service. |
 | Linux X11 | None. |
 | Linux Wayland | Portal consent dialogs; store restore tokens. The evdev/uinput fallback needs the `input` group, which effectively lets you read every input device, so make it opt-in. |
 
 ---
 
-## 11. Risks (highest first) and decisions to make early
+## 11. Original risk assessment and resolved decisions
+
+Linux/Wayland entries are retained as background, not planned support.
 
 **Risks**
 1. **Wayland fragmentation.**
@@ -371,11 +376,12 @@ History:
 5. **Drag-and-drop:** keep it phased (§8).
 6. **Dependency maturity:** iced-m3 is a beta pinned to iced 0.14.0. `reis` has an unstable API. `iroh-mdns-address-lookup` is 0.x.
 
-**Decisions**
-1. **License.** GPL-3.0 lets you depend on lan-mouse's `input-capture` and `input-emulation`, which already cover macOS, Windows, wlroots, libei/portal and X11 emulation. That saves most of the backend work. A permissive license means writing it clean-room.
-2. **Topology.** Either a single primary (the Synergy "server" owns the layout and the physical keyboard and mouse) or symmetric (any machine can drive, as in lan-mouse). A single primary is much simpler; start there.
-3. **Deskflow wire compatibility.** Probably not worth it: it's a different transport, and the only Rust implementation (`schengen`) is GPL-3.0.
-4. **Platform order.** macOS ↔ Windows first, since those backends are the most tractable.
+**Resolved decisions**
+
+- MIT license with clean-room OS backends; no GPL/AGPL dependency or copied code.
+- Symmetric capture/injection, supporting both follow-input and designated control.
+- Legato's own iroh protocol; no Deskflow compatibility.
+- macOS 26+ Apple silicon and Windows 11 x64/ARM64 only.
 
 ---
 
@@ -391,7 +397,10 @@ Revised once the scope settled on macOS and Windows, with a Mac next to a Window
 6. **M5, virtual monitor mode (done).** The Mac gets an extra display shown in a window on Windows (§14): "Show as display" next to a connected Mac, F11 for full screen.
 7. **Later.** Native drop at the pointer on the receiving side, Finder drags, internet mode with a self-hosted relay, Windows secure-desktop service.
 
-## 13. Open questions to prototype
+## 13. Original prototype questions (historical)
+
+These guided the original spikes. Later findings in §4.5–4.7, §14, and the
+[handoff](docs/handoff/README.md) supersede answered questions; this is not a work queue.
 
 - Windows: does Raw Input still get `WM_INPUT` for moves that a low-level hook swallowed? Sources conflict.
 - Windows: do low-level hooks in a non-elevated process still see input while an elevated window has focus?
@@ -407,14 +416,14 @@ Revised once the scope settled on macOS and Windows, with a Mac next to a Window
 
 Built in `legato-screen` as planned below, with these choices:
 - **Display size:** 3840×2160 pixels in HiDPI by default, so it looks like 1920×1080 and is sharp full screen on a 4K monitor. Change it under `[extend]` in `legato.toml`.
-- **Mode selection (0.3.0-alpha.28):** after resolution changes through Legato's Windows options, the user's Mac reported 1920×1080 when asked for Retina 3840×2160, even after restarting. The cause is not yet confirmed: the old log records only pixel dimensions. A 4K Retina display exposes ordinary 1080p and unscaled 4K duplicates, so Legato now checks backing pixels, logical points, and refresh rate and explicitly selects a matching CoreGraphics mode if applying virtual-display settings leaves a mismatch. Failure diagnostics include the requested, current, and available modes. The display identity is preserved and no WindowServer preferences are deleted. In a plain CLI, forcing 1080p reproduced the error and explicit selection recovered it, but with AppKit processing display notifications both the old and new implementations recovered. That CLI result is not proof of the reported app bug; confirmation through the Windows options is still required. API references: [available modes](https://developer.apple.com/documentation/coregraphics/cgdisplaycopyalldisplaymodes(_:_:)), [mode configuration](https://developer.apple.com/documentation/coregraphics/cgconfiguredisplaywithdisplaymode(_:_:_:_:)).
+- **Mode selection (0.3.0-alpha.28):** after resolution changes through Legato's Windows options, the user's Mac reported 1920×1080 when asked for Retina 3840×2160, even after restarting. The cause is not yet confirmed: the old log records only pixel dimensions. A 4K Retina display exposes ordinary 1080p and unscaled 4K duplicates, so Legato now checks backing pixels, logical points, and refresh rate and explicitly selects a matching CoreGraphics mode if applying virtual-display settings leaves a mismatch. Failure diagnostics include the requested, current, and available modes. The display identity is preserved and no WindowServer preferences are deleted. In a plain CLI, forcing 1080p reproduced the error and explicit selection recovered it, but with AppKit processing display notifications both the old and new implementations recovered. That CLI result is not proof of the reported app bug; the user subsequently confirmed recovery on alpha.28 after installation and permission restoration, with full 3840×2160 streaming logged at 20:41 UTC on October 9. No explicit-mode-selection line appeared in that successful session, so the cause remains unproven. Recheck the original Windows-options sequence on the current candidate. API references: [available modes](https://developer.apple.com/documentation/coregraphics/cgdisplaycopyalldisplaymodes(_:_:)), [mode configuration](https://developer.apple.com/documentation/coregraphics/cgconfiguredisplaywithdisplaymode(_:_:_:_:)).
 - **Encoding:** H.264 Constrained High, low-latency rate control, 60 fps, 40 Mbit/s. Keyframes come on request, plus one a minute. When the screen is still, the last picture is re-sent as a keyframe.
 - **Transport:** one ordered stream per video track, below input and above file transfers. Ordered delivery keeps P-frames decodable. When a track's frames back up, the Mac skips its new pictures before encoding them, and re-sends the latest sharp one once the backlog clears so a still screen isn't left stale.
 - **Adaptive quality** (the default): two tracks, each its own H.264 sequence. The sharp track is the full stream size, limited to the frame rate the Mac can encode at that size. The moving track is at most 1920×1080 (or 2560×1440), scaled on the GPU with `VTPixelTransferSession`, at the display's frame rate. ScreenCaptureKit's dirty rectangles say how much of each picture changed. Two pictures within 100 ms that each change at least 3% switch to the moving track, so a lone big change like switching tabs stays sharp instead of flashing soft. The sharp track takes over again after 150 ms of changes under 1%, re-encoding the latest picture, with one touch-up encode 300 ms later if the screen is still. Each track's next frame follows on from its own last one, so switching needs no keyframes. Frames carry a timestamp from one clock, and the viewer shows whichever track's picture is newest; the moving track's stream has higher priority, so a big sharpening frame never holds up the next moving one. Scaling costs about 3 ms per picture whatever the sizes (mostly the GPU round trip), which is counted towards the moving track's frame budget.
 - **Viewer:** a wgpu shader widget draws NV12 textures directly (BT.709 limited range, converted on the GPU). It reads the newest picture from the engine's frame channel whenever it's drawn. On Windows, each new picture repaints just the viewer's window, with `RedrawWindow` from a small task. Pictures used to arrive as UI messages, but iced redraws every window after every update, and winit paints one window per turn, taking whichever `WM_PAINT` Windows hands out first (the window in front). So with the main window in front, its repaints took every turn and the picture froze.
 - **Windows decoding (0.3.0-alpha.27):** the built-in H.264 MFT receives a D3D11 device manager before format negotiation, with video acceleration and low-latency mode enabled. Its immediate context is multithread-protected because Media Foundation also uses it. The startup check decodes the committed Mac color sequence, requiring DXGI surfaces, correct colors, and one picture per input; a fresh MFT on that device then handles the live stream. Setup/check failures use software. A live decoding failure requests a keyframe and stays in software for the remainder of that track, avoiding repeated GPU failures after device loss. The first live picture logs the backend and adapter name.
   - Readback copies the sample's texture-array slice into a reusable staging texture, maps it, and strips row/coded-height padding into the viewer's existing NV12 format. The chroma offset uses the texture's height and mapped row pitch. F10's decode time includes this GPU wait and CPU copy. Sharing textures directly with the renderer is deferred until this path is measured on the PC.
-  - **Measured on RTX 3070 (October 9):** the user's log confirms the hardware self-check and live D3D11 backend, without a fallback in the supplied session. F10 still shows roughly 14 ms decode, versus 13 ms in the earlier software screenshot; these are not controlled benchmarks. Alpha.29 logs per-decoder, per-resolution averages and worst CPU wall times every five seconds: input preparation/`ProcessInput`, `ProcessOutput`, staging copy plus blocking `Map`, NV12 CPU allocation/copy, and the remaining overhead. Startup self-checks and failures are excluded; resize or backend changes reset the aggregation window. These are not GPU execution timestamps: `Map` may wait for unfinished video decoding as well as the staging copy. A long GPU-wait field alone does not prove transfer overhead dominates. [Microsoft's Map contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-map) describes the dependency on unfinished GPU work. The renderer's subsequent upload/presentation remains outside decode timing.
+  - **Measured on RTX 3070 (October 9):** the user's log confirms the hardware self-check and live D3D11 backend, without a fallback in the supplied session. F10 showed 43 ms total (Mac 21, network 3, decode 14, display 5), versus 42 ms total and 13 ms decode in the earlier software screenshot. Busy Mac windows reached 283–285 pictures per five seconds. These are not controlled benchmarks and show no decoding speedup. Alpha.29 logs per-decoder, per-resolution averages and worst CPU wall times every five seconds: input preparation/`ProcessInput`, `ProcessOutput`, staging copy plus blocking `Map`, NV12 CPU allocation/copy, and the remaining overhead. Startup self-checks and failures are excluded; resize or backend changes reset the aggregation window. These are not GPU execution timestamps: `Map` may wait for unfinished video decoding as well as the staging copy. A long GPU-wait field alone does not prove transfer overhead dominates. [Microsoft's Map contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-map) describes the dependency on unfinished GPU work. The renderer's subsequent upload/presentation remains outside decode timing.
   - Hosted CI exercises software decoding and D3D11 readback on WARP. The small startup fixture does not establish 4K support or a speedup; those require the real stream on the user's GPU. API references: [Microsoft H.264 decoder](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-decoder), [D3D11 decoding in Media Foundation](https://learn.microsoft.com/en-us/windows/win32/medfound/supporting-direct3d-11-video-decoding-in-media-foundation), and [NV12 memory layout](https://learn.microsoft.com/en-us/windows/win32/api/dxgiformat/ne-dxgiformat-dxgi_format).
 - **Input:** a *portal*. While the Windows pointer is over the picture, and the viewer isn't covered there, moves go to the Mac as absolute positions on the display, and so do clicks, keys and scrolling. A click or key over the picture goes in even without motion first. That covers the Mac having just taken its cursor back (its own trackpad or keyboard was used) and the viewer appearing under a resting pointer. The Windows pointer stays visible and ScreenCaptureKit leaves the Mac's cursor out of the picture, so there is no laggy second cursor.
 - **Cursor shape (alpha.30, protocol 13):** the Mac samples `NSCursor.currentSystemCursor` on AppKit's main thread at 20 Hz while streaming, maps its bounded image/hotspot against OS-provided standard cursors, and sends only shape changes on the reliable control stream. A viewer-generation token rejects stale shapes and display bounds after reopen. The viewer wakes on shape changes even with no video/motion and selects a native Windows cursor only inside the letterboxed picture. Missing/custom images and a stalled main-thread read reset to an arrow; only one read may be pending. No cursor bitmap is transmitted and local pointer movement never waits for shape or video. The getter is deprecated (future nil is handled). An October 13 macOS 26.6.2 background probe detected all 12 controlled shapes on the actual virtual display; the complete Windows feature still needs a two-machine hardware test. Windows stock cursor availability limits exact equivalents (grab is the move cursor, zoom/copy/link fall back to arrow).
@@ -429,12 +438,12 @@ Built in `legato-screen` as planned below, with these choices:
 - **Dragging between the Mac's screens:** moving between the viewer and the Mac's own screens is one continuous visit to the Mac, with held buttons kept held. Leaving the picture while dragging continues on the MacBook's screen, moving onto the extra display from the MacBook brings the Windows pointer out in the viewer, and a full-screen viewer can be pushed past its screen's edge towards the MacBook.
 - **Whose cursor you see:** always the one belonging to the machine whose screen it's on. The extra display is physically the PC's, so the PC's cursor shows on it even when the Mac's own trackpad moves the pointer there. The Mac reports its pointer's position (`Datagram::Pointer`), and the PC puts its own cursor at the same spot on the picture. That's a network hop behind, not the picture's latency. The picture still leaves the Mac's cursor out, so there's never a second, laggy one. The Mac's clicks and keys stay on the Mac.
 - **Newest picture only (0.3.0-alpha.26):** encoding used to run in ScreenCaptureKit's callback, with a capture queue of 5.
-  - At full 4K the encoder needs about 16 ms a frame, out of 16.7 at 60 fps. The viewer's stats showed the Mac's part steady at 84–88 ms, with 54 fps, consistent with about five pictures waiting. A full capture queue is the suspected cause; the before-and-after timing logs still need checking in a real 4K session.
+  - At full 4K the encoder needs about 16 ms a frame, out of 16.7 at 60 fps. The viewer's stats showed the Mac's part steady at 84–88 ms, with 54 fps, consistent with about five pictures waiting. A full capture queue was the suspected cause. The first alpha.26 4K session showed 42 ms total (Mac 22, network 3, decode 13, display 4), versus about 107 ms total before. Mac log windows averaged 1–4 ms capture delay, 0–6 ms encoder wait and 17–18 ms encode time, without the old sustained backlog. These screenshots were not controlled identical-motion benchmarks; 40 fps at low bitrate does not establish sustained throughput. See the [hardware evidence](docs/handoff/README.md).
   - Now capture only leaves the newest picture for an encoder thread, replacing one it hasn't taken yet, so nothing queues behind the encoder.
   - The Mac logs each stage every 5 s while streaming: captured after appearing, waited for the encoder, encoded in, and skipped.
 - **Stats:** each frame carries the Mac's time on it, from appearing on screen to being sent. The viewer adds network, decode and display time and shows the total.
 
-The original plan:
+The original plan (superseded where it differs from the implementation above):
 
 The Mac gets an extra display in its own arrangement. That display's picture is streamed to Windows and shown in one viewer window, or full screen on one of the monitors. Any windows, menus and popups dragged onto it just work, because macOS treats it as a real display.
 

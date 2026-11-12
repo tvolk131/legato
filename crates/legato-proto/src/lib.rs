@@ -2,12 +2,15 @@
 //!
 //! A session between two paired machines is a single iroh connection with:
 //! - one bidirectional **control stream** carrying length-prefixed [`Control`] frames
-//!   (reliable, ordered: keys, buttons, scroll, enter/leave, hello), and
+//!   (reliable, ordered: keys, buttons, scroll, enter/leave, hello),
 //! - unreliable **datagrams** carrying [`Datagram`]s (pointer motion, where only the
-//!   newest position matters).
+//!   newest position matters),
+//! - unidirectional streams for clipboard contents and each video track, and
+//! - one bidirectional stream per file or directory, acknowledged after saving.
 //!
-//! All coordinates on the wire are in the *receiving* machine's native global
-//! coordinate space (points on macOS, physical pixels on Windows).
+//! Input positions use the receiving machine's native global coordinates (points on
+//! macOS, physical pixels on Windows). Pointer reports use the sender's native space;
+//! layout and display messages document their coordinate spaces individually.
 
 use serde::{Deserialize, Serialize};
 
@@ -291,6 +294,7 @@ pub struct ControlMode {
 }
 
 /// Tags for bulk transfers on their own unidirectional streams.
+/// Tag 2 is retired; files now use acknowledged bidirectional streams.
 pub mod blob {
     /// A [`super::ClipboardContent`].
     pub const CLIPBOARD: u8 = 1;
@@ -316,8 +320,8 @@ pub struct VideoFrameHeader {
     /// How long the sender spent on the frame, in microseconds: from the picture appearing
     /// on its display to the frame being sent (capture, encoding, queueing).
     pub sender_us: u32,
-    /// Pictures the sender skipped (the network backed up) or its encoder dropped since
-    /// the previous frame.
+    /// Pictures superseded while waiting for the encoder, skipped under network
+    /// backpressure, or dropped by the encoder since the previous frame.
     pub skipped: u16,
     /// When the picture appeared, in microseconds from the start of the stream: the same
     /// clock on every track, so the newest picture can be told.
@@ -396,10 +400,9 @@ pub enum FilePurpose {
 pub enum Datagram {
     /// Absolute cursor position. Newer `seq` wins; older ones are dropped.
     Motion { seq: u32, pos: Point },
-    /// Mac → the PC showing its extra display: the Mac's own pointer (its trackpad or
-    /// mouse) is at `pos` on that display, in the Mac's native coordinates. The PC shows
-    /// its own cursor there, as it would for its own mouse: far quicker than the picture.
-    /// Newer `seq` wins.
+    /// The sender's own pointer, in its native coordinates, for shared-pointer
+    /// parking/resume and handover. Also used by a Mac to place the Windows viewer's
+    /// native cursor on its extra display without waiting for video. Newer `seq` wins.
     Pointer { seq: u32, pos: Point },
 }
 

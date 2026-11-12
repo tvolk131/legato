@@ -3,7 +3,8 @@
 //!
 //! On the Mac: a virtual display (a private CoreGraphics API, kept to [`mac::display`]),
 //! captured with ScreenCaptureKit and encoded as H.264 with VideoToolbox. On Windows:
-//! decoded with Media Foundation into NV12 frames for the viewer to draw.
+//! decoded with Media Foundation using D3D11 hardware acceleration with NV12 readback,
+//! or software fallback, into NV12 frames for the viewer to draw.
 
 pub mod adaptive;
 #[cfg(any(windows, test))]
