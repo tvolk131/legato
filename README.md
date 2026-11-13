@@ -5,7 +5,7 @@ Use one keyboard and mouse across your computers over the network. Your cursor m
 **Status: alpha.** Either machine's keyboard and mouse can drive the other, with a tray app for pairing, arranging screens and settings. Copy and paste works across machines (text, images and files), and files can be sent or dragged across the edge from Windows. A Mac can also appear as an extra display in a window on a Windows PC. Downloads are on the [releases page](https://github.com/tvolk131/legato/releases).
 
 - **Platforms:** macOS 26+ (Apple silicon) and Windows 11 (x64 and ARM64).
-- **Written in Rust:** [iced](https://github.com/iced-rs/iced) + [iced-m3](https://github.com/tvolk131/iced-m3) for the UI, [iroh](https://github.com/n0-computer/iroh) for encrypted, peer-to-peer networking.
+- **Written in Rust:** [iroh](https://github.com/n0-computer/iroh) for encrypted, peer-to-peer networking. The Mac app is SwiftUI; the Windows app uses [iced](https://github.com/iced-rs/iced) + [iced-m3](https://github.com/tvolk131/iced-m3).
 - **Pairing:** nearby devices are discovered automatically on your local network and confirmed with a 6-digit code. After pairing, devices can connect across networks.
 - **Virtual monitor mode:** “Show as display” next to a Mac in the Windows app adds a display to the Mac and shows it in a window, or full screen with F11. Move the Windows pointer over it to use it; F10 toggles stream statistics.
 
@@ -50,10 +50,12 @@ legato run      # start sharing; Ctrl+C to stop
 To build the app and CLI from source on a supported OS, install Rust 1.99+ and native build tools (Xcode command-line tools on Mac; MSVC C++ tools and Windows SDK on Windows), then run:
 
 ```sh
-cargo build --locked -p legato-app -p legato-cli
+cargo build --locked -p legato-cli
+cargo build --locked -p legato-app   # the Windows app
+native/macos/build-app.sh            # the Mac app; needs Swift 6.2+ and the macOS 26 SDK
 ```
 
-The executables are under `target/debug/`. Development builds have their own permission context. See [TESTING.md](https://github.com/tvolk131/legato/blob/main/TESTING.md) for checks and opt-in hardware tests.
+The executables are under `target/debug/`; the Mac app is `target/swiftui/Legato.app` (see [native/macos](https://github.com/tvolk131/legato/blob/main/native/macos/README.md)). Development builds have their own permission context. See [TESTING.md](https://github.com/tvolk131/legato/blob/main/TESTING.md) for checks and opt-in hardware tests.
 
 ## Diagnostics and documentation
 

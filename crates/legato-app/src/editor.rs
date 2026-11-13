@@ -8,26 +8,11 @@ use iced::widget::text;
 use iced::{Color, Point, Rectangle, Renderer, Size, Vector};
 use iced_m3::Theme;
 pub use legato_core::layout::bounding_box as bounds;
-use legato_net::EndpointId;
 use legato_proto::Rect;
 
 use crate::Message;
 
-/// A paired machine's displays, where they currently sit (desk units).
-#[derive(Debug, Clone, PartialEq)]
-pub struct PeerBox {
-    pub id: EndpointId,
-    pub name: String,
-    pub displays: Vec<Rect>,
-    /// Whether it has a saved position yet.
-    pub placed: bool,
-}
-
-impl PeerBox {
-    pub fn bounds(&self) -> Option<Rect> {
-        bounds(self.displays.iter().copied())
-    }
-}
+pub use legato_engine::arrange::PeerBox;
 
 #[derive(Clone)]
 pub struct Editor {
@@ -336,6 +321,7 @@ mod tests {
                 id: iroh::SecretKey::from_bytes(&[1; 32]).public(),
                 name: "peer".into(),
                 displays: vec![Rect::new(100.0, 0.0, 100.0, 100.0)],
+                primary: None,
                 placed: true,
             }],
         };

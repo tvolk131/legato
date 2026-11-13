@@ -19,7 +19,6 @@ mod icons;
 mod model;
 mod platform;
 mod restart;
-mod snap;
 mod tray;
 mod view;
 mod viewer;
@@ -489,8 +488,7 @@ impl App {
                     return Task::none();
                 }
                 self.save_config(|c| {
-                    let text = id.to_string();
-                    c.neighbors.retain(|n| !text.starts_with(&n.peer));
+                    c.forget_neighbor(&id.to_string());
                 });
                 self.refresh_paired();
             }
@@ -825,21 +823,10 @@ impl App {
         };
         let Some(b) = peer.bounds() else { return };
         let dropped = legato_proto::Rect::new(top_left.x, top_left.y, b.width, b.height);
-        let Some(snapped) = snap::snap(&editor.local, dropped) else {
+        let Some(snapped) = legato_engine::arrange::snap::snap(&editor.local, dropped) else {
             return;
         };
-        let text = id.to_string();
-        if self.save_config(|c| {
-            c.neighbors.retain(|n| !text.starts_with(&n.peer));
-            c.neighbors.push(legato_engine::config::Neighbor {
-                peer: text,
-                side: snapped.side,
-                display: snapped.display + 1,
-                align: legato_core::Align::Center,
-                nudge: 0.0,
-                offset: Some([snapped.top_left.x, snapped.top_left.y]),
-            });
-        }) {
+        if self.save_config(|c| legato_engine::arrange::place(c, id, snapped)) {
             self.model.problems.clear();
         }
     }

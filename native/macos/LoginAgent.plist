@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Opens Legato at login. bundle.sh installs it as
+     Contents/Library/LaunchAgents/<bundle id>.login.plist, which LoginItem in
+     LegatoApp.swift registers with SMAppService when "Open at login" is on. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__BUNDLE_ID__.login</string>
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/Legato</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>Legato</string>
+        <string>--hidden</string>
+    </array>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>__BUNDLE_ID__</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Start Legato again if it crashes, since it runs unseen in the menu bar.
+         Quitting exits successfully and stays quit. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <!-- At most once a minute, so something that keeps crashing doesn't loop. -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

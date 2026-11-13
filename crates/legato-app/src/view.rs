@@ -9,14 +9,13 @@ use iced_m3::{
     button, button_group, card, icon_button, list, list_item, loading_indicator, menu,
     navigation_rail, slider, snackbar, split_button, switch, typography,
 };
-use legato_core::Layout;
-use legato_engine::arrange::{self, ConnectedPeer};
+use legato_engine::arrange;
 use legato_engine::config::Remap;
 use legato_net::PathKind;
 use legato_proto::format_pairing_code;
 
 use crate::Message;
-use crate::editor::{Editor, PeerBox};
+use crate::editor::Editor;
 use crate::model::{Model, Page, PairingStage, os_name};
 
 pub fn root(m: &Model) -> Element<'_, Message> {
@@ -426,67 +425,24 @@ fn add_device_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
 
 /// The editor's view of this machine and its paired peers, positioned by the settings.
 pub fn editor(m: &Model) -> Editor {
-    let local_layout = Layout::new(m.local.clone());
-    let local: Vec<_> = local_layout.local().desk_rects().collect();
-    let local_bounds = crate::editor::bounds(local.iter().copied());
-    let primary = m.local.displays.iter().position(|d| d.primary);
-
-    // Peers we know displays for, positioned by the saved layout.
     let known: Vec<_> = m
         .paired
         .iter()
-        .filter_map(|p| m.known.get(&p.device.id).map(|s| (p, s)))
-        .collect();
-    let connected: Vec<ConnectedPeer<'_>> = known
-        .iter()
-        .enumerate()
-        .map(|(i, (p, s))| ConnectedPeer {
-            machine: legato_core::MachineId(i as u32 + 1),
-            id: p.device.id.to_string(),
-            name: &p.device.name,
-            screens: s,
-            placed_us_at: m.placed_us.get(&p.device.id).copied(),
-        })
-        .collect();
-    let (layout, _) = arrange::build(&m.local, &connected, &m.config);
-    let mut unplaced_x = local_bounds.map_or(0.0, |b| b.right() + 200.0);
-    let peers = known
-        .iter()
-        .enumerate()
-        .map(|(i, (p, s))| {
-            let machine = legato_core::MachineId(i as u32 + 1);
-            let (displays, placed) = match layout.machine(machine) {
-                Some(placed) => (placed.desk_rects().collect(), true),
-                None => {
-                    // Not placed yet: park it to the right of this machine's displays.
-                    let mut l = Layout::new(m.local.clone());
-                    l.place_at(
-                        machine,
-                        (*s).clone(),
-                        legato_proto::Point::new(unplaced_x, 0.0),
-                    );
-                    let rects: Vec<_> = l
-                        .machine(machine)
-                        .map(|mm| mm.desk_rects().collect())
-                        .unwrap_or_default();
-                    if let Some(b) = crate::editor::bounds(rects.iter().copied()) {
-                        unplaced_x = b.right() + 200.0;
-                    }
-                    (rects, false)
-                }
-            };
-            PeerBox {
+        .filter_map(|p| {
+            let screens = m.known.get(&p.device.id)?;
+            Some(arrange::EditorPeer {
                 id: p.device.id,
-                name: p.device.name.clone(),
-                displays,
-                placed,
-            }
+                name: &p.device.name,
+                screens,
+                placed_us_at: m.placed_us.get(&p.device.id).copied(),
+            })
         })
         .collect();
+    let editor = arrange::Editor::new(&m.local, &known, &m.config);
     Editor {
-        local,
-        primary,
-        peers,
+        local: editor.local,
+        primary: editor.primary,
+        peers: editor.peers,
     }
 }
 

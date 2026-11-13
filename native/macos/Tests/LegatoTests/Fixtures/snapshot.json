@@ -1,0 +1,94 @@
+{
+  "ready": true,
+  "error": null,
+  "version": "0.3.0-alpha.30",
+  "id": "mac",
+  "name": "MacBook Pro",
+  "state_dir": "/tmp/legato-fixture",
+  "sharing": true,
+  "settings": {
+    "clipboard": true,
+    "remap": true,
+    "invert_wheel": false,
+    "push_distance": 30.0,
+    "controller": null
+  },
+  "paired": [
+    {
+      "id": "pc",
+      "name": "Windows PC",
+      "os": "Windows",
+      "connected": true,
+      "path": "direct · 2 ms",
+      "active": true
+    },
+    {
+      "id": "laptop",
+      "name": "Travel laptop",
+      "os": "macOS",
+      "connected": false,
+      "path": null,
+      "active": false
+    }
+  ],
+  "nearby": [
+    {
+      "id": "new",
+      "name": "Nearby PC",
+      "os": null,
+      "connected": false,
+      "path": null,
+      "active": false
+    }
+  ],
+  "pairing": {
+    "id": "new",
+    "name": "Nearby PC",
+    "code": "042916",
+    "incoming": true,
+    "stage": "confirm"
+  },
+  "notice": {
+    "id": 3,
+    "text": "Sent 2 MB to \"Windows PC\"."
+  },
+  "failures": [
+    "Couldn't send files to \"Windows PC\": closed"
+  ],
+  "reveal": {
+    "sequence": 1,
+    "paths": [
+      "/Users/me/Downloads/Legato/a.txt"
+    ]
+  },
+  "arrangement": {
+    "local": [
+      {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 1728.0,
+        "height": 1117.0
+      }
+    ],
+    "local_primary": 0,
+    "peers": [
+      {
+        "id": "pc",
+        "name": "Windows PC",
+        "placed": true,
+        "displays": [
+          {
+            "x": -416.0,
+            "y": -1440.0,
+            "width": 2560.0,
+            "height": 1440.0
+          }
+        ],
+        "primary": 0
+      }
+    ],
+    "problems": [
+      "Waiting to connect to \"Travel laptop\" once to learn its displays."
+    ]
+  }
+}

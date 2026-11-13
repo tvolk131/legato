@@ -183,9 +183,7 @@ pub async fn unpair(home: &Option<PathBuf>, query: &str) -> Result<()> {
     let dir = net.store().dir().to_path_buf();
     let mut config = config::load(&dir)?;
     let id = peer.id.to_string();
-    let before = config.neighbors.len();
-    config.neighbors.retain(|n| !id.starts_with(&n.peer));
-    if config.neighbors.len() != before {
+    if config.forget_neighbor(&id) {
         config::save(&dir, &config)?;
     }
     println!("Forgot \"{}\". Unpair on the other device too.", peer.name);
@@ -215,7 +213,7 @@ pub async fn layout(
     let dir = net.store().dir().to_path_buf();
     let mut config = config::load(&dir)?;
     let id = peer.id.to_string();
-    config.neighbors.retain(|n| !id.starts_with(&n.peer));
+    config.forget_neighbor(&id);
     config.neighbors.push(Neighbor {
         peer: id,
         side,

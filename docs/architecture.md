@@ -22,11 +22,14 @@ Windows; the opposite direction and Linux are outside the supported scope.
 | `legato-windows` | Windows display enumeration, hooks, injection, drag capture, Caps Lock |
 | `legato-screen` | Mac virtual display/capture/H.264 encoding; Windows decoding; cursor classification |
 | `legato-engine` | Shared application engine, settings, input routing, clipboard, files, streaming lifecycle |
-| `legato-app` | Iced/iced-m3 tray UI, arrangement editor, Windows viewer and crash recovery |
+| `legato-app` | Windows Iced/iced-m3 tray UI, display viewer and crash recovery (it also builds on Mac for development) |
+| `legato-swift-bridge` | C ABI and JSON contract linking the engine into the SwiftUI Mac app in `native/macos` |
 | `legato-cli` | Pairing, layout, diagnostics, and sharing from the terminal |
 
-The app runs Iced/AppKit on its main thread and bridges to the engine's Tokio
-runtime. Native capture has its own event-tap or Windows hook/message-loop thread.
+The Windows app runs Iced on its main thread and bridges to the engine's Tokio
+runtime. The Mac app is SwiftUI: it calls the bridge off the main thread, and the
+engine notifies it when its state changes. Both front ends edit the arrangement
+with `legato_engine::arrange`. Native capture has its own event-tap or Windows hook/message-loop thread.
 Capture runs the pure controller synchronously so it can immediately swallow or
 pass each OS event. Injection and clipboard work are kept off the UI loop.
 The app and CLI use the same engine and state-directory lock; quit the tray app
