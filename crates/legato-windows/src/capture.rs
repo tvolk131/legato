@@ -172,6 +172,17 @@ impl State {
     fn drain(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
         for action in std::mem::take(&mut self.out) {
+            if matches!(
+                action,
+                Action::Capture
+                    | Action::Release { .. }
+                    | Action::EnterPortal { .. }
+                    | Action::Unpark
+            ) {
+                // Raw motion counted before the cursor was pinned or unpinned belongs to
+                // the previous mode: as a push it could send the pointer straight back.
+                self.raw = (0, 0);
+            }
             match action {
                 Action::Capture => {
                     let pin = pin_point(&self.controller);
@@ -268,6 +279,10 @@ impl State {
         let event = match msg {
             WM_MOUSEMOVE => match self.pin {
                 Some(pin) => {
+                    // Captured motion is measured from the pin, not raw input. Raw input
+                    // keeps arriving while pinned and must not pile up for the first
+                    // local move after release.
+                    self.raw = (0, 0);
                     let delta = Point::new((pos.x - pin.x) as f64, (pos.y - pin.y) as f64);
                     if delta.x == 0.0 && delta.y == 0.0 {
                         return (Verdict::Swallow, vec![]);
@@ -1039,17 +1054,16 @@ mod tests {
         layout
     }
 
-    #[test]
-    fn display_changes_repin_capture_without_jumping_or_releasing_the_drag() {
+    fn state(local: Rect) -> (State, mpsc::Receiver<Action>) {
         let (sink, actions) = mpsc::channel();
         let (_, commands) = mpsc::channel();
-        let mut state = State {
+        let state = State {
             controller: Controller::new(
                 ControllerConfig {
                     push_distance: 0.0,
                     ..Default::default()
                 },
-                layout(Rect::new(0.0, 0.0, 1920.0, 1080.0)),
+                layout(local),
             ),
             sink: Box::new(move |action| {
                 sink.send(action).unwrap();
@@ -1069,6 +1083,46 @@ mod tests {
             key_noted: None,
             peer_moved: false,
         };
+        (state, actions)
+    }
+
+    #[test]
+    fn raw_motion_while_driving_the_peer_is_not_a_push_after_release() {
+        let (mut state, _actions) = state(Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        state.handle(Event::LocalMotion {
+            pos: Point::new(500.0, 1079.0),
+            attempted: Point::new(0.0, 10.0),
+        });
+        let pin = state.pin.expect("pushing past the edge captures");
+
+        // Raw input keeps counting while the cursor is pinned; captured moves use the pin.
+        state.raw = (0, 4000);
+        state.raw_seen = true;
+        state.on_mouse(
+            WM_MOUSEMOVE,
+            &MSLLHOOKSTRUCT {
+                pt: POINT {
+                    x: pin.x + 3,
+                    y: pin.y + 40,
+                },
+                ..Default::default()
+            },
+        );
+        assert_eq!(state.raw, (0, 0));
+
+        // Raw input that arrives after the last pinned move is dropped on release too.
+        state.raw = (0, 4000);
+        state.out.push(Action::Release {
+            warp: Point::new(500.0, 1070.0),
+        });
+        state.drain();
+        assert_eq!(state.pin, None);
+        assert_eq!(state.raw, (0, 0));
+    }
+
+    #[test]
+    fn display_changes_repin_capture_without_jumping_or_releasing_the_drag() {
+        let (mut state, actions) = state(Rect::new(0.0, 0.0, 1920.0, 1080.0));
         state.handle(Event::LocalMotion {
             pos: Point::new(500.0, 1079.0),
             attempted: Point::new(0.0, 10.0),
