@@ -110,6 +110,10 @@ pub struct Engine {
     config_update: Mutex<()>,
     status: broadcast::Sender<Status>,
     sharing: Mutex<Option<Sharing>>,
+    /// Held by a sharing task from before it starts sessions until its cleanup is done.
+    /// Sharing started while an earlier run is still stopping waits for it, so that run's
+    /// cleanup cannot stop the new run's sessions or commands.
+    sharing_run: Arc<tokio::sync::Mutex<()>>,
     known_screens: Mutex<HashMap<EndpointId, Screens>>,
     screens: watch::Receiver<Screens>,
     run_commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<run::RunCommand>>>,
@@ -141,6 +145,7 @@ impl Engine {
             config_update: Mutex::new(()),
             status,
             sharing: Mutex::new(None),
+            sharing_run: Arc::default(),
             known_screens: Mutex::new(known_screens),
             screens: screens::watch(local_screens(), local_screens, Duration::from_secs(1)),
             run_commands: Mutex::new(None),
@@ -290,7 +295,9 @@ impl Engine {
         }
         let (stop, stop_rx) = oneshot::channel();
         let engine = self.clone();
+        let run = self.sharing_run.clone();
         let task = tokio::spawn(async move {
+            let _run = run.lock_owned().await;
             let _ = engine.status.send(Status::Sharing(true));
             if let Err(e) = engine.share(stop_rx).await {
                 tracing::error!("sharing stopped: {e:#}");
