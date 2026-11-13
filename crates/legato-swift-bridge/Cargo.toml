@@ -11,10 +11,10 @@ publish.workspace = true
 [lib]
 crate-type = ["staticlib", "rlib"]
 
-[dependencies]
+# Only the macOS app links this; elsewhere the crate is empty.
+[target.'cfg(target_os = "macos")'.dependencies]
 anyhow.workspace = true
 legato-engine.workspace = true
-legato-core.workspace = true
 legato-net.workspace = true
 legato-proto.workspace = true
 n0-future.workspace = true

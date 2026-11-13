@@ -267,10 +267,7 @@ pub(crate) async fn run(
             }
             for (&machine, p) in peers {
                 let id = p.session.peer.to_string();
-                let ours = config
-                    .neighbors
-                    .iter()
-                    .any(|n| !n.peer.is_empty() && id.starts_with(&n.peer));
+                let ours = config.neighbors.iter().any(|n| n.is_for(&id));
                 let offset = ours
                     .then(|| layout.machine(machine).map(|m| m.offset))
                     .flatten();

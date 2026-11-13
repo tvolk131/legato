@@ -3254,7 +3254,6 @@ name = "legato-swift-bridge"
 version = "0.3.0-alpha.30"
 dependencies = [
  "anyhow",
- "legato-core",
  "legato-engine",
  "legato-net",
  "legato-proto",

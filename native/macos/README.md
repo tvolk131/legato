@@ -1,61 +1,71 @@
-# Native macOS GUI
+# Legato for Mac
 
-An opt-in SwiftUI front end for macOS 26+ on Apple silicon. The existing Iced app
-remains the release default; Windows continues to use it. Both front ends use the
-same Rust engine, identity, settings, protocol, and state-directory lock. Quit the
-installed app before running this one. No wire-version change is needed.
+The Mac app: a SwiftUI menu bar app for macOS 26+ on Apple silicon. It links the
+Rust engine (`crates/legato-swift-bridge`) as a static library and shares its
+identity, settings, protocol and state-directory lock with the CLI and with the
+Iced app that Windows ships. Releases package it as `Legato.app`.
 
-Build an app bundle from the repository root:
+## Building
+
+Requires Rust 1.99+ and Swift 6.2+ with the macOS 26 SDK. From the repository root:
 
 ```sh
 native/macos/build-app.sh
 open target/swiftui/Legato.app
 ```
 
-Requires Rust 1.99+ and Swift 6.2+ with the macOS 26 SDK. The script builds a debug
-bridge and Swift binary and ad-hoc signs the development bundle. It does not
-install, replace the installed app, notarize or publish a release. Use the existing
-Developer ID signing/notarization process before distributing a candidate. Do not
-assume development permissions carry over from the installed signed application.
-`LEGATO_SIGN_IDENTITY` selects a local signing identity. For custom Cargo output,
-set `LEGATO_BRIDGE_LIB_DIR` when invoking SwiftPM.
+The script builds a debug bridge and Swift binary, assembles the bundle with
+`bundle.sh`, and signs it ad hoc (`LEGATO_SIGN_IDENTITY` picks another identity).
+The development bundle's id is `io.github.tvolk131.legato.dev`, so its permissions
+and login item stay apart from the released app's. It still uses this Mac's Legato
+identity and state: quit the installed app first. Permissions granted to the
+installed app don't carry over to a development build.
 
-The native interface uses NavigationSplitView for Devices/Arrangement, a Settings
-scene (Command-comma), native toolbar controls and sheets, and MenuBarExtra.
-Standard controls adopt the system appearance and accessibility preferences.
-The engine stays alive when the main window closes; Quit waits for sharing to
-stop and restore input. Settings changes edit the latest committed configuration.
+The release workflow builds the bridge and the Swift app in release mode, bundles
+them with the same `bundle.sh`, and signs and notarizes the result; see
+[the signing guide](../../docs/macos-signing.md). SwiftPM links the bridge from
+`target/debug` unless `LEGATO_BRIDGE_LIB_DIR` points elsewhere.
 
-Implemented Mac feature surfaces:
+## How it fits together
 
-- LAN discovery, incoming/outgoing pairing, code comparison, cancel/decline and
-  waiting states; sharing resumes for paired devices and starts after pairing.
-- Connection state/path, active device, file/folder picker, window drops,
-  persistent transfer failures, and Finder reveal for successful edge drops.
-- Draggable multi-display arrangement using the existing snap algorithm,
-  keyboard position menus, primary-display markers, offline caches and diagnostics.
-- Controller policy, edge resistance, modifier mapping, reverse wheel, clipboard,
-  login item registration, identity/settings-folder access, and permission links.
-- Shared engine clipboard/input/network behavior and Mac extra-display hosting.
-  Viewer/display-options UI remains Windows-only, as in the original Mac app.
+- `Sources/LegatoBridge/include/LegatoBridge.h` is the C ABI. Commands and the
+  state snapshot are JSON; `Tests/LegatoTests/Fixtures/snapshot.json` is a sample
+  the Rust tests write and the Swift tests decode, so both sides agree on it.
+  Regenerate it with `LEGATO_UPDATE_FIXTURES=1 cargo test -p legato-swift-bridge`.
+- The engine calls an observer when its state changes; `AppModel` then reads one
+  snapshot. Calls run on the `Bridge` actor, off the main thread.
+- Arrangement editing and snapping live in `legato_engine::arrange`, shared with
+  the Iced app.
+- The window uses NavigationSplitView (Devices, Arrangement), sheets for adding a
+  device and pairing, a Settings scene (Command-comma) and a MenuBarExtra. Legato
+  appears in the Dock only while its window is open. Closing the window leaves the
+  engine running; Quit waits for sharing to stop and input to be restored.
+- Opening a second copy shows the running one instead.
+- "Open at login" registers `Contents/Library/LaunchAgents/<bundle id>.login.plist`
+  ([LoginAgent.plist](LoginAgent.plist)) with SMAppService. It starts Legato with
+  `--hidden`, in the menu bar only, and starts it again if it crashes (at most once
+  a minute). The first launch replaces the Iced app's
+  `~/Library/LaunchAgents/Legato.plist`, keeping it on if it was on.
+- Logs go to `legato-app.log` in the state directory, like the other front ends.
 
-Verification:
+The display viewer and display options are Windows-only.
+
+## Tests
 
 ```sh
-MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --locked -p legato-swift-bridge
+cargo test -p legato-swift-bridge
 native/macos/test.sh
 ```
 
-See [Tests/README.md](Tests/README.md) for baseline recording, strict comparisons
-and hosted rendering checks. The bridge has Rust tests for commands, settings,
-pairing cancellation, and arrangement snapping. CI builds/tests Rust on all three
-supported targets and builds/renders SwiftUI on macOS 26.
+The bridge tests cover commands, settings, pairing cancellation, notices and the
+JSON contract. The Swift suite decodes the contract fixture and compares screenshots;
+see [Tests/README.md](Tests/README.md). CI runs both on macOS 26.
 
-Hardware parity is pending: pair with the same candidate on Windows, test input
-handover and recovery, clipboard/files, display arrangement and hosting, close
-and reopen the main window during pairing, and verify login and signed-upgrade
-permission retention. Screenshot tests establish layout coverage, not those
-runtime behaviors. The Swift app remains an opt-in candidate until these pass.
+Screenshots show layout, not runtime behavior. Check these on real hardware with
+the same candidate on both machines: pairing and arrangement with Windows, input
+handover, clipboard and files, extra-display hosting, closing and reopening the
+window during pairing, the login item and hidden launch, crash restart, and
+permission retention across a signed upgrade from the Iced app.
 
 Design references: [Apple's Liquid Glass adoption guide](https://developer.apple.com/documentation/TechnologyOverviews/adopting-liquid-glass),
 [materials](https://developer.apple.com/design/human-interface-guidelines/materials),

@@ -3,6 +3,6 @@
   "comparison" : "0.5% changed pixels, RGB threshold 16",
   "locale" : "en_US",
   "macOS" : "Version 26.6.2 (Build 25G83)",
-  "pixelsPerPoint" : 1,
-  "renderer" : "NSHostingView.cacheDisplay; unordered offscreen window"
+  "pixelsPerPoint" : 2,
+  "renderer" : "NSHostingView.cacheDisplay at a fixed 2x scale; unordered offscreen window"
 }

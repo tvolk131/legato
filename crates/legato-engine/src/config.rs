@@ -245,6 +245,24 @@ pub struct Neighbor {
     pub offset: Option<[f64; 2]>,
 }
 
+impl Neighbor {
+    /// Whether this entry is for the peer with this full id. An empty `peer` matches
+    /// nothing, rather than every peer.
+    pub fn is_for(&self, id: &str) -> bool {
+        !self.peer.is_empty() && id.starts_with(&self.peer)
+    }
+}
+
+impl Config {
+    /// Drops the saved position of the peer with this full id. Returns whether one was
+    /// saved.
+    pub fn forget_neighbor(&mut self, id: &str) -> bool {
+        let before = self.neighbors.len();
+        self.neighbors.retain(|n| !n.is_for(id));
+        self.neighbors.len() != before
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Switching {

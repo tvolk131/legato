@@ -15,6 +15,7 @@ platform suites and releases. The MSRV job only type-checks on Rust 1.99.
 | macOS, Windows x64, Windows ARM64 | Workspace Clippy/tests with warnings denied |
 | Selected platform tests | Ignored macOS/Windows input tests; Windows app GPU/presentation tests using DX12 WARP |
 | Rust 1.99 on macOS | `cargo check --locked --workspace` |
+| Mac app on macOS 26 | Builds the bridge and SwiftUI app; decodes the JSON contract; renders every screenshot fixture (smoke mode) |
 
 Run appropriate checks locally from the repository root:
 
@@ -423,11 +424,11 @@ Test downloaded packages, not just development builds. Follow the
 - [Runner Accessibility discussion](https://github.com/actions/runner-images/issues/1567)
 - [Tart macOS VMs](https://github.com/cirruslabs/tart)
 
-### Native SwiftUI candidate
+### Mac app
 
-The opt-in macOS front end and screenshot suite are documented in
-[native/macos/README.md](native/macos/README.md). It shares the production engine;
-its real two-machine parity and signed-upgrade gates remain pending. Native
-screenshots use Swift Testing with offscreen AppKit hosting and do not start the
-engine. Hosted CI renders fixtures and checks image content/size; strict pixel
-baselines are compared on the recorded OS appearance.
+The SwiftUI Mac app and its screenshot suite are documented in
+[native/macos/README.md](native/macos/README.md). Run `native/macos/test.sh` after
+changing it. Screenshots use Swift Testing with offscreen AppKit hosting and don't
+start the engine; strict pixel baselines compare on the OS that recorded them.
+Its hardware checks with Windows, the login item and signed-upgrade permission
+retention are listed there.

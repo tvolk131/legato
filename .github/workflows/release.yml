@@ -2,7 +2,8 @@
 # e.g. `git tag v0.1.0-alpha.1 && git push origin v0.1.0-alpha.1`. Release notes come from
 # docs/releases/<tag>.md if it exists. Tags must match workspace package versions.
 # Suffixed tags stay prereleases; unsuffixed tags create regular releases. Mac packages
-# require Developer ID signing and notarization. workflow_dispatch can build an existing
+# require Developer ID signing and notarization. The Mac package holds the SwiftUI app
+# (native/macos); Windows packages hold the Iced app. workflow_dispatch can build an existing
 # tag without publishing; see docs/macos-signing.md and docs/releases/0.3.0-plan.md.
 #
 # Pushes to main run the same builds but only to fill the cache: a tag's run can restore
@@ -53,7 +54,8 @@ jobs:
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
           - name: macos-arm64
-            os: macos-latest
+            # The SwiftUI app needs the macOS 26 SDK.
+            os: macos-26
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
@@ -106,11 +108,21 @@ jobs:
       - name: build
         shell: bash
         run: |
-          # One cargo run for both, so shared dependencies are built once with one set of
-          # features. (The app arrived after the first alpha: build it when it's there.)
+          # One cargo run for all, so shared dependencies are built once with one set of
+          # features. Windows ships the Iced app; the Mac ships the SwiftUI app, which
+          # links the engine as a static library. (Older tags predate one or both.)
           packages="-p legato-cli"
-          if [ -d crates/legato-app ]; then packages="$packages -p legato-app"; fi
+          if [ "$RUNNER_OS" = macOS ] && [ -f native/macos/bundle.sh ]; then
+            packages="$packages -p legato-swift-bridge"
+            export MACOSX_DEPLOYMENT_TARGET=26.0
+          elif [ -d crates/legato-app ]; then
+            packages="$packages -p legato-app"
+          fi
           cargo build --locked --release $packages --target ${{ matrix.target }}
+          if [ "$RUNNER_OS" = macOS ] && [ -f native/macos/bundle.sh ]; then
+            LEGATO_BRIDGE_LIB_DIR="$PWD/target/${{ matrix.target }}/release" \
+              swift build -c release --package-path native/macos --scratch-path target/swift
+          fi
       - name: package (Windows)
         if: runner.os == 'Windows' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
         shell: pwsh
@@ -191,12 +203,18 @@ jobs:
           # Older tags predate the bundled third-party assets and their notices.
           if [ -d licenses ]; then cp -R licenses "$dir/"; fi
           app="$dir/Legato.app"
-          mkdir -p "$app/Contents/MacOS"
-          cp "$out/legato-app" "$app/Contents/MacOS/Legato"
           version="${TAG#v}"
           # Apple's bundle versions are numeric; the app and archive retain the full tag.
-          sed "s/__VERSION__/${version%%-*}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
-          plutil -replace CFBundleVersion -string "$GITHUB_RUN_NUMBER" "$app/Contents/Info.plist"
+          if [ -f native/macos/bundle.sh ]; then
+            swift_bin="$(swift build -c release --package-path native/macos --scratch-path target/swift --show-bin-path)"
+            native/macos/bundle.sh "$swift_bin/Legato" "$app" io.github.tvolk131.legato \
+              "${version%%-*}" "$GITHUB_RUN_NUMBER"
+          else
+            mkdir -p "$app/Contents/MacOS"
+            cp "$out/legato-app" "$app/Contents/MacOS/Legato"
+            sed "s/__VERSION__/${version%%-*}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+            plutil -replace CFBundleVersion -string "$GITHUB_RUN_NUMBER" "$app/Contents/Info.plist"
+          fi
           for item in "$dir/legato" "$app"; do
             codesign --force --sign "$identity" --keychain "$keychain" \
               --options runtime --timestamp "$item"
