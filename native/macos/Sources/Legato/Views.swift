@@ -32,6 +32,8 @@ struct RootView: View {
         }
         .frame(minWidth: 680, minHeight: 500)
         .sheet(isPresented: $model.discovering) { DiscoveryView(model: model) }
+        // Stop accepting pairing requests along with the window.
+        .onDisappear { model.discovering = false }
         .sheet(item: Binding(get: { model.state.pairing }, set: { if $0 == nil { model.command("confirm_pair", ["accept": false]) } })) { _ in
             PairingView(model: model).interactiveDismissDisabled()
         }
@@ -120,7 +122,7 @@ struct DevicesView: View {
                     ContentUnavailableView {
                         Label("Connect your first device", systemImage: "desktopcomputer.and.macbook")
                     } description: {
-                        Text("Open Legato on both devices on the same network, then add a device.")
+                        Text("Open Legato on both devices on the same network, then choose Add a Device on both.")
                     } actions: {
                         Button("Add a Device…") { model.discovering = true }.buttonStyle(.borderedProminent)
                     }
@@ -192,8 +194,8 @@ struct DiscoveryView: View {
                 ProgressView().controlSize(.small)
                 Text("Looking for Legato devices nearby…")
             }
-            Text("Open Legato on the other device and connect both devices to the same network.")
-                .foregroundStyle(.secondary)
+            Text("Open Add a Device on the other device too, on the same network. Pairing requests are accepted only while this is open.")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             List(model.state.nearby) { device in
                 HStack {
                     Text(device.name)
@@ -208,7 +210,7 @@ struct DiscoveryView: View {
             }
             .overlay {
                 if model.state.nearby.isEmpty {
-                    Text("No devices found yet. Check that Legato is open on both devices.")
+                    Text("No devices found yet. Check that Add a Device is open on both devices.")
                         .foregroundStyle(.secondary).multilineTextAlignment(.center).padding()
                 }
             }

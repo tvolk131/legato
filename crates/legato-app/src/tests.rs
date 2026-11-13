@@ -254,8 +254,10 @@ fn with_nothing_paired_the_page_points_to_adding_a_device() {
     snapshot(&mut ui, "devices-empty");
     assert!(ui.find("Connect your first device").is_ok());
     assert!(
-        ui.find("Open Legato on both devices on the same network, then choose Add a device.")
-            .is_ok()
+        ui.find(
+            "Open Legato on both devices on the same network, then choose Add a device on both."
+        )
+        .is_ok()
     );
     ui.click("Add a device…").unwrap();
     assert!(

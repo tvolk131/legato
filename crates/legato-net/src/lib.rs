@@ -293,11 +293,18 @@ impl Net {
         pairing::initiate(self.shared.clone(), &self.endpoint, peer.into()).await
     }
 
-    /// Accepts incoming pairing requests until the returned receiver is dropped.
+    /// Accepts incoming pairing requests until the returned receiver is dropped. Hold it
+    /// only while the person is adding a device; other requests are refused.
     pub fn listen_for_pairing(&self) -> mpsc::Receiver<PairAttempt> {
         let (tx, rx) = mpsc::channel(1);
         *self.shared.pair_listener.lock().unwrap() = Some(tx);
         rx
+    }
+
+    /// Stops accepting pairing requests now, without waiting for the receiver from
+    /// [`Net::listen_for_pairing`] to be dropped. A request already received carries on.
+    pub fn stop_listening_for_pairing(&self) {
+        self.shared.pair_listener.lock().unwrap().take();
     }
 
     /// Starts sessions with all paired peers, announcing `hello` (which must describe this

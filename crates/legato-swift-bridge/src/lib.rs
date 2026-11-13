@@ -168,6 +168,11 @@ enum Command {
         index: usize,
     },
     DismissNotice,
+    /// The Add a device sheet opened or closed. Pairing requests from other devices are
+    /// accepted only while it's open.
+    AddingDevice {
+        open: bool,
+    },
 }
 
 // ---- State ----
@@ -182,6 +187,8 @@ struct State {
     attempt: Option<PairAttempt>,
     pairing_generation: u64,
     pairing_task: Option<tokio::task::AbortHandle>,
+    /// Accepts pairing requests while the Add a device sheet is open.
+    listening: Option<tokio::task::JoinHandle<()>>,
     notices: Vec<Notice>,
     next_notice: u64,
     failures: Vec<String>,
@@ -382,6 +389,29 @@ fn on_status(engine: &Engine, state: &Shared, status: Status) {
     }
 }
 
+/// Starts or stops accepting pairing requests from other devices.
+fn listen_for_pairing(state: &Shared, net: &legato_net::Net, open: bool) {
+    let mut s = lock(state);
+    if !open {
+        // Later requests are refused; one already shown carries on.
+        net.stop_listening_for_pairing();
+        if let Some(task) = s.listening.take() {
+            task.abort();
+        }
+        return;
+    }
+    if s.listening.as_ref().is_some_and(|t| !t.is_finished()) {
+        return;
+    }
+    let mut incoming = net.listen_for_pairing();
+    let st = state.clone();
+    s.listening = Some(runtime().spawn(async move {
+        while let Some(attempt) = incoming.recv().await {
+            install_attempt(&st, attempt, None);
+        }
+    }));
+}
+
 fn install_attempt(state: &Shared, attempt: PairAttempt, generation: Option<u64>) {
     let mut s = lock(state);
     let stale = match generation {
@@ -491,14 +521,6 @@ fn start() -> bool {
                 lock(&s).notify(format!("Couldn't look for nearby devices: {e:#}"));
                 changed();
             }
-        }
-    }));
-
-    let mut incoming = engine.net().listen_for_pairing();
-    let s = state.clone();
-    tasks.push(runtime().spawn(async move {
-        while let Some(attempt) = incoming.recv().await {
-            install_attempt(&s, attempt, None);
         }
     }));
 
@@ -827,6 +849,7 @@ fn command(command: Command, engine: Arc<Engine>, state: Shared) -> Result<()> {
             }
         }
         Command::DismissNotice => lock(&state).notices.clear(),
+        Command::AddingDevice { open } => listen_for_pairing(&state, engine.net(), open),
     }
     Ok(())
 }
@@ -884,6 +907,9 @@ pub extern "C" fn legato_shutdown() {
         {
             let mut s = lock(&bridge.state);
             if let Some(task) = s.pairing_task.take() {
+                task.abort();
+            }
+            if let Some(task) = s.listening.take() {
                 task.abort();
             }
             s.attempt = None;

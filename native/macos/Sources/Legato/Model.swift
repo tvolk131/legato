@@ -137,7 +137,12 @@ struct LegatoError: LocalizedError {
     /// An error to show in an alert.
     var error: String?
     var starting = false
-    var discovering = false
+    /// The Add a Device sheet is open. Only then are other devices' pairing requests accepted.
+    var discovering = false {
+        didSet {
+            if discovering != oldValue, state.ready { command("adding_device", ["open": discovering]) }
+        }
+    }
     var unpair: Device?
     var page = Page.devices
     var loginEnabled = false
