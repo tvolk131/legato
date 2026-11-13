@@ -308,7 +308,8 @@ pub(crate) struct Hub {
     hello: Hello,
     events: mpsc::UnboundedSender<SessionEvent>,
     active: HashMap<EndpointId, Arc<Session>>,
-    dialers: Vec<tokio::task::JoinHandle<()>>,
+    /// One dial loop per peer: a second would keep replacing the first's connection.
+    dialers: HashMap<EndpointId, tokio::task::JoinHandle<()>>,
 }
 
 impl Hub {
@@ -334,7 +335,7 @@ impl Hub {
 
 impl Drop for Hub {
     fn drop(&mut self) {
-        for dialer in &self.dialers {
+        for dialer in self.dialers.values() {
             dialer.abort();
         }
     }
@@ -352,7 +353,10 @@ pub(crate) fn start(
         .peer_ids()
         .into_iter()
         .filter(|peer| should_dial(own, *peer))
-        .map(|peer| tokio::spawn(dial_loop(shared.clone(), endpoint.clone(), peer)))
+        .map(|peer| {
+            let dialer = tokio::spawn(dial_loop(shared.clone(), endpoint.clone(), peer));
+            (peer, dialer)
+        })
         .collect();
     let old = shared.sessions.lock().unwrap().replace(Hub {
         hello,
@@ -367,16 +371,15 @@ pub(crate) fn start(
 }
 
 /// Starts dialing a newly paired peer if sessions are running and it's our turn to dial.
+/// Pairing again with a peer that is still paired keeps its running dial loop.
 pub(crate) fn add_peer(shared: &Arc<Shared>, endpoint: &Endpoint, peer: EndpointId) {
     let mut hub = shared.sessions.lock().unwrap();
     if let Some(hub) = hub.as_mut()
         && should_dial(endpoint.id(), peer)
+        && hub.dialers.get(&peer).is_none_or(|d| d.is_finished())
     {
-        hub.dialers.push(tokio::spawn(dial_loop(
-            shared.clone(),
-            endpoint.clone(),
-            peer,
-        )));
+        let dialer = tokio::spawn(dial_loop(shared.clone(), endpoint.clone(), peer));
+        hub.dialers.insert(peer, dialer);
     }
 }
 
@@ -403,7 +406,11 @@ async fn dial_loop(shared: Arc<Shared>, endpoint: Endpoint, peer: EndpointId) {
     }
 }
 
-async fn dial(shared: &Arc<Shared>, endpoint: &Endpoint, peer: EndpointId) -> Result<()> {
+pub(crate) async fn dial(
+    shared: &Arc<Shared>,
+    endpoint: &Endpoint,
+    peer: EndpointId,
+) -> Result<()> {
     let conn = timeout(CONNECT_TIMEOUT, endpoint.connect(peer, SESSION_ALPN))
         .await
         .context("timed out connecting")??;
@@ -461,8 +468,21 @@ async fn run(
     let events = {
         let mut hub = shared.sessions.lock().unwrap();
         let hub = hub.as_mut().context("sessions are not running")?;
+        // Unpairing during the handshake found no session to close: check again here,
+        // under the lock `Net::unpair` takes after removing the peer from `allowed`.
+        if !shared.allowed.read().unwrap().contains(&peer) {
+            conn.close(0u32.into(), b"unpaired");
+            bail!("{} was unpaired during the handshake", peer.fmt_short());
+        }
         if let Some(old) = hub.active.insert(peer, session.clone()) {
             old.close();
+            // The old session's `run` sees it is no longer active and stays silent, so
+            // report its end here, before the new connection: the engine must release
+            // keys and buttons held through the old one.
+            let _ = hub.events.send(SessionEvent::Disconnected {
+                peer,
+                reason: "replaced by a new connection".into(),
+            });
         }
         // A display change during the handshake must not be lost before registration.
         if hub.hello.screens != announced {

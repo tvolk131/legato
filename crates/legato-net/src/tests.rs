@@ -665,3 +665,59 @@ async fn failed_pairing_changes_preserve_allow_list_and_live_session() {
         Some(SessionEvent::Disconnected { .. })
     );
 }
+
+/// No session or pairing traffic arrives within `wait`.
+async fn assert_quiet(events: &mut mpsc::UnboundedReceiver<SessionEvent>, wait: Duration) {
+    if let Ok(event) = timeout(wait, events.recv()).await {
+        panic!("unexpected session event {event:?}");
+    }
+}
+
+#[tokio::test]
+async fn pairing_again_keeps_the_running_session() {
+    let (a, b) = (
+        node("repair-a", Os::Windows).await,
+        node("repair-b", Os::MacOs).await,
+    );
+    let [(mut ae, _), (mut be, _)] = connect(&a, &b).await;
+    // E.g. after unpairing on only one side: the other side still has the peer paired.
+    pair(&a, &b, true, true).await;
+    // A second dial loop would connect again at once and replace the session, over
+    // and over.
+    assert_quiet(&mut ae, Duration::from_secs(3)).await;
+    assert_quiet(&mut be, Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn a_replaced_session_is_reported_disconnected_before_the_new_one() {
+    let (a, b) = (
+        node("replace-a", Os::Windows).await,
+        node("replace-b", Os::MacOs).await,
+    );
+    let [(mut ae, _), (mut be, _)] = connect(&a, &b).await;
+    let (dialer, peer) = if a.id().as_bytes() < b.id().as_bytes() {
+        (&a, b.id())
+    } else {
+        (&b, a.id())
+    };
+    // A second connection, as when a restarted peer dials before the old one times out.
+    let shared = dialer.shared.clone();
+    let endpoint = shared.endpoint.get().unwrap().clone();
+    tokio::spawn(async move {
+        let _ = session::dial(&shared, &endpoint, peer).await;
+    });
+    // Whichever side registers the new connection first closes the old one itself (and
+    // used to report nothing); the other may see the old one closed by its peer first.
+    // Either way: exactly one disconnect, then the new session.
+    for events in [&mut ae, &mut be] {
+        assert_matches!(
+            timeout(Duration::from_secs(10), events.recv())
+                .await
+                .unwrap(),
+            Some(SessionEvent::Disconnected { .. })
+        );
+        next_connected(events).await;
+    }
+    assert_quiet(&mut ae, Duration::from_millis(500)).await;
+    assert_quiet(&mut be, Duration::from_millis(100)).await;
+}
