@@ -157,3 +157,60 @@ fn snapshot_fixture_matches_the_swift_contract() {
         "the Swift fixture is out of date; regenerate it (see this test's docs)"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pairing_requests_are_accepted_only_while_adding_a_device() {
+    use legato_net::{Net, NetConfig};
+    use legato_proto::Os;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut nodes = Vec::new();
+    for name in ["a", "b"] {
+        nodes.push(
+            Net::start(NetConfig {
+                store_dir: Some(dir.path().join(name)),
+                name: name.into(),
+                os: Os::MacOs,
+                app_version: "test".into(),
+                relays: false,
+                mdns: false,
+            })
+            .await
+            .unwrap(),
+        );
+    }
+    let (a, b) = (&nodes[0], &nodes[1]);
+    let state = Shared::default();
+    let refused = async || {
+        let err = a.pair(b.addr()).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not in pairing mode"),
+            "{err:#}"
+        );
+    };
+
+    // Closed until the sheet opens.
+    refused().await;
+
+    listen_for_pairing(&state, b, true);
+    listen_for_pairing(&state, b, true); // Opening twice keeps one listener.
+    let theirs = a.pair(b.addr()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while lock(&state).attempt.is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let pairing = lock(&state).pairing.clone().unwrap();
+    assert!(pairing.incoming && pairing.name == "a");
+
+    // Closing the sheet refuses new requests but keeps the one being confirmed.
+    listen_for_pairing(&state, b, false);
+    assert!(lock(&state).listening.is_none());
+    assert!(lock(&state).attempt.is_some());
+    drop(lock(&state).cancel_pairing());
+    drop(theirs);
+    refused().await;
+}

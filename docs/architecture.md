@@ -77,8 +77,11 @@ also have injection restrictions; no SYSTEM service is provided.
 
 Unpaired devices are discovered through LAN mDNS. Both users compare and accept a
 six-digit code derived from the live TLS session using the label
-`legato pairing code v1`. Pairing requires listening mode, allows one concurrent
-attempt, and has timeouts; it has no attempt-rate limiter. Paired devices reconnect
+`legato pairing code v1`. A device accepts pairing requests only in listening
+mode: while its Add a device window is open, or during `legato pair`. Others are
+refused with "not in pairing mode", and the requesting app says to open Add a
+device there too. Pairing allows one concurrent attempt and has timeouts; it has no
+attempt-rate limiter. Paired devices reconnect
 by endpoint identity using mDNS, DNS/pkarr, and iroh relays, with direct-path
 upgrades where possible. Traffic is end-to-end encrypted.
 

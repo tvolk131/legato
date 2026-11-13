@@ -14,7 +14,7 @@ Use one keyboard and mouse across your computers over the network. Your cursor m
 1. Download matching releases for both machines; their protocol versions must agree. Choose `macos-arm64` for Apple silicon and `windows-x64` or `windows-arm64` for the PC.
 2. Extract the Mac archive, copy `Legato.app` to Applications, and open it. Extract the Windows ZIP and run `Legato.exe`. These are portable archives; there is no Windows installer.
 3. On Mac, grant **Accessibility** and **Input Monitoring** to the app. Hosting the extra display also needs **Screen Recording**. Allow **Local Network** access when prompted and allow Windows firewall access for the network where you pair. Quit/reopen after changing permissions if sharing remains stopped.
-4. Open **Legato** on both machines. On one machine, choose **Add a device…** and pick the other machine, then compare and accept the same 6-digit code on both. Drag the other machine's screens to where they sit in the arrangement editor and start sharing.
+4. Open **Legato** on both machines and choose **Add a device…** on both; a device accepts pairing requests only while that window is open. On one machine, pick the other machine, then compare and accept the same 6-digit code on both. Drag the other machine's screens to where they sit in the arrangement editor and start sharing.
 
 Push the cursor across the shared edge, and keep pushing a little past it. In the default follow-input mode, using the other machine's own trackpad or keyboard takes control there.
 

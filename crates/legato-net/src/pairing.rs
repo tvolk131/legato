@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use legato_proto::{Os, PAIR_ALPN, PAIRING_CODE_LABEL, PROTOCOL_VERSION, Pair};
@@ -157,6 +157,14 @@ pub(crate) async fn initiate(
         Ok(ok) => ok,
         Err(e) => {
             return Err(match conn.close_reason() {
+                Some(ConnectionError::ApplicationClosed(close))
+                    if close.error_code == NOT_LISTENING.into() =>
+                {
+                    anyhow::anyhow!(
+                        "the other device is not in pairing mode: open Add a device there too, \
+                         then try again"
+                    )
+                }
                 Some(reason) => anyhow::anyhow!("the other device refused: {reason}"),
                 None => e,
             });
@@ -174,6 +182,9 @@ pub(crate) async fn initiate(
     })
 }
 
+/// The close code for a pairing request that arrives while nobody is adding a device.
+const NOT_LISTENING: u32 = 1;
+
 /// Handles incoming pairing connections.
 #[derive(Debug, Clone)]
 pub(crate) struct Handler(pub(crate) Arc<Shared>);
@@ -181,8 +192,10 @@ pub(crate) struct Handler(pub(crate) Arc<Shared>);
 impl ProtocolHandler for Handler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let shared = &self.0;
-        let Some(listener) = shared.pair_listener.lock().unwrap().clone() else {
-            conn.close(1u32.into(), b"not in pairing mode");
+        // Listening stops when the receiver is dropped (the Add a device window closed).
+        let listener = shared.pair_listener.lock().unwrap().clone();
+        let Some(listener) = listener.filter(|l| !l.is_closed()) else {
+            conn.close(NOT_LISTENING.into(), b"not in pairing mode");
             return Ok(());
         };
         if shared.pairing_busy.swap(true, Ordering::SeqCst) {
@@ -226,7 +239,7 @@ impl ProtocolHandler for Handler {
             _busy: Some(busy),
         };
         if listener.send(attempt).await.is_err() {
-            conn.close(1u32.into(), b"not in pairing mode");
+            conn.close(NOT_LISTENING.into(), b"not in pairing mode");
         }
         Ok(())
     }

@@ -84,6 +84,23 @@ async fn pairing_is_refused_unless_listening() {
 }
 
 #[tokio::test]
+async fn pairing_is_refused_once_listening_stops() {
+    let (a, b) = (node("a", Os::Windows).await, node("b", Os::MacOs).await);
+    let (x, y) = pair(&a, &b, true, false).await;
+    assert_eq!(
+        (x, y),
+        (PairOutcome::DeclinedThere, PairOutcome::DeclinedHere)
+    );
+    // `pair` dropped b's listener: the Add a device window closed.
+    let err = a.pair(b.addr()).await.unwrap_err();
+    assert!(
+        format!("{err:#}").contains("not in pairing mode"),
+        "{err:#}"
+    );
+    assert!(format!("{err:#}").contains("Add a device"), "{err:#}");
+}
+
+#[tokio::test]
 async fn sessions_to_unpaired_peers_are_refused_by_both_sides() {
     let (a, b) = (node("a", Os::Windows).await, node("b", Os::MacOs).await);
     let _events = b.start_sessions(hello(&b));

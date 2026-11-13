@@ -250,7 +250,9 @@ fn devices(m: &Model, width: f32) -> Element<'_, Message> {
     let paired: Element<'_, Message> = if m.paired.is_empty() {
         column![
             typography("Connect your first device", TypeScale::TitleMedium),
-            body("Open Legato on both devices on the same network, then choose Add a device."),
+            body(
+                "Open Legato on both devices on the same network, then choose Add a device on both."
+            ),
         ]
         .spacing(8)
         .into()
@@ -388,7 +390,7 @@ fn add_device_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
                 body("Looking for Legato on this network…"),
             ].spacing(12).align_y(Alignment::Center),
             typography("Device not appearing?", TypeScale::TitleSmall),
-            body("Keep Legato open on both devices and check that they are on the same network. A VPN or a guest network may prevent discovery."),
+            body("Open Add a device on both devices and check that they are on the same network. A VPN or a guest network may prevent discovery."),
         ].spacing(12)
         .into()
     } else {
@@ -404,8 +406,9 @@ fn add_device_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
         column![
             typography("Add a device", TypeScale::HeadlineSmall),
             body(
-                "Open Legato on the other device. It shows up here while it's on the same \
-                 network as this one."
+                "Open Add a device on the other device too. It shows up here while it's on \
+                 the same network as this one. Pairing requests are accepted only while this \
+                 dialog is open."
             ),
             found,
             body("After pairing, your devices can connect across different networks."),

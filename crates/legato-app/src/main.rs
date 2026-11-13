@@ -324,6 +324,8 @@ impl App {
             Message::WindowClosed(id) => {
                 if self.window == Some(id) {
                     self.window = None;
+                    // Stop accepting pairing requests along with the window.
+                    self.model.add_device_open = false;
                     platform::show_in_dock(false);
                 }
                 if let Some(viewer) = self.viewer.take_if(|v| v.window == id) {
@@ -422,6 +424,7 @@ impl App {
                     stage: PairingStage::Confirm,
                 });
                 drop(guard);
+                self.model.add_device_open = false;
                 self.model.pairing_open = true;
                 self.attempt = Some(attempt);
                 if self.window.is_none() {
@@ -967,7 +970,12 @@ impl App {
             Subscription::run_with(engine.clone(), config_stream),
             Subscription::run_with(engine.clone(), screens_stream),
             Subscription::run_with(engine.clone(), nearby_stream),
-            Subscription::run_with(engine.clone(), pairing_stream),
+            // Pairing requests are accepted only while Add a device is open.
+            if self.model.add_device_open {
+                Subscription::run_with(engine.clone(), pairing_stream)
+            } else {
+                Subscription::none()
+            },
             Subscription::run(tray::events).map(Message::Tray),
             iced::system::theme_changes().map(Message::SystemTheme),
             if self.viewer.is_some() {
