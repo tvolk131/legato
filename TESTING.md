@@ -422,3 +422,12 @@ Test downloaded packages, not just development builds. Follow the
 - [Hosted Mac TCC measurements](https://github.com/Integration-Automation/AutoControlGUI/pull/482)
 - [Runner Accessibility discussion](https://github.com/actions/runner-images/issues/1567)
 - [Tart macOS VMs](https://github.com/cirruslabs/tart)
+
+### Native SwiftUI candidate
+
+The opt-in macOS front end and screenshot suite are documented in
+[native/macos/README.md](native/macos/README.md). It shares the production engine;
+its real two-machine parity and signed-upgrade gates remain pending. Native
+screenshots use Swift Testing with offscreen AppKit hosting and do not start the
+engine. Hosted CI renders fixtures and checks image content/size; strict pixel
+baselines are compared on the recorded OS appearance.

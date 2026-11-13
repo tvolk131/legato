@@ -1,0 +1,8 @@
+{
+  "architecture" : "arm64",
+  "comparison" : "0.5% changed pixels, RGB threshold 16",
+  "locale" : "en_US",
+  "macOS" : "Version 26.6.2 (Build 25G83)",
+  "pixelsPerPoint" : 1,
+  "renderer" : "NSHostingView.cacheDisplay; unordered offscreen window"
+}

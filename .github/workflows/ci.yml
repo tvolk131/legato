@@ -72,3 +72,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --workspace
+
+  swiftui:
+    name: Native SwiftUI (macOS 26)
+    runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "26.0"
+      # Pixel baselines depend on the exact OS build. Hosted runs check rendering;
+      # compare committed baselines locally on the recorded OS (see native/macos).
+      LEGATO_SNAPSHOT_SMOKE: "1"
+      LEGATO_SNAPSHOT_ARTIFACTS: ${{ github.workspace }}/target/swift-snapshots
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked -p legato-swift-bridge
+      - run: native/macos/test.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: swiftui-screenshots
+          path: target/swift-snapshots

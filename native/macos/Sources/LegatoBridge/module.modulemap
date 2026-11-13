@@ -1,0 +1,4 @@
+module LegatoBridge {
+    header "include/LegatoBridge.h"
+    export *
+}
