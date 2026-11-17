@@ -4,7 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use legato_core::{Align, Side};
+use legato_core::{Align, KeyRemap, Side, keymap};
+use legato_proto::Os;
 use serde::{Deserialize, Serialize};
 
 pub const FILE: &str = "legato.toml";
@@ -293,6 +294,89 @@ pub enum Remap {
 #[serde(default, deny_unknown_fields)]
 pub struct Keys {
     pub remap: Remap,
+    /// This keyboard's own key mappings, applied on top of [`Keys::remap`].
+    #[serde(rename = "mapping", skip_serializing_if = "Vec::is_empty")]
+    pub mappings: Vec<KeyMapping>,
+}
+
+impl Keys {
+    /// How this machine's keyboard is remapped while it drives a `peer` machine: the
+    /// [`Keys::remap`] preset, then this keyboard's own mappings for that kind of machine.
+    pub fn remap_for(&self, this: Os, peer: Os) -> KeyRemap {
+        let mut remap = match (self.remap, this, peer) {
+            (Remap::Auto, Os::Windows, Os::MacOs) => KeyRemap::windows_keyboard_on_mac(),
+            (Remap::Auto, Os::MacOs, Os::Windows) => KeyRemap::mac_keyboard_on_windows(),
+            _ => KeyRemap::identity(),
+        };
+        for mapping in &self.mappings {
+            if mapping.target.os() == peer {
+                remap.set(mapping.from.0, mapping.to.0);
+            }
+        }
+        remap
+    }
+}
+
+/// One key of this keyboard acting as another while it drives a kind of machine, like
+///
+/// ```toml
+/// [[keys.mapping]]
+/// target = "mac"
+/// from = "ControlRight"
+/// to = "Fn"
+/// ```
+///
+/// Mapping a key to itself undoes what [`Keys::remap`] does to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyMapping {
+    pub target: Target,
+    pub from: Key,
+    pub to: Key,
+}
+
+/// The kind of machine a key mapping applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Target {
+    Mac,
+    Windows,
+}
+
+impl Target {
+    pub fn os(self) -> Os {
+        match self {
+            Target::Mac => Os::MacOs,
+            Target::Windows => Os::Windows,
+        }
+    }
+}
+
+/// A key, written as its web `KeyboardEvent.code` name (`ControlRight`, `KeyA`, `Fn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Key(pub u16);
+
+impl Serialize for Key {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match keymap::name(self.0) {
+            Some(name) => s.serialize_str(&name),
+            None => Err(serde::ser::Error::custom(format!(
+                "no name for key {:#06x}",
+                self.0
+            ))),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Key {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(d)?;
+        keymap::from_name(&name).map(Key).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown key `{name}`; use a web KeyboardEvent.code name like `ControlRight` or `Fn`"
+            ))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -397,6 +481,68 @@ mod tests {
         control.controller = Some("ab".into());
         assert!(control.allows("abcd"));
         assert!(!control.allows("zzzz"));
+    }
+
+    #[test]
+    fn key_mappings_name_keys_like_the_web() {
+        let config: Config = toml::from_str(
+            r#"
+            [[keys.mapping]]
+            target = "mac"
+            from = "ControlRight"
+            to = "Fn"
+            "#,
+        )
+        .unwrap();
+        let mapping = KeyMapping {
+            target: Target::Mac,
+            from: Key(keymap::usage::RIGHT_CTRL),
+            to: Key(keymap::usage::FN),
+        };
+        assert_eq!(config.keys.mappings, [mapping]);
+        assert_eq!(config.keys.remap, Remap::Auto);
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("[[keys.mapping]]"), "{text}");
+        assert_eq!(toml::from_str::<Config>(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn mappings_apply_on_top_of_the_preset_for_their_target() {
+        use keymap::usage;
+        let mapping = |target, from, to| KeyMapping {
+            target,
+            from: Key(from),
+            to: Key(to),
+        };
+        let keys = Keys {
+            remap: Remap::Auto,
+            mappings: vec![
+                mapping(Target::Mac, usage::RIGHT_CTRL, usage::FN),
+                // Undoes the preset's Right Alt → Right Command.
+                mapping(Target::Mac, usage::RIGHT_ALT, usage::RIGHT_ALT),
+                mapping(Target::Windows, usage::CAPS_LOCK, usage::LEFT_CTRL),
+            ],
+        };
+        let on_mac = keys.remap_for(Os::Windows, Os::MacOs);
+        assert_eq!(on_mac.apply(usage::RIGHT_CTRL), usage::FN);
+        assert_eq!(on_mac.apply(usage::RIGHT_ALT), usage::RIGHT_ALT);
+        assert_eq!(on_mac.apply(usage::LEFT_ALT), usage::LEFT_GUI);
+        assert_eq!(on_mac.apply(usage::CAPS_LOCK), usage::CAPS_LOCK);
+        let on_windows = keys.remap_for(Os::Windows, Os::Windows);
+        assert_eq!(on_windows.apply(usage::RIGHT_CTRL), usage::RIGHT_CTRL);
+        assert_eq!(on_windows.apply(usage::CAPS_LOCK), usage::LEFT_CTRL);
+    }
+
+    #[test]
+    fn unknown_key_names_are_errors() {
+        let error = toml::from_str::<Config>(
+            "[[keys.mapping]]\ntarget = \"mac\"\nfrom = \"RightCtrl\"\nto = \"Fn\"",
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unknown key `RightCtrl`"),
+            "{error}"
+        );
     }
 
     #[test]

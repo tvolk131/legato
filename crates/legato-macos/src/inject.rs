@@ -200,16 +200,24 @@ impl Injector {
         CGEvent::new_mouse_event(Some(&self.source), ty, CGPoint::new(pos.x, pos.y), button)
     }
 
+    /// The held modifiers, with the left/right bits a Mac keyboard sets so apps can tell
+    /// Right Control from Left Control.
     fn flags(&self) -> CGEventFlags {
         let mut flags = CGEventFlags::empty();
-        for m in &self.modifiers {
-            flags |= match *m {
+        for &m in &self.modifiers {
+            flags |= match m {
                 usage::LEFT_SHIFT | usage::RIGHT_SHIFT => CGEventFlags::MaskShift,
                 usage::LEFT_CTRL | usage::RIGHT_CTRL => CGEventFlags::MaskControl,
                 usage::LEFT_ALT | usage::RIGHT_ALT => CGEventFlags::MaskAlternate,
                 usage::LEFT_GUI | usage::RIGHT_GUI => CGEventFlags::MaskCommand,
+                usage::FN => CGEventFlags::MaskSecondaryFn,
                 _ => CGEventFlags::empty(),
             };
+            if let Some((_, bit)) =
+                keymap::mac_keycode_from_hid(m).and_then(crate::capture::modifier)
+            {
+                flags |= CGEventFlags(bit);
+            }
         }
         flags
     }

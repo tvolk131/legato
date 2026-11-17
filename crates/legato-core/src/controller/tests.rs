@@ -431,6 +431,108 @@ fn remap_applies_to_keys_sent_to_the_mac() {
 }
 
 #[test]
+fn a_held_key_releases_as_the_key_it_pressed_when_the_mapping_changes() {
+    let mut h = Harness::new();
+    let mut to_fn = KeyRemap::identity();
+    to_fn.set(usage::RIGHT_CTRL, usage::FN);
+    h.c.set_remap(MAC, to_fn);
+    h.cross_to_mac(1920.0);
+    h.take();
+    h.step(0, key(usage::RIGHT_CTRL, true));
+    // Settings change while the key is held.
+    h.c.set_remap(MAC, KeyRemap::identity());
+    h.step(0, key(usage::RIGHT_CTRL, false));
+    assert_eq!(
+        sent(&h.take()),
+        [
+            Control::Key {
+                usage: usage::FN,
+                down: true
+            },
+            Control::Key {
+                usage: usage::FN,
+                down: false
+            },
+        ]
+    );
+}
+
+#[test]
+fn two_keys_mapped_to_one_hold_it_until_both_are_released() {
+    for left_first in [true, false] {
+        let mut h = Harness::new();
+        let mut remap = KeyRemap::identity();
+        remap.set(usage::RIGHT_CTRL, usage::LEFT_CTRL);
+        h.c.set_remap(MAC, remap);
+        h.cross_to_mac(1920.0);
+        h.take();
+        h.step(0, key(usage::LEFT_CTRL, true));
+        h.step(0, key(usage::RIGHT_CTRL, true));
+        let (first, second) = if left_first {
+            (usage::LEFT_CTRL, usage::RIGHT_CTRL)
+        } else {
+            (usage::RIGHT_CTRL, usage::LEFT_CTRL)
+        };
+        assert_eq!(h.step(0, key(first, false)), Verdict::Swallow);
+        assert_eq!(
+            sent(&h.take()),
+            [Control::Key {
+                usage: usage::LEFT_CTRL,
+                down: true
+            }],
+            "still held by the other key"
+        );
+        h.step(0, key(second, false));
+        assert_eq!(
+            sent(&h.take()),
+            [Control::Key {
+                usage: usage::LEFT_CTRL,
+                down: false
+            }]
+        );
+    }
+}
+
+#[test]
+fn a_remapped_caps_lock_releases_its_key_after_the_mapping_is_undone() {
+    let mut h = Harness::new();
+    let mut remap = KeyRemap::identity();
+    remap.set(usage::CAPS_LOCK, usage::RIGHT_CTRL);
+    h.c.set_remap(MAC, remap);
+    h.cross_to_mac(1920.0);
+    h.take();
+    h.step(0, key(usage::CAPS_LOCK, true));
+    h.c.set_remap(MAC, KeyRemap::identity());
+    assert_eq!(h.step(0, key(usage::CAPS_LOCK, false)), Verdict::Swallow);
+    assert_eq!(
+        sent(&h.take()),
+        [
+            Control::Key {
+                usage: usage::RIGHT_CTRL,
+                down: true
+            },
+            Control::Key {
+                usage: usage::RIGHT_CTRL,
+                down: false
+            },
+        ]
+    );
+}
+
+#[test]
+fn caps_lock_pressed_here_is_released_here_after_it_is_remapped() {
+    let mut h = Harness::new();
+    h.cross_to_mac(1920.0);
+    h.take();
+    assert_eq!(h.step(0, key(usage::CAPS_LOCK, true)), Verdict::Pass);
+    let mut remap = KeyRemap::identity();
+    remap.set(usage::CAPS_LOCK, usage::RIGHT_CTRL);
+    h.c.set_remap(MAC, remap);
+    assert_eq!(h.step(0, key(usage::CAPS_LOCK, false)), Verdict::Pass);
+    assert_eq!(sent(&h.take()), []);
+}
+
+#[test]
 fn clicks_carry_the_shared_cursor_position() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);
