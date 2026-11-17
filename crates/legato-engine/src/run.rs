@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::arrange::{self, ConnectedPeer};
 use crate::clipboard::{ClipboardSync, Copied};
-use crate::config::{Config, Remap};
+use crate::config::Config;
 use crate::extend::{self, Viewing};
 use crate::files::{self, Inbox};
 use crate::platform::{self, Capture, Injector};
@@ -48,11 +48,7 @@ fn controller_config(config: &Config) -> ControllerConfig {
 }
 
 fn remap(config: &Config, peer: Os) -> KeyRemap {
-    match (config.keys.remap, crate::this_os(), peer) {
-        (Remap::Auto, Os::Windows, Os::MacOs) => KeyRemap::windows_keyboard_on_mac(),
-        (Remap::Auto, Os::MacOs, Os::Windows) => KeyRemap::mac_keyboard_on_windows(),
-        _ => KeyRemap::identity(),
-    }
+    config.keys.remap_for(crate::this_os(), peer)
 }
 
 fn control_mode(config: &Config) -> ControlMode {

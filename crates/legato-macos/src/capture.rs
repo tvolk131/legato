@@ -408,7 +408,8 @@ fn warp(to: CGPoint) {
 }
 
 /// HID usage and device-specific flag bit (IOKit's NX_DEVICE*KEYMASK) for a modifier key.
-fn modifier(keycode: u16) -> Option<(u16, u64)> {
+/// fn has no device-specific bit: its own flag (`MaskSecondaryFn`) says it's held.
+pub(crate) fn modifier(keycode: u16) -> Option<(u16, u64)> {
     Some(match keycode {
         59 => (usage::LEFT_CTRL, 0x0001),
         56 => (usage::LEFT_SHIFT, 0x0002),
@@ -418,6 +419,7 @@ fn modifier(keycode: u16) -> Option<(u16, u64)> {
         58 => (usage::LEFT_ALT, 0x0020),
         61 => (usage::RIGHT_ALT, 0x0040),
         62 => (usage::RIGHT_CTRL, 0x2000),
+        63 => (usage::FN, 0x0080_0000),
         _ => return None,
     })
 }

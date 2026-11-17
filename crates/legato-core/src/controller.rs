@@ -210,6 +210,14 @@ enum Route {
     Dropped,
 }
 
+/// A pressed key: where it went, and as which key, so its release matches even if the
+/// key mapping changed while it was held.
+#[derive(Debug, Clone, Copy)]
+struct HeldKey {
+    route: Route,
+    sent: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dir {
     Left,
@@ -275,7 +283,7 @@ pub struct Controller {
     /// Incremented for every `Enter` and every motion datagram, so the receiver can drop
     /// stale or reordered motion.
     seq: u32,
-    keys: HashMap<u16, Route>,
+    keys: HashMap<u16, HeldKey>,
     buttons: HashMap<Button, Route>,
     carrying: Option<Vec<std::path::PathBuf>>,
     portal: Option<Portal>,
@@ -1064,7 +1072,8 @@ impl Controller {
     fn key(&mut self, usage: u16, down: bool, out: &mut Vec<Action>) -> Verdict {
         // Caps Lock toggles the machine it's pressed on, and connected machines share it
         // (see `crate::locks`): it isn't sent along, unless remapped to another key there.
-        let remapped = match self.current_route() {
+        let route = self.current_route();
+        let remapped = match route {
             Route::Peer(peer) => self.remaps.get(&peer).map_or(usage, |r| r.apply(usage)),
             Route::Local | Route::Dropped => usage,
         };
@@ -1075,21 +1084,26 @@ impl Controller {
             self.resume(out);
         }
         if down {
-            if let Some(&route) = self.keys.get(&usage) {
+            if let Some(held) = self.keys.get(&usage) {
                 // OS auto-repeat. The receiving side repeats on its own.
-                return match route {
+                return match held.route {
                     Route::Local => Verdict::Pass,
                     Route::Peer(_) | Route::Dropped => Verdict::Swallow,
                 };
             }
+            // Resuming may have changed where keys go.
             let route = self.current_route();
-            self.keys.insert(usage, route);
-            self.send_key(route, usage, true, out)
+            let sent = match route {
+                Route::Peer(peer) => self.remaps.get(&peer).map_or(usage, |r| r.apply(usage)),
+                Route::Local | Route::Dropped => usage,
+            };
+            self.keys.insert(usage, HeldKey { route, sent });
+            Self::send_key(route, sent, true, out)
         } else {
             match self.keys.remove(&usage) {
-                Some(route) => self.send_key(route, usage, false, out),
+                Some(held) => Self::send_key(held.route, held.sent, false, out),
                 // A release we never saw pressed: follow the cursor.
-                None => match self.current_route() {
+                None => match route {
                     Route::Local => Verdict::Pass,
                     Route::Peer(_) | Route::Dropped => Verdict::Swallow,
                 },
@@ -1097,12 +1111,12 @@ impl Controller {
         }
     }
 
-    fn send_key(&self, route: Route, usage: u16, down: bool, out: &mut Vec<Action>) -> Verdict {
+    /// Sends `usage`, already remapped for the peer.
+    fn send_key(route: Route, usage: u16, down: bool, out: &mut Vec<Action>) -> Verdict {
         match route {
             Route::Local => Verdict::Pass,
             Route::Dropped => Verdict::Swallow,
             Route::Peer(peer) => {
-                let usage = self.remaps.get(&peer).map_or(usage, |r| r.apply(usage));
                 out.push(Action::Send {
                     to: peer,
                     msg: Control::Key { usage, down },
@@ -1243,7 +1257,8 @@ impl Controller {
 
     /// The peer has released (or lost) everything we pressed there.
     fn drop_routes(&mut self, peer: MachineId) {
-        for route in self.keys.values_mut().chain(self.buttons.values_mut()) {
+        let keys = self.keys.values_mut().map(|held| &mut held.route);
+        for route in keys.chain(self.buttons.values_mut()) {
             if *route == Route::Peer(peer) {
                 *route = Route::Dropped;
             }

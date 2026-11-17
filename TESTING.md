@@ -352,6 +352,7 @@ are the release checklist.
 - coordinates: points vs physical pixels, and speed parity across DPI
 - natural-scrolling direction
 - default Alt→Command and Win→Option remapping when driving Mac, and configured alternatives
+- `[[keys.mapping]]` rows in `legato.toml` (for example Windows Right Ctrl → `Fn` on the Mac): the mapped key reaches the Mac with its left/right flag, and holding fn there triggers apps that listen for it, such as Wispr Flow
 - double-click timing
 - text clipboard line endings (`\n` vs `\r\n`)
 - HTML clipboard support is not implemented; test only text, images and file lists

@@ -431,6 +431,33 @@ fn remap_applies_to_keys_sent_to_the_mac() {
 }
 
 #[test]
+fn a_held_key_releases_as_the_key_it_pressed_when_the_mapping_changes() {
+    let mut h = Harness::new();
+    let mut to_fn = KeyRemap::identity();
+    to_fn.set(usage::RIGHT_CTRL, usage::FN);
+    h.c.set_remap(MAC, to_fn);
+    h.cross_to_mac(1920.0);
+    h.take();
+    h.step(0, key(usage::RIGHT_CTRL, true));
+    // Settings change while the key is held.
+    h.c.set_remap(MAC, KeyRemap::identity());
+    h.step(0, key(usage::RIGHT_CTRL, false));
+    assert_eq!(
+        sent(&h.take()),
+        [
+            Control::Key {
+                usage: usage::FN,
+                down: true
+            },
+            Control::Key {
+                usage: usage::FN,
+                down: false
+            },
+        ]
+    );
+}
+
+#[test]
 fn clicks_carry_the_shared_cursor_position() {
     let mut h = Harness::new();
     h.cross_to_mac(1920.0);

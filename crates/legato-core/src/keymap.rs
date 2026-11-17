@@ -1,12 +1,13 @@
 //! Key codes. On the wire keys are USB HID usages on the keyboard page (0x07), i.e.
 //! physical key positions; each machine converts to and from its native codes here.
+//! A key that isn't on that page gets a Legato code above `0xff`: just [`usage::FN`].
 //!
 //! Tables come from Chromium's key-code mapping via the `keycode` crate.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use keycode::KeyMap;
+use keycode::{KeyMap, KeyMappingCode};
 
 /// USB HID usage page for keyboards.
 const KEYBOARD_PAGE: u16 = 0x07;
@@ -25,7 +26,16 @@ pub mod usage {
     pub const RIGHT_SHIFT: u16 = 0xe5;
     pub const RIGHT_ALT: u16 = 0xe6;
     pub const RIGHT_GUI: u16 = 0xe7;
+    /// A Mac keyboard's fn (Globe) key. Apple reports it on its own vendor page (0xFF,
+    /// usage 0x03) rather than the keyboard page; Legato puts the page in the high byte.
+    pub const FN: u16 = 0xff03;
 }
+
+/// macOS's virtual key code for fn (`kVK_Function`).
+const MAC_FN_KEYCODE: u16 = 0x3f;
+/// The web `KeyboardEvent.code` name for fn, which Chromium's table lists off the keyboard
+/// page.
+const FN_NAME: &str = "Fn";
 
 struct Tables {
     win_to_hid: HashMap<u16, u16>,
@@ -72,16 +82,44 @@ pub fn windows_scancode_from_hid(usage: u16) -> Option<u16> {
 
 /// Converts a macOS virtual key code (`kVK_*`) to a HID usage.
 pub fn hid_from_mac_keycode(keycode: u16) -> Option<u16> {
+    if keycode == MAC_FN_KEYCODE {
+        return Some(usage::FN);
+    }
     tables().mac_to_hid.get(&keycode).copied()
 }
 
 pub fn mac_keycode_from_hid(usage: u16) -> Option<u16> {
+    if usage == usage::FN {
+        return Some(MAC_FN_KEYCODE);
+    }
     tables().hid_to_mac.get(&usage).copied()
 }
 
-/// Ctrl, Shift, Alt/Option and GUI (Windows/Command) keys.
+/// A key's web `KeyboardEvent.code` name, like `ControlRight` or `Fn`, as settings
+/// spell it.
+pub fn name(usage: u16) -> Option<String> {
+    if usage == usage::FN {
+        return Some(FN_NAME.to_owned());
+    }
+    let code = KeyMap::from_usb_code(KEYBOARD_PAGE, usage).ok()?.code?;
+    Some(code.to_string())
+}
+
+/// The key a web `KeyboardEvent.code` name refers to, if Legato can send it.
+pub fn from_name(name: &str) -> Option<u16> {
+    if name == FN_NAME {
+        return Some(usage::FN);
+    }
+    let code = name.parse::<KeyMappingCode>().ok()?;
+    let usage = KeyMap::from(code).usb;
+    // The table drops the usage page: check the key is the keyboard page's.
+    let on_page = KeyMap::from_usb_code(KEYBOARD_PAGE, usage).is_ok_and(|k| k.code == Some(code));
+    on_page.then_some(usage)
+}
+
+/// Ctrl, Shift, Alt/Option and GUI (Windows/Command) keys, and a Mac keyboard's fn.
 pub fn is_modifier(usage: u16) -> bool {
-    (usage::LEFT_CTRL..=usage::RIGHT_GUI).contains(&usage)
+    (usage::LEFT_CTRL..=usage::RIGHT_GUI).contains(&usage) || usage == usage::FN
 }
 
 /// Keys a Mac keyboard marks as function keys on their events: the F keys, and the
@@ -210,6 +248,34 @@ mod tests {
             assert_eq!(mac_keycode_from_hid(hid), Some(mac), "hid {hid:#04x}");
             assert_eq!(hid_from_mac_keycode(mac), Some(hid), "mac {mac:#04x}");
         }
+    }
+
+    #[test]
+    fn fn_is_a_mac_only_modifier() {
+        assert_eq!(mac_keycode_from_hid(usage::FN), Some(0x3f));
+        assert_eq!(hid_from_mac_keycode(0x3f), Some(usage::FN));
+        assert_eq!(windows_scancode_from_hid(usage::FN), None);
+        assert!(is_modifier(usage::FN));
+        assert!(!repeats(usage::FN));
+    }
+
+    #[test]
+    fn keys_are_named_like_the_web() {
+        for (written, key) in [
+            ("ControlRight", usage::RIGHT_CTRL),
+            ("MetaLeft", usage::LEFT_GUI),
+            ("CapsLock", usage::CAPS_LOCK),
+            ("KeyA", A),
+            ("F13", 0x68),
+            ("Fn", usage::FN),
+        ] {
+            assert_eq!(from_name(written), Some(key), "{written}");
+            assert_eq!(name(key).as_deref(), Some(written), "{key:#x}");
+        }
+        // Chromium lists keys off the keyboard page too, like system sleep.
+        assert_eq!(from_name("Sleep"), None);
+        assert_eq!(from_name("RightCtrl"), None);
+        assert_eq!(from_name("controlright"), None);
     }
 
     #[test]
