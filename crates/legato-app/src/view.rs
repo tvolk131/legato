@@ -10,13 +10,14 @@ use iced_m3::{
     navigation_rail, slider, snackbar, split_button, switch, typography,
 };
 use legato_engine::arrange;
-use legato_engine::config::Remap;
+use legato_engine::config::{Remap, Target};
 use legato_net::PathKind;
-use legato_proto::format_pairing_code;
+use legato_proto::{Os, format_pairing_code};
 
 use crate::Message;
 use crate::editor::Editor;
-use crate::model::{Model, Page, PairingStage, os_name};
+use crate::keys;
+use crate::model::{KeyMappingDraft, Model, Page, PairingStage, os_name};
 
 pub fn root(m: &Model) -> Element<'_, Message> {
     responsive(move |size| window_contents(m, size)).into()
@@ -83,6 +84,7 @@ fn window_contents(m: &Model, size: Size) -> Element<'_, Message> {
     let main = modal(main, add_device_dialog(m), m.add_device_open);
     let main = modal(main, display_options_dialog(m), m.display_options_open);
     let main = modal(main, unpair_dialog(m), m.unpair_open);
+    let main = modal(main, key_mapping_dialog(m), m.key_mapping_open);
     let main = iced_m3::focus::scope(modal(main, pairing_dialog(m), m.pairing_open));
     // Draws nothing; see `GpuErrors`. A layer on top, so it doesn't move anything.
     iced::widget::stack![
@@ -579,6 +581,7 @@ fn settings(m: &Model, width: f32) -> Element<'_, Message> {
             ))
         ),
         input,
+        key_mappings(m),
         heading("Sharing and startup"),
         list(general),
         heading("About"),
@@ -589,6 +592,136 @@ fn settings(m: &Model, width: f32) -> Element<'_, Message> {
     ]
     .spacing(8)
     .into()
+}
+
+fn target_name(target: Target) -> &'static str {
+    match target {
+        Target::Mac => "On Macs",
+        Target::Windows => "On Windows PCs",
+    }
+}
+
+/// This keyboard's own key mappings, and a way to add one.
+fn key_mappings(m: &Model) -> Element<'_, Message> {
+    let this = m.this.os.unwrap_or(Os::Windows);
+    let mappings = &m.config.keys.mappings;
+    let rows = mappings.iter().map(|mapping| {
+        let from = keys::label(mapping.from.0, this);
+        let to = keys::label(mapping.to.0, mapping.target.os());
+        // Words, not an arrow: the bundled font has no arrows, and fallback fonts differ.
+        let place = match mapping.target {
+            Target::Mac => "on Macs",
+            Target::Windows => "on Windows PCs",
+        };
+        list_item(from)
+            .supporting_text(format!("Acts as {to} {place}"))
+            .trailing(
+                icon_button(Symbol::new(IconName::Delete).style(Style::Rounded))
+                    .on_press(Message::RemoveKeyMapping(*mapping)),
+            )
+            .into()
+    });
+    column![
+        typography("Key mappings", TypeScale::TitleSmall),
+        body("Make a key on this keyboard act as a different key on your other devices."),
+    ]
+    .push((!mappings.is_empty()).then(|| list(rows)))
+    .push(
+        button("Add a key mapping")
+            .variant(ButtonVariant::Tonal)
+            .on_press(Message::AddKeyMapping),
+    )
+    .spacing(8)
+    .into()
+}
+
+fn key_mapping_dialog(m: &Model) -> iced_m3::Dialog<'_, Message> {
+    use iced_m3::menu::{SelectOption, select};
+    let Some(draft) = m.key_mapping.clone() else {
+        return dialog(column![]);
+    };
+    let this = m.this.os.unwrap_or(Os::Windows);
+    let target = draft.target.os();
+    let change = |set: &dyn Fn(&mut KeyMappingDraft)| {
+        let mut draft = draft.clone();
+        set(&mut draft);
+        Message::KeyMappingChanged(draft)
+    };
+    let target_choice = choices(
+        draft.target,
+        [Target::Mac, Target::Windows].map(|t| (t, target_name(t))),
+        |target| {
+            change(&|d| {
+                d.target = target;
+                // Not every key is offered on both.
+                if d.to
+                    .is_some_and(|to| !keys::targets(target.os()).contains(&to))
+                {
+                    d.to = None;
+                }
+            })
+        },
+    );
+    let key: Element<'_, Message> = match draft.from.filter(|_| !draft.listening) {
+        Some(from) => row![
+            typography(keys::label(from, this), TypeScale::TitleMedium),
+            button("Change")
+                .variant(ButtonVariant::Text)
+                .on_press(change(&|d| d.listening = true)),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .into(),
+        None => body("Press the key on this keyboard…"),
+    };
+    let on_select = {
+        let draft = draft.clone();
+        move |to| {
+            Message::KeyMappingChanged(KeyMappingDraft {
+                to: Some(to),
+                ..draft.clone()
+            })
+        }
+    };
+    let acts_as = select(
+        "Acts as",
+        keys::targets(target)
+            .into_iter()
+            .map(|key| SelectOption::new(key, keys::label(key, target))),
+        draft.to,
+    )
+    .on_select(on_select);
+    let note = (draft.to == Some(legato_core::keymap::usage::FN)).then(|| {
+        "Apps that listen for fn, like dictation apps, see it held while you hold the key."
+            .to_string()
+    });
+    let add = button("Add").variant(ButtonVariant::Text);
+    let add = match draft.mapping() {
+        Some(_) => add.on_press(Message::KeyMappingDone(true)),
+        None => add,
+    };
+    dialog(
+        column![
+            typography("Add a key mapping", TypeScale::HeadlineSmall),
+            field("Where", target_choice, None),
+            field("Key", key, None),
+            // The menu is labelled already.
+            column![acts_as]
+                .push(note.map(|note| typography(note, TypeScale::BodySmall)))
+                .spacing(6),
+        ]
+        .spacing(16),
+    )
+    .actions(
+        row![
+            button("Cancel")
+                .variant(ButtonVariant::Text)
+                .on_press(Message::KeyMappingDone(false)),
+            add,
+        ]
+        .spacing(8),
+    )
+    .on_dismiss(Message::KeyMappingDone(false))
 }
 
 fn control_mode(m: &Model, width: f32) -> Element<'_, Message> {
