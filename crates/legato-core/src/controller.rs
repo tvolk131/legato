@@ -1070,44 +1070,67 @@ impl Controller {
     }
 
     fn key(&mut self, usage: u16, down: bool, out: &mut Vec<Action>) -> Verdict {
-        // Caps Lock toggles the machine it's pressed on, and connected machines share it
-        // (see `crate::locks`): it isn't sent along, unless remapped to another key there.
-        let route = self.current_route();
-        let remapped = match route {
-            Route::Peer(peer) => self.remaps.get(&peer).map_or(usage, |r| r.apply(usage)),
-            Route::Local | Route::Dropped => usage,
-        };
-        if usage == crate::keymap::usage::CAPS_LOCK && remapped == usage {
-            return Verdict::Pass;
-        }
-        if down && !self.keys.contains_key(&usage) {
-            self.resume(out);
-        }
-        if down {
-            if let Some(held) = self.keys.get(&usage) {
-                // OS auto-repeat. The receiving side repeats on its own.
-                return match held.route {
-                    Route::Local => Verdict::Pass,
-                    Route::Peer(_) | Route::Dropped => Verdict::Swallow,
-                };
-            }
-            // Resuming may have changed where keys go.
-            let route = self.current_route();
-            let sent = match route {
-                Route::Peer(peer) => self.remaps.get(&peer).map_or(usage, |r| r.apply(usage)),
-                Route::Local | Route::Dropped => usage,
-            };
-            self.keys.insert(usage, HeldKey { route, sent });
-            Self::send_key(route, sent, true, out)
-        } else {
-            match self.keys.remove(&usage) {
-                Some(held) => Self::send_key(held.route, held.sent, false, out),
+        use crate::keymap::usage::CAPS_LOCK;
+        if !down {
+            return match self.keys.remove(&usage) {
+                Some(held) => self.release(held, out),
+                // Caps Lock that stayed on this machine (below) isn't tracked.
+                None if usage == CAPS_LOCK => Verdict::Pass,
                 // A release we never saw pressed: follow the cursor.
-                None => match route {
+                None => match self.current_route() {
                     Route::Local => Verdict::Pass,
                     Route::Peer(_) | Route::Dropped => Verdict::Swallow,
                 },
-            }
+            };
+        }
+        if let Some(held) = self.keys.get(&usage) {
+            // OS auto-repeat. The receiving side repeats on its own.
+            return match held.route {
+                Route::Local => Verdict::Pass,
+                Route::Peer(_) | Route::Dropped => Verdict::Swallow,
+            };
+        }
+        // Caps Lock toggles the machine it's pressed on, and connected machines share it
+        // (see `crate::locks`): it isn't sent along, unless remapped to another key there.
+        if usage == CAPS_LOCK && self.sent_as(self.current_route(), usage) == usage {
+            return Verdict::Pass;
+        }
+        self.resume(out);
+        // Resuming may have changed where keys go.
+        let route = self.current_route();
+        let sent = self.sent_as(route, usage);
+        let held = HeldKey { route, sent };
+        // Another key mapped to the same one is already holding it there.
+        let already_held = self.holding(held);
+        self.keys.insert(usage, held);
+        if already_held {
+            return Verdict::Swallow;
+        }
+        Self::send_key(route, sent, true, out)
+    }
+
+    /// Releases a key, unless another key mapped to the same one still holds it.
+    fn release(&mut self, held: HeldKey, out: &mut Vec<Action>) -> Verdict {
+        if self.holding(held) {
+            return Verdict::Swallow;
+        }
+        Self::send_key(held.route, held.sent, false, out)
+    }
+
+    /// Whether a held key was sent to a peer as the same key as `key`.
+    fn holding(&self, key: HeldKey) -> bool {
+        matches!(key.route, Route::Peer(_))
+            && self
+                .keys
+                .values()
+                .any(|h| h.route == key.route && h.sent == key.sent)
+    }
+
+    /// The key `usage` is sent as along `route`.
+    fn sent_as(&self, route: Route, usage: u16) -> u16 {
+        match route {
+            Route::Peer(peer) => self.remaps.get(&peer).map_or(usage, |r| r.apply(usage)),
+            Route::Local | Route::Dropped => usage,
         }
     }
 
