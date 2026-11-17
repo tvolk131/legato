@@ -13,7 +13,7 @@ pub mod layout;
 pub mod locks;
 pub mod receiver;
 
-pub use activity::{ActivityFilter, LocalInput};
+pub use activity::{ActivityFilter, LocalInput, Origin};
 pub use controller::{Action, CaptureCommand, Controller, ControllerConfig, Event, Verdict};
 pub use keymap::KeyRemap;
 pub use layout::{Align, Layout, Machine, MachineId, Side};

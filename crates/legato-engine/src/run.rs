@@ -12,7 +12,7 @@ use anyhow::Result;
 use legato_core::controller::{
     Action, CaptureCommand, Controller, ControllerConfig, Event, Portal,
 };
-use legato_core::{ActivityFilter, Inject, KeyRemap, Layout, MachineId};
+use legato_core::{ActivityFilter, Inject, KeyRemap, Layout, MachineId, Origin};
 use legato_net::{EndpointId, Session, SessionEvent};
 use legato_proto::{
     ClipboardContent, Control, ControlMode, Datagram, ExtendRequest, FilePurpose, Os, Point,
@@ -66,8 +66,9 @@ fn control_mode(config: &Config) -> ControlMode {
 enum Input {
     Control(EndpointId, Control),
     Datagram(EndpointId, Datagram),
-    /// Someone used this machine's own keyboard or mouse: what it was, for the log.
-    LocalActivity(&'static str),
+    /// Input that didn't come from a peer was seen here: what it was and where the OS
+    /// says it came from, for the log.
+    LocalActivity(&'static str, Origin),
     Disconnected(EndpointId),
     InvertWheel(bool),
     Stop,
@@ -197,13 +198,16 @@ pub(crate) async fn run(
                     }
                 }
             },
-            move |input| {
+            move |input, origin| {
                 if filter.feed(Instant::now(), input) {
                     let what = match input {
                         legato_core::LocalInput::Motion { .. } => "the pointer moved",
                         legato_core::LocalInput::Other => "a key, button or scroll",
                     };
-                    let _ = inject_tx.lock().unwrap().send(Input::LocalActivity(what));
+                    let _ = inject_tx
+                        .lock()
+                        .unwrap()
+                        .send(Input::LocalActivity(what, origin));
                 }
             },
         )?
@@ -711,6 +715,33 @@ pub(crate) async fn run(
 }
 
 /// Owns the receiver and injector: turns a peer's input into local events.
+/// Where local input came from, for the takeover log line: empty when the backend can't
+/// say.
+fn describe_origin(origin: Origin) -> String {
+    origin_text(origin, platform::app_name)
+}
+
+fn origin_text(origin: Origin, app_name: impl Fn(i64) -> Option<String>) -> String {
+    let mut parts = Vec::new();
+    if let Some(event) = origin.event {
+        parts.push(event.to_string());
+    }
+    if let Some(pid) = origin.pid {
+        parts.push(match app_name(pid) {
+            Some(name) => format!("source pid {pid} ({name})"),
+            None => format!("source pid {pid}"),
+        });
+    }
+    if let Some(state) = origin.source_state {
+        parts.push(format!("source state {state}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", parts.join(", "))
+    }
+}
+
 fn inject_loop(
     rx: std_mpsc::Receiver<Input>,
     sessions: Arc<RwLock<HashMap<EndpointId, Arc<Session>>>>,
@@ -784,12 +815,15 @@ fn inject_loop(
                 }
                 false
             }
-            Ok(Input::LocalActivity(what)) => {
+            Ok(Input::LocalActivity(what, origin)) => {
                 input.receiver.local_activity(&mut out);
                 if out.iter().any(|i| matches!(i, Inject::SendYield)) {
-                    // Worth knowing when input from the other machine seems to stop.
+                    // Worth knowing when input from the other machine seems to stop, and
+                    // whether a program posting input, not the user, caused it.
+                    let origin = describe_origin(origin);
                     tracing::info!(
-                        "this machine's own keyboard or mouse was used ({what}): taking back control"
+                        "input that didn't come from a peer was seen on this machine \
+                         ({what}{origin}): taking back control"
                     );
                 }
                 false
@@ -855,5 +889,37 @@ fn inject_loop(
         if stop {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origin_text_names_the_posting_app_when_known() {
+        let origin = Origin {
+            event: Some("key down"),
+            pid: Some(2741),
+            source_state: Some(0),
+        };
+        let name = |pid| (pid == 2741).then(|| "Dictation".to_string());
+        assert_eq!(
+            origin_text(origin, name),
+            ": key down, source pid 2741 (Dictation), source state 0"
+        );
+        let unnamed = Origin {
+            pid: Some(0),
+            ..origin
+        };
+        assert_eq!(
+            origin_text(unnamed, name),
+            ": key down, source pid 0, source state 0"
+        );
+    }
+
+    #[test]
+    fn origin_text_is_empty_when_the_backend_cannot_say() {
+        assert_eq!(origin_text(Origin::default(), |_| None), "");
     }
 }

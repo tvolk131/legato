@@ -12,6 +12,20 @@ pub enum LocalInput {
     Other,
 }
 
+/// Where a local event came from, as far as the OS says, for the log: when control is
+/// taken back, this tells the user's own keyboard and mouse from another program posting
+/// input. Backends that can't tell leave it empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Origin {
+    /// What the event was, such as "key down".
+    pub event: Option<&'static str>,
+    /// The process the OS says posted it (macOS's `kCGEventSourceUnixProcessID`).
+    pub pid: Option<i64>,
+    /// The event source's state (macOS's `kCGEventSourceStateID`): 1 is the HID system
+    /// state, -1 a private one, 0 the combined session state.
+    pub source_state: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ActivityFilter {
     /// Pointer travel that counts as deliberate.

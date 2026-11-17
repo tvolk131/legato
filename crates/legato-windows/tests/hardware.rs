@@ -65,7 +65,7 @@ fn start_capture(config: ControllerConfig, layout: Layout) -> (Capture, mpsc::Re
         move |action| {
             let _ = tx.send(action);
         },
-        |_| {},
+        |_, _| {},
     )
     .unwrap();
     (capture, rx)
@@ -305,7 +305,7 @@ fn injected_moves_land_exactly_and_are_not_local_input() {
             accept_injected: true,
         },
         |_| {},
-        move |input| {
+        move |input, _| {
             let _ = tx.send(input);
         },
     )

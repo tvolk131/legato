@@ -11,9 +11,9 @@ use std::ptr::NonNull;
 use std::sync::mpsc;
 use std::time::Instant;
 
-use legato_core::LocalInput;
 use legato_core::controller::{Action, CaptureCommand, Controller, Event, Shown, Verdict};
 use legato_core::keymap::{self, usage};
+use legato_core::{LocalInput, Origin};
 use legato_proto::{Button, Point, Scroll};
 use objc2_core_foundation::{
     CFAbsoluteTimeGetCurrent, CFMachPort, CFRetained, CFRunLoop, CFRunLoopTimer,
@@ -46,12 +46,12 @@ impl Capture {
     pub fn start(
         controller: Controller,
         sink: impl FnMut(Action) + Send + 'static,
-        local_input: impl FnMut(LocalInput) + Send + 'static,
+        local_input: impl FnMut(LocalInput, Origin) + Send + 'static,
     ) -> Result<Self, &'static str> {
         let (commands, command_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let sink: Box<dyn FnMut(Action) + Send> = Box::new(sink);
-        let local_input: Box<dyn FnMut(LocalInput) + Send> = Box::new(local_input);
+        let local_input: Box<dyn FnMut(LocalInput, Origin) + Send> = Box::new(local_input);
         let thread = std::thread::Builder::new()
             .name("legato-capture".into())
             .spawn(move || {
@@ -104,7 +104,7 @@ impl Drop for Capture {
 struct TapState {
     controller: Controller,
     sink: Box<dyn FnMut(Action) + Send>,
-    local_input: Box<dyn FnMut(LocalInput) + Send>,
+    local_input: Box<dyn FnMut(LocalInput, Origin) + Send>,
     commands: mpsc::Receiver<CaptureCommand>,
     out: Vec<Action>,
     port: Option<CFRetained<CFMachPort>>,
@@ -214,7 +214,7 @@ impl TapState {
                         delta: Point::new(dx, dy),
                     })
                 } else {
-                    (self.local_input)(LocalInput::Motion { dx, dy });
+                    self.local(LocalInput::Motion { dx, dy }, ty, ev);
                     let loc = CGEvent::location(Some(ev));
                     self.follow_shown();
                     self.handle(Event::LocalMotion {
@@ -223,19 +223,27 @@ impl TapState {
                     })
                 }
             }
-            t if t == CGEventType::LeftMouseDown || t == CGEventType::LeftMouseUp => {
-                self.button(captured, Button::Left, t == CGEventType::LeftMouseDown)
-            }
-            t if t == CGEventType::RightMouseDown || t == CGEventType::RightMouseUp => {
-                self.button(captured, Button::Right, t == CGEventType::RightMouseDown)
-            }
+            t if t == CGEventType::LeftMouseDown || t == CGEventType::LeftMouseUp => self.button(
+                captured,
+                Button::Left,
+                t == CGEventType::LeftMouseDown,
+                t,
+                ev,
+            ),
+            t if t == CGEventType::RightMouseDown || t == CGEventType::RightMouseUp => self.button(
+                captured,
+                Button::Right,
+                t == CGEventType::RightMouseDown,
+                t,
+                ev,
+            ),
             t if t == CGEventType::OtherMouseDown || t == CGEventType::OtherMouseUp => {
                 let button = match int(CGEventField::MouseEventButtonNumber) {
                     3 => Button::Back,
                     4 => Button::Forward,
                     _ => Button::Middle,
                 };
-                self.button(captured, button, t == CGEventType::OtherMouseDown)
+                self.button(captured, button, t == CGEventType::OtherMouseDown, t, ev)
             }
             t if t == CGEventType::KeyDown || t == CGEventType::KeyUp => {
                 let Some(hid) =
@@ -244,7 +252,7 @@ impl TapState {
                     return Verdict::Pass;
                 };
                 if !captured {
-                    (self.local_input)(LocalInput::Other);
+                    self.local(LocalInput::Other, ty, ev);
                 }
                 self.handle(Event::Key {
                     usage: hid,
@@ -254,7 +262,7 @@ impl TapState {
             t if t == CGEventType::FlagsChanged => self.flags_changed(captured, ev),
             t if t == CGEventType::ScrollWheel => {
                 if !captured {
-                    (self.local_input)(LocalInput::Other);
+                    self.local(LocalInput::Other, ty, ev);
                 }
                 let continuous = int(CGEventField::ScrollWheelEventIsContinuous) != 0;
                 let scroll = if continuous {
@@ -309,9 +317,28 @@ impl TapState {
         }
     }
 
-    fn button(&mut self, captured: bool, button: Button, down: bool) -> Verdict {
+    /// Tells `local_input` about the user's own input, with where the OS says it came
+    /// from.
+    fn local(&mut self, input: LocalInput, ty: CGEventType, ev: &CGEvent) {
+        let int = |field| CGEvent::integer_value_field(Some(ev), field);
+        let origin = Origin {
+            event: Some(event_name(ty)),
+            pid: Some(int(CGEventField::EventSourceUnixProcessID)),
+            source_state: Some(int(CGEventField::EventSourceStateID)),
+        };
+        (self.local_input)(input, origin);
+    }
+
+    fn button(
+        &mut self,
+        captured: bool,
+        button: Button,
+        down: bool,
+        ty: CGEventType,
+        ev: &CGEvent,
+    ) -> Verdict {
         if !captured {
-            (self.local_input)(LocalInput::Other);
+            self.local(LocalInput::Other, ty, ev);
         }
         self.handle(Event::Button { button, down })
     }
@@ -323,7 +350,7 @@ impl TapState {
         let flags = CGEvent::flags(Some(ev)).0;
         let previous = std::mem::replace(&mut self.flags, flags);
         if !captured {
-            (self.local_input)(LocalInput::Other);
+            self.local(LocalInput::Other, CGEventType::FlagsChanged, ev);
         }
         if keycode == CAPS_LOCK_KEYCODE {
             // Caps Lock reports each press as a toggle: forward a full press.
@@ -348,6 +375,27 @@ impl TapState {
 }
 
 const CAPS_LOCK_KEYCODE: u16 = 57;
+
+/// What a tapped event is, for the log.
+fn event_name(ty: CGEventType) -> &'static str {
+    match ty {
+        t if t == CGEventType::MouseMoved => "mouse moved",
+        t if t == CGEventType::LeftMouseDragged => "left drag",
+        t if t == CGEventType::RightMouseDragged => "right drag",
+        t if t == CGEventType::OtherMouseDragged => "other drag",
+        t if t == CGEventType::LeftMouseDown => "left button down",
+        t if t == CGEventType::LeftMouseUp => "left button up",
+        t if t == CGEventType::RightMouseDown => "right button down",
+        t if t == CGEventType::RightMouseUp => "right button up",
+        t if t == CGEventType::OtherMouseDown => "other button down",
+        t if t == CGEventType::OtherMouseUp => "other button up",
+        t if t == CGEventType::KeyDown => "key down",
+        t if t == CGEventType::KeyUp => "key up",
+        t if t == CGEventType::FlagsChanged => "modifier key",
+        t if t == CGEventType::ScrollWheel => "scroll",
+        _ => "other event",
+    }
+}
 
 /// Moves the cursor without the default quarter-second freeze of the user's own input
 /// that normally follows a warp.
