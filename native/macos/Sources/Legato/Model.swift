@@ -129,9 +129,17 @@ struct LegatoError: LocalizedError {
     init(_ message: String) { errorDescription = message }
 }
 
+/// Called by the engine whenever its state may have changed, from any thread: an engine
+/// thread, or the bridge's while it starts. A closure written inside `AppModel` would be
+/// main-actor isolated, and Swift stops the app when one is called on another thread, so
+/// this is a `nonisolated` function. Rust coalesces calls until the next snapshot.
+nonisolated func engineChanged() {
+    Task { @MainActor in AppModel.observed?.refresh() }
+}
+
 @MainActor @Observable final class AppModel {
     /// The model the engine's change callback refreshes.
-    private static weak var observed: AppModel?
+    fileprivate static weak var observed: AppModel?
 
     var state = Snapshot()
     /// An error to show in an alert.
@@ -158,8 +166,7 @@ struct LegatoError: LocalizedError {
     func start() async {
         guard !fixture, !starting, !state.ready else { return }
         Self.observed = self
-        // Called on an engine thread; coalesced in Rust until the next snapshot.
-        legato_set_observer { Task { @MainActor in AppModel.observed?.refresh() } }
+        legato_set_observer(engineChanged)
         starting = true
         _ = await bridge.start()
         starting = false
