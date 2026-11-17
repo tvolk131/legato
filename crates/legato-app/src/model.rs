@@ -116,7 +116,11 @@ impl KeyMappingDraft {
         }
     }
 
+    /// The mapping, once both keys are chosen and it isn't waiting for a new key.
     pub fn mapping(&self) -> Option<KeyMapping> {
+        if self.listening {
+            return None;
+        }
         Some(KeyMapping {
             target: self.target,
             from: Key(self.from?),

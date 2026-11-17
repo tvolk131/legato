@@ -605,14 +605,14 @@ fn target_name(target: Target) -> &'static str {
 fn key_mappings(m: &Model) -> Element<'_, Message> {
     let this = m.this.os.unwrap_or(Os::Windows);
     let mappings = &m.config.keys.mappings;
-    let rows = mappings.iter().enumerate().map(|(i, mapping)| {
+    let rows = mappings.iter().map(|mapping| {
         let from = keys::label(mapping.from.0, this);
         let to = keys::label(mapping.to.0, mapping.target.os());
         list_item(format!("{from} → {to}"))
             .supporting_text(target_name(mapping.target))
             .trailing(
                 icon_button(Symbol::new(IconName::Delete).style(Style::Rounded))
-                    .on_press(Message::RemoveKeyMapping(i)),
+                    .on_press(Message::RemoveKeyMapping(*mapping)),
             )
             .into()
     });

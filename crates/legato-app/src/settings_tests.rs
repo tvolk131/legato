@@ -304,6 +304,9 @@ async fn key_mappings_are_added_from_a_key_press_replaced_and_removed() {
     use legato_core::keymap::usage;
     use legato_engine::config::{Key, KeyMapping, Target};
     let (dir, mut app) = app().await;
+    let window = iced::window::Id::unique();
+    let viewer = iced::window::Id::unique();
+    app.window = Some(window);
     let add = |app: &mut App, to: u16| {
         let _ = app.update(Message::AddKeyMapping);
         assert!(app.model.key_mapping_open);
@@ -313,9 +316,11 @@ async fn key_mappings_are_added_from_a_key_press_replaced_and_removed() {
             target: Target::Mac,
             ..draft
         }));
-        let _ = app.update(Message::KeyMappingPressed(usage::RIGHT_CTRL));
+        // Not keys pressed in another window, like the Mac display's viewer.
+        let _ = app.update(Message::KeyMappingPressed(viewer, usage::LEFT_SHIFT));
+        let _ = app.update(Message::KeyMappingPressed(window, usage::RIGHT_CTRL));
         // Only the first key press is taken.
-        let _ = app.update(Message::KeyMappingPressed(usage::LEFT_CTRL));
+        let _ = app.update(Message::KeyMappingPressed(window, usage::LEFT_CTRL));
         let draft = app.model.key_mapping.clone().unwrap();
         assert_eq!(draft.from, Some(usage::RIGHT_CTRL));
         assert!(!draft.listening);
@@ -345,11 +350,49 @@ async fn key_mappings_are_added_from_a_key_press_replaced_and_removed() {
     // Cancelling adds nothing, and a key press after closing changes nothing.
     let _ = app.update(Message::AddKeyMapping);
     let _ = app.update(Message::KeyMappingDone(false));
-    let _ = app.update(Message::KeyMappingPressed(usage::LEFT_SHIFT));
+    let _ = app.update(Message::KeyMappingPressed(window, usage::LEFT_SHIFT));
     assert_eq!(app.model.key_mapping.as_ref().unwrap().from, None);
     assert_eq!(app.engine.config().keys.mappings, [mapping(usage::FN)]);
 
-    let _ = app.update(Message::RemoveKeyMapping(0));
-    assert!(app.engine.config().keys.mappings.is_empty());
+    // While it waits for a new key, there's nothing to add.
+    let _ = app.update(Message::AddKeyMapping);
+    let draft = model::KeyMappingDraft {
+        target: Target::Mac,
+        from: Some(usage::LEFT_ALT),
+        to: Some(usage::FN),
+        listening: true,
+    };
+    assert_eq!(draft.mapping(), None);
+    let _ = app.update(Message::KeyMappingChanged(draft));
+    let _ = app.update(Message::KeyMappingDone(true));
+    assert_eq!(app.engine.config().keys.mappings, [mapping(usage::FN)]);
+
+    // Closing the window stops listening for a key.
+    let _ = app.update(Message::AddKeyMapping);
+    let _ = app.update(Message::WindowClosed(window));
+    assert!(!app.model.key_mapping_open);
+
+    // Removing goes by the mapping shown, even if the list changed since.
+    app.engine
+        .update_config(|c| {
+            c.keys.mappings.insert(
+                0,
+                KeyMapping {
+                    target: Target::Windows,
+                    from: Key(usage::CAPS_LOCK),
+                    to: Key(usage::LEFT_CTRL),
+                },
+            )
+        })
+        .unwrap();
+    let _ = app.update(Message::RemoveKeyMapping(mapping(usage::FN)));
+    assert_eq!(
+        app.engine.config().keys.mappings,
+        [KeyMapping {
+            target: Target::Windows,
+            from: Key(usage::CAPS_LOCK),
+            to: Key(usage::LEFT_CTRL),
+        }]
+    );
     assert_eq!(app.model.config, app.engine.config());
 }

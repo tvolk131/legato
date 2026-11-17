@@ -95,11 +95,11 @@ pub enum Message {
     /// Open the dialog for adding a key mapping.
     AddKeyMapping,
     KeyMappingChanged(model::KeyMappingDraft),
-    /// A key was pressed while the dialog was waiting for one.
-    KeyMappingPressed(u16),
+    /// A key was pressed in a window while the dialog was waiting for one.
+    KeyMappingPressed(window::Id, u16),
     /// Close the dialog, adding the mapping (`true`) or not.
     KeyMappingDone(bool),
-    RemoveKeyMapping(usize),
+    RemoveKeyMapping(legato_engine::config::KeyMapping),
     InvertWheel(bool),
     Autostart(bool),
     ControlMode(Option<String>),
@@ -337,6 +337,8 @@ impl App {
                     self.window = None;
                     // Stop accepting pairing requests along with the window.
                     self.model.add_device_open = false;
+                    // And listening for a key to map.
+                    self.model.key_mapping_open = false;
                     platform::show_in_dock(false);
                 }
                 if let Some(viewer) = self.viewer.take_if(|v| v.window == id) {
@@ -525,10 +527,12 @@ impl App {
                     self.model.key_mapping = Some(draft);
                 }
             }
-            Message::KeyMappingPressed(key) => {
+            Message::KeyMappingPressed(window, key) => {
+                // Only keys pressed in the window showing the dialog, not the viewer.
                 if let Some(draft) = &mut self.model.key_mapping
                     && self.model.key_mapping_open
                     && draft.listening
+                    && self.window == Some(window)
                 {
                     draft.from = Some(key);
                     draft.listening = false;
@@ -553,11 +557,7 @@ impl App {
                     self.model.key_mapping_open = true;
                 }
             }
-            Message::RemoveKeyMapping(index) => {
-                let Some(&mapping) = self.model.config.keys.mappings.get(index) else {
-                    return Task::none();
-                };
-                // By value, in case the settings changed since this was shown.
+            Message::RemoveKeyMapping(mapping) => {
                 self.save_config(|c| c.keys.mappings.retain(|m| *m != mapping));
             }
             Message::InvertWheel(on) => {
@@ -1049,7 +1049,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|d| d.listening && self.model.key_mapping_open)
             {
-                iced::event::listen_with(|event, _, _| match event {
+                iced::event::listen_with(|event, _, window| match event {
                     iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                         physical_key,
                         repeat: false,
@@ -1057,7 +1057,7 @@ impl App {
                     }) => keys::from_physical(physical_key)
                         // Escape closes the dialog instead.
                         .filter(|&key| key != keys::ESCAPE)
-                        .map(Message::KeyMappingPressed),
+                        .map(|key| Message::KeyMappingPressed(window, key)),
                     _ => None,
                 })
             } else {
