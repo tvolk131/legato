@@ -66,7 +66,7 @@ fn control_mode(config: &Config) -> ControlMode {
 enum Input {
     Control(EndpointId, Control),
     Datagram(EndpointId, Datagram),
-    /// Someone used this machine's own keyboard or mouse: what it was and where the OS
+    /// Input that didn't come from a peer was seen here: what it was and where the OS
     /// says it came from, for the log.
     LocalActivity(&'static str, Origin),
     Disconnected(EndpointId),
@@ -822,8 +822,8 @@ fn inject_loop(
                     // whether a program posting input, not the user, caused it.
                     let origin = describe_origin(origin);
                     tracing::info!(
-                        "this machine's own keyboard or mouse was used ({what}{origin}): taking \
-                         back control"
+                        "input that didn't come from a peer was seen on this machine \
+                         ({what}{origin}): taking back control"
                     );
                 }
                 false
