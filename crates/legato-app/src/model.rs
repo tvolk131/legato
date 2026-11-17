@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use legato_engine::Config;
-use legato_engine::config::{MovingSize, Placement, Quality, Resolution};
+use legato_engine::config::{Key, KeyMapping, MovingSize, Placement, Quality, Resolution, Target};
 use legato_net::{EndpointId, PathKind};
 use legato_proto::{Os, Screens};
 
@@ -86,6 +86,43 @@ pub struct Model {
     /// The "Show as display" choices being made. Kept while the dialog closes.
     pub display_options: Option<DisplayOptions>,
     pub display_options_open: bool,
+    /// The key mapping being added. Kept while the dialog closes.
+    pub key_mapping: Option<KeyMappingDraft>,
+    pub key_mapping_open: bool,
+}
+
+/// A key mapping being added: this keyboard's key, and what it acts as on a kind of
+/// machine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyMappingDraft {
+    pub target: Target,
+    pub from: Option<u16>,
+    pub to: Option<u16>,
+    /// Waiting for a key press, to make it `from`.
+    pub listening: bool,
+}
+
+impl KeyMappingDraft {
+    /// A new mapping for the other kind of machine than this one.
+    pub fn new(this: Option<Os>) -> Self {
+        Self {
+            target: match this {
+                Some(Os::MacOs) => Target::Windows,
+                _ => Target::Mac,
+            },
+            from: None,
+            to: None,
+            listening: true,
+        }
+    }
+
+    pub fn mapping(&self) -> Option<KeyMapping> {
+        Some(KeyMapping {
+            target: self.target,
+            from: Key(self.from?),
+            to: Key(self.to?),
+        })
+    }
 }
 
 /// Where and how to show a Mac's extra display.

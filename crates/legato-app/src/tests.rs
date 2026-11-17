@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use iced_m3::Theme;
 use iced_test::simulator;
-use legato_engine::config::{Config, Neighbor};
+use legato_core::keymap::usage;
+use legato_engine::config::{Config, Key, KeyMapping, Neighbor, Target};
 use legato_net::PathKind;
 use legato_proto::{Display, Os, Rect, Screens};
 
 use crate::Message;
-use crate::model::{Device, Model, Page, Paired, Pairing, PairingStage};
+use crate::model::{Device, KeyMappingDraft, Model, Page, Paired, Pairing, PairingStage};
 
 /// A fixed device id, so ids shown on screen are the same in every run.
 fn id(n: u8) -> legato_net::EndpointId {
@@ -105,6 +106,8 @@ fn model(page: Page) -> Model {
         viewing: None,
         display_options: None,
         display_options_open: false,
+        key_mapping: None,
+        key_mapping_open: false,
         active: None,
         problems: vec![],
         transfer_failures: vec![],
@@ -361,9 +364,16 @@ fn unplaced_peers_are_parked_beside_the_displays() {
 
 #[test]
 fn settings_toggles_send_messages() {
-    let m = model(Page::Settings);
+    let mut m = model(Page::Settings);
+    m.config.keys.mappings.push(KeyMapping {
+        target: Target::Mac,
+        from: Key(usage::RIGHT_CTRL),
+        to: Key(usage::FN),
+    });
     let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     snapshot(&mut ui, "settings");
+    assert!(ui.find("Right Ctrl → fn (Globe)").is_ok());
+    ui.click("Add a key mapping").unwrap();
     ui.click("Reverse mouse wheel").unwrap();
     ui.click("Open at login").unwrap();
     ui.click("Mac Command key").unwrap();
@@ -401,6 +411,67 @@ fn settings_toggles_send_messages() {
             .filter(|m| matches!(m, Message::Stats(false)))
             .count(),
         1
+    );
+    assert!(
+        messages.iter().any(|m| matches!(m, Message::AddKeyMapping)),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn the_key_mapping_dialog_waits_for_a_key_then_adds_the_mapping() {
+    let mut m = model(Page::Settings);
+    m.key_mapping = Some(KeyMappingDraft::new(Some(Os::Windows)));
+    m.key_mapping_open = true;
+    let mut ui = sized_simulator((640.0, 640.0), crate::view::root(&m));
+    assert!(ui.find("Press the key on this keyboard…").is_ok());
+    // Nothing to add yet.
+    ui.click("Add").unwrap();
+    assert!(
+        !ui.into_messages()
+            .any(|msg| matches!(msg, Message::KeyMappingDone(true)))
+    );
+
+    m.key_mapping = Some(KeyMappingDraft {
+        target: Target::Mac,
+        from: Some(usage::RIGHT_CTRL),
+        to: Some(usage::FN),
+        listening: false,
+    });
+    for dark in [false, true] {
+        let mut ui = sized_simulator((640.0, 640.0), crate::view::root(&m));
+        snapshot_theme(
+            &mut ui,
+            if dark {
+                "key-mapping-dark"
+            } else {
+                "key-mapping"
+            },
+            dark,
+        );
+        assert!(ui.find("Right Ctrl").is_ok());
+        ui.click("Add").unwrap();
+        ui.click("Change").unwrap();
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|msg| matches!(msg, Message::KeyMappingDone(true))),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|msg| matches!(
+                msg,
+                Message::KeyMappingChanged(d) if d.listening && d.from == Some(usage::RIGHT_CTRL)
+            )),
+            "{messages:?}"
+        );
+    }
+    let mut ui = sized_simulator((640.0, 640.0), crate::view::root(&m));
+    ui.tap_key(iced::keyboard::key::Named::Escape);
+    assert!(
+        ui.into_messages()
+            .any(|msg| matches!(msg, Message::KeyMappingDone(false)))
     );
 }
 

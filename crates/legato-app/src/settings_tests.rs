@@ -298,3 +298,58 @@ async fn watch_subscription_delivers_initial_and_latest_values_then_closes() {
     drop(tx);
     assert!(stream.next().await.is_none());
 }
+
+#[tokio::test]
+async fn key_mappings_are_added_from_a_key_press_replaced_and_removed() {
+    use legato_core::keymap::usage;
+    use legato_engine::config::{Key, KeyMapping, Target};
+    let (dir, mut app) = app().await;
+    let add = |app: &mut App, to: u16| {
+        let _ = app.update(Message::AddKeyMapping);
+        assert!(app.model.key_mapping_open);
+        let draft = app.model.key_mapping.clone().unwrap();
+        assert!(draft.listening && draft.from.is_none());
+        let _ = app.update(Message::KeyMappingChanged(model::KeyMappingDraft {
+            target: Target::Mac,
+            ..draft
+        }));
+        let _ = app.update(Message::KeyMappingPressed(usage::RIGHT_CTRL));
+        // Only the first key press is taken.
+        let _ = app.update(Message::KeyMappingPressed(usage::LEFT_CTRL));
+        let draft = app.model.key_mapping.clone().unwrap();
+        assert_eq!(draft.from, Some(usage::RIGHT_CTRL));
+        assert!(!draft.listening);
+        let _ = app.update(Message::KeyMappingChanged(model::KeyMappingDraft {
+            to: Some(to),
+            ..draft
+        }));
+        let _ = app.update(Message::KeyMappingDone(true));
+        assert!(!app.model.key_mapping_open);
+    };
+    let mapping = |to| KeyMapping {
+        target: Target::Mac,
+        from: Key(usage::RIGHT_CTRL),
+        to: Key(to),
+    };
+
+    add(&mut app, usage::LEFT_GUI);
+    assert_eq!(app.model.config.keys.mappings, [mapping(usage::LEFT_GUI)]);
+    // The same key on the same kind of machine replaces the older mapping.
+    add(&mut app, usage::FN);
+    assert_eq!(app.model.config.keys.mappings, [mapping(usage::FN)]);
+    assert_eq!(
+        legato_engine::config::load(dir.path()).unwrap(),
+        app.engine.config()
+    );
+
+    // Cancelling adds nothing, and a key press after closing changes nothing.
+    let _ = app.update(Message::AddKeyMapping);
+    let _ = app.update(Message::KeyMappingDone(false));
+    let _ = app.update(Message::KeyMappingPressed(usage::LEFT_SHIFT));
+    assert_eq!(app.model.key_mapping.as_ref().unwrap().from, None);
+    assert_eq!(app.engine.config().keys.mappings, [mapping(usage::FN)]);
+
+    let _ = app.update(Message::RemoveKeyMapping(0));
+    assert!(app.engine.config().keys.mappings.is_empty());
+    assert_eq!(app.model.config, app.engine.config());
+}

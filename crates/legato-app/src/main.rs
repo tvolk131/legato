@@ -16,6 +16,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 mod editor;
 mod icons;
+mod keys;
 mod model;
 mod platform;
 mod restart;
@@ -91,6 +92,14 @@ pub enum Message {
     PushDistance(f32),
     SaveSettings,
     Remap(bool),
+    /// Open the dialog for adding a key mapping.
+    AddKeyMapping,
+    KeyMappingChanged(model::KeyMappingDraft),
+    /// A key was pressed while the dialog was waiting for one.
+    KeyMappingPressed(u16),
+    /// Close the dialog, adding the mapping (`true`) or not.
+    KeyMappingDone(bool),
+    RemoveKeyMapping(usize),
     InvertWheel(bool),
     Autostart(bool),
     ControlMode(Option<String>),
@@ -223,6 +232,8 @@ impl App {
             viewing: None,
             display_options: None,
             display_options_open: false,
+            key_mapping: None,
+            key_mapping_open: false,
         };
         let mut app = Self {
             engine,
@@ -504,6 +515,50 @@ impl App {
             }
             Message::Remap(on) => {
                 self.save_config(|c| c.keys.remap = if on { Remap::Auto } else { Remap::None });
+            }
+            Message::AddKeyMapping => {
+                self.model.key_mapping = Some(model::KeyMappingDraft::new(self.model.this.os));
+                self.model.key_mapping_open = true;
+            }
+            Message::KeyMappingChanged(draft) => {
+                if self.model.key_mapping_open {
+                    self.model.key_mapping = Some(draft);
+                }
+            }
+            Message::KeyMappingPressed(key) => {
+                if let Some(draft) = &mut self.model.key_mapping
+                    && self.model.key_mapping_open
+                    && draft.listening
+                {
+                    draft.from = Some(key);
+                    draft.listening = false;
+                }
+            }
+            Message::KeyMappingDone(add) => {
+                if !self.model.key_mapping_open {
+                    return Task::none();
+                }
+                self.model.key_mapping_open = false;
+                let mapping = self.model.key_mapping.as_ref().and_then(|d| d.mapping());
+                let Some(mapping) = mapping.filter(|_| add) else {
+                    return Task::none();
+                };
+                if !self.save_config(|c| {
+                    // A key maps to one key on each kind of machine: replace an older one.
+                    c.keys
+                        .mappings
+                        .retain(|m| (m.target, m.from) != (mapping.target, mapping.from));
+                    c.keys.mappings.push(mapping);
+                }) {
+                    self.model.key_mapping_open = true;
+                }
+            }
+            Message::RemoveKeyMapping(index) => {
+                let Some(&mapping) = self.model.config.keys.mappings.get(index) else {
+                    return Task::none();
+                };
+                // By value, in case the settings changed since this was shown.
+                self.save_config(|c| c.keys.mappings.retain(|m| *m != mapping));
             }
             Message::InvertWheel(on) => {
                 self.save_config(|c| c.scrolling.invert_wheel = on);
@@ -984,6 +1039,27 @@ impl App {
                     Subscription::run_with(engine.clone(), cursor_stream),
                     Subscription::run_with(engine, stats_stream),
                 ])
+            } else {
+                Subscription::none()
+            },
+            // Only while the key mapping dialog waits for a key.
+            if self
+                .model
+                .key_mapping
+                .as_ref()
+                .is_some_and(|d| d.listening && self.model.key_mapping_open)
+            {
+                iced::event::listen_with(|event, _, _| match event {
+                    iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        physical_key,
+                        repeat: false,
+                        ..
+                    }) => keys::from_physical(physical_key)
+                        // Escape closes the dialog instead.
+                        .filter(|&key| key != keys::ESCAPE)
+                        .map(Message::KeyMappingPressed),
+                    _ => None,
+                })
             } else {
                 Subscription::none()
             },
