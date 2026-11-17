@@ -372,7 +372,7 @@ fn settings_toggles_send_messages() {
     });
     let mut ui = sized_simulator((1024.0, 1600.0), crate::view::root(&m));
     snapshot(&mut ui, "settings");
-    assert!(ui.find("Right Ctrl → fn (Globe)").is_ok());
+    assert!(ui.find("Acts as fn (Globe) on Macs").is_ok());
     ui.click("Add a key mapping").unwrap();
     ui.click("Reverse mouse wheel").unwrap();
     ui.click("Open at login").unwrap();

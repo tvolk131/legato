@@ -608,8 +608,13 @@ fn key_mappings(m: &Model) -> Element<'_, Message> {
     let rows = mappings.iter().map(|mapping| {
         let from = keys::label(mapping.from.0, this);
         let to = keys::label(mapping.to.0, mapping.target.os());
-        list_item(format!("{from} → {to}"))
-            .supporting_text(target_name(mapping.target))
+        // Words, not an arrow: the bundled font has no arrows, and fallback fonts differ.
+        let place = match mapping.target {
+            Target::Mac => "on Macs",
+            Target::Windows => "on Windows PCs",
+        };
+        list_item(from)
+            .supporting_text(format!("Acts as {to} {place}"))
             .trailing(
                 icon_button(Symbol::new(IconName::Delete).style(Style::Rounded))
                     .on_press(Message::RemoveKeyMapping(*mapping)),
