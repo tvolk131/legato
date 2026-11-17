@@ -26,6 +26,13 @@ pub fn frontmost_app() -> Option<String> {
     Some(app.localizedName()?.to_string())
 }
 
+/// The name of the app with process ID `pid`, if it's an app (for the log).
+pub fn app_name(pid: i64) -> Option<String> {
+    let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+    let app = objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+    Some(app.localizedName()?.to_string())
+}
+
 /// The user's key repeat and double-click settings.
 pub fn receiver_config() -> legato_core::ReceiverConfig {
     use objc2_app_kit::NSEvent;

@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use legato_core::controller::{Action, CaptureCommand, Controller};
-use legato_core::{Inject, LocalInput};
+use legato_core::{Inject, LocalInput, Origin};
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -11,7 +11,7 @@ mod imp {
     pub fn start(
         controller: super::Controller,
         sink: impl FnMut(super::Action) + Send + 'static,
-        local: impl FnMut(super::LocalInput) + Send + 'static,
+        local: impl FnMut(super::LocalInput, super::Origin) + Send + 'static,
     ) -> anyhow::Result<RawCapture> {
         RawCapture::start(controller, sink, local).map_err(anyhow::Error::msg)
     }
@@ -35,7 +35,7 @@ mod imp {
         );
     }
 
-    pub use legato_macos::{clipboard_change_count, frontmost_app, receiver_config};
+    pub use legato_macos::{app_name, clipboard_change_count, frontmost_app, receiver_config};
 
     pub fn cursor_state() -> Option<String> {
         None
@@ -61,7 +61,7 @@ mod imp {
     pub fn start(
         controller: super::Controller,
         sink: impl FnMut(super::Action) + Send + 'static,
-        local: impl FnMut(super::LocalInput) + Send + 'static,
+        local: impl FnMut(super::LocalInput, super::Origin) + Send + 'static,
     ) -> anyhow::Result<RawCapture> {
         Ok(RawCapture::start(
             controller,
@@ -82,6 +82,10 @@ mod imp {
     pub use legato_windows::{
         clipboard_change_count, foreground_app as frontmost_app, receiver_config,
     };
+
+    pub fn app_name(_pid: i64) -> Option<String> {
+        None
+    }
 
     pub fn cursor_state() -> Option<String> {
         Some(legato_windows::cursor_state())
@@ -110,6 +114,9 @@ pub use imp::window_area;
 /// The app (or window) in front, which gets typing, for the log.
 pub use imp::frontmost_app;
 
+/// The name of the app with this process ID, for the log (macOS only).
+pub use imp::app_name;
+
 /// Captures this machine's keyboard and mouse. Stops when dropped.
 pub struct Capture(imp::RawCapture);
 
@@ -117,7 +124,7 @@ impl Capture {
     pub fn start(
         controller: Controller,
         sink: impl FnMut(Action) + Send + 'static,
-        local_input: impl FnMut(LocalInput) + Send + 'static,
+        local_input: impl FnMut(LocalInput, Origin) + Send + 'static,
     ) -> Result<Self> {
         imp::start(controller, sink, local_input)
             .map(Self)

@@ -46,7 +46,7 @@ fn injected_motion_lands_exactly_and_is_not_local_activity() {
                 legato_core::Layout::new(screens()),
             ),
             |_| {},
-            move |input| {
+            move |input, _| {
                 if activity.feed(std::time::Instant::now(), input) {
                     seen.fetch_add(1, Ordering::SeqCst);
                 }
@@ -162,7 +162,7 @@ fn capture_crosses_an_edge_and_holds_the_cursor() {
         move |a| {
             let _ = tx.send(a);
         },
-        |_| {},
+        |_, _| {},
     )
     .unwrap();
 

@@ -13,9 +13,9 @@ use std::cell::RefCell;
 use std::sync::mpsc;
 use std::time::Instant;
 
-use legato_core::LocalInput;
 use legato_core::controller::{Action, CaptureCommand, Controller, Event, Verdict};
 use legato_core::keymap;
+use legato_core::{LocalInput, Origin};
 use legato_proto::{Button, Point, Rect, Scroll};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -65,7 +65,7 @@ impl Capture {
         controller: Controller,
         options: CaptureOptions,
         sink: impl FnMut(Action) + Send + 'static,
-        local_input: impl FnMut(LocalInput) + Send + 'static,
+        local_input: impl FnMut(LocalInput, Origin) + Send + 'static,
     ) -> windows::core::Result<Self> {
         let (commands, command_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -116,7 +116,7 @@ impl Drop for Capture {
 struct State {
     controller: Controller,
     sink: Box<dyn FnMut(Action) + Send>,
-    local_input: Box<dyn FnMut(LocalInput) + Send>,
+    local_input: Box<dyn FnMut(LocalInput, Origin) + Send>,
     options: CaptureOptions,
     commands: mpsc::Receiver<Command>,
     out: Vec<Action>,
@@ -267,7 +267,7 @@ impl State {
                 (WM_MOUSEMOVE, None) => LocalInput::Motion { dx: 0.0, dy: 0.0 },
                 _ => LocalInput::Other,
             };
-            (self.local_input)(input);
+            (self.local_input)(input, Origin::default());
         }
         let pos = info.pt;
         let wheel = ((info.mouseData >> 16) as u16 as i16) as f64;
@@ -384,7 +384,7 @@ impl State {
             return (Verdict::Pass, vec![]);
         }
         if self.pin.is_none() {
-            (self.local_input)(LocalInput::Other);
+            (self.local_input)(LocalInput::Other, Origin::default());
         }
         let Some(usage) = key_usage(info) else {
             return (Verdict::Pass, vec![]);
@@ -890,7 +890,7 @@ fn run(
     controller: Controller,
     options: CaptureOptions,
     sink: Box<dyn FnMut(Action) + Send>,
-    local_input: Box<dyn FnMut(LocalInput) + Send>,
+    local_input: Box<dyn FnMut(LocalInput, Origin) + Send>,
     commands: mpsc::Receiver<Command>,
     ready: mpsc::Sender<windows::core::Result<u32>>,
 ) {
@@ -1068,7 +1068,7 @@ mod tests {
             sink: Box::new(move |action| {
                 sink.send(action).unwrap();
             }),
-            local_input: Box::new(|_| {}),
+            local_input: Box::new(|_, _| {}),
             options: CaptureOptions::default(),
             commands,
             out: vec![],
