@@ -58,14 +58,69 @@ struct Arrangement: Decodable, Equatable {
     var problems: [String] = []
 }
 
+enum KeyMappingTarget: String, CaseIterable, Identifiable, Decodable {
+    case windows = "windows"
+    case mac = "mac"
+
+    var id: Self { self }
+    var title: String { self == .windows ? "On Windows PCs" : "On Macs" }
+    var place: String { self == .windows ? "on Windows PCs" : "on Macs" }
+}
+
+struct KeyMapping: Decodable, Identifiable, Equatable {
+    var target: KeyMappingTarget
+    var from: String
+    var fromLabel: String
+    var to: String
+    var toLabel: String
+
+    var id: String { "\(target.rawValue):\(from):\(to)" }
+}
+
+struct KeyOption: Decodable, Identifiable, Equatable, Hashable {
+    var code: String
+    var label: String
+
+    var id: String { code }
+}
+
+struct KeyTargets: Decodable, Equatable {
+    var mac: [KeyOption] = []
+    var windows: [KeyOption] = []
+
+    func options(for target: KeyMappingTarget) -> [KeyOption] {
+        target == .mac ? mac : windows
+    }
+
+    static let current: KeyTargets = {
+        guard let data = takeBridgeJSON(legato_key_targets()),
+              let decoded = try? JSONDecoder().decode(KeyTargets.self, from: data)
+        else { return KeyTargets() }
+        return decoded
+    }()
+
+    static func macKey(for keyCode: UInt16) -> KeyOption? {
+        guard let data = takeBridgeJSON(legato_mac_key(keyCode)) else { return nil }
+        return try? JSONDecoder().decode(KeyOption?.self, from: data)
+    }
+}
+
+private func takeBridgeJSON(_ pointer: UnsafeMutablePointer<CChar>?) -> Data? {
+    guard let pointer else { return nil }
+    defer { legato_free(pointer) }
+    return Data(String(cString: pointer).utf8)
+}
+
 struct Preferences: Decodable, Equatable {
     var clipboard = true
-    /// Alt acts as Command and Win as Option when driving a Mac.
+    /// Swap Command and Control when this Mac's keyboard drives Windows.
     var remap = true
     var invertWheel = false
     var pushDistance = 30.0
     /// The controlling device's id (or id prefix), if only one device may control.
     var controller: String?
+    /// This Mac keyboard's own key mappings.
+    var keyMappings: [KeyMapping] = []
 }
 
 struct Snapshot: Decodable, Equatable {
@@ -218,6 +273,14 @@ nonisolated func engineChanged() {
     }
 
     func setting(_ key: String, _ value: Any) { command("setting", ["key": key, "value": value]) }
+
+    func addKeyMapping(target: KeyMappingTarget, from: String, to: String) {
+        command("add_key_mapping", ["target": target.rawValue, "from": from, "to": to])
+    }
+
+    func removeKeyMapping(_ mapping: KeyMapping) {
+        command("remove_key_mapping", ["target": mapping.target.rawValue, "from": mapping.from, "to": mapping.to])
+    }
 
     func setSharing(_ on: Bool) { command("sharing", ["enabled": on]) }
 

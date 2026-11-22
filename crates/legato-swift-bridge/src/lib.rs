@@ -10,7 +10,8 @@ use anyhow::{Context, Result, bail};
 use legato_engine::{
     Engine, Status,
     arrange::{self, Editor, EditorPeer},
-    config::{Config, Remap},
+    config::{Config, Key, KeyMapping, Remap, Target},
+    keys,
 };
 use legato_net::{EndpointId, Nearby, NearbyEvent, PairAttempt, PairOutcome};
 use legato_proto::{FilePurpose, Os, Point, Rect};
@@ -52,12 +53,35 @@ pub struct Snapshot {
 #[derive(Debug, Default, Serialize)]
 pub struct Settings {
     pub clipboard: bool,
-    /// Alt is Command and Win is Option when driving a Mac.
+    /// Swap Command and Control when this Mac's keyboard drives Windows.
     pub remap: bool,
     pub invert_wheel: bool,
     pub push_distance: f64,
     /// The configured controller's id or id prefix, if one is set.
     pub controller: Option<String>,
+    /// This Mac keyboard's own key mappings, applied on top of [`Settings::remap`].
+    pub key_mappings: Vec<KeyMappingView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeyMappingView {
+    pub target: Target,
+    pub from: String,
+    pub from_label: String,
+    pub to: String,
+    pub to_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeyOption {
+    pub code: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeyTargets {
+    pub mac: Vec<KeyOption>,
+    pub windows: Vec<KeyOption>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,6 +196,18 @@ enum Command {
     /// accepted only while it's open.
     AddingDevice {
         open: bool,
+    },
+    /// Add (or replace) a key mapping for this Mac's keyboard.
+    AddKeyMapping {
+        target: Target,
+        from: String,
+        to: String,
+    },
+    /// Remove an existing key mapping for this Mac's keyboard.
+    RemoveKeyMapping {
+        target: Target,
+        from: String,
+        to: String,
     },
 }
 
@@ -568,12 +604,29 @@ fn editor(engine: &Engine, state: &State) -> Editor {
 }
 
 fn settings(config: &Config) -> Settings {
+    let key_mappings = config
+        .keys
+        .mappings
+        .iter()
+        .filter_map(|mapping| {
+            let from = keys::name(mapping.from.0)?;
+            let to = keys::name(mapping.to.0)?;
+            Some(KeyMappingView {
+                target: mapping.target,
+                from,
+                from_label: keys::label(mapping.from.0, Os::MacOs),
+                to,
+                to_label: keys::label(mapping.to.0, mapping.target.os()),
+            })
+        })
+        .collect();
     Settings {
         clipboard: config.clipboard.enabled,
         remap: config.keys.remap == Remap::Auto,
         invert_wheel: config.scrolling.invert_wheel,
         push_distance: config.switching.push_distance,
         controller: config.control.controller.clone(),
+        key_mappings,
     }
 }
 
@@ -850,8 +903,84 @@ fn command(command: Command, engine: Arc<Engine>, state: Shared) -> Result<()> {
         }
         Command::DismissNotice => lock(&state).notices.clear(),
         Command::AddingDevice { open } => listen_for_pairing(&state, engine.net(), open),
+        Command::AddKeyMapping { target, from, to } => {
+            let mapping = parse_key_mapping(target, &from, &to)?;
+            engine.update_config(|c| add_key_mapping(c, mapping))?;
+        }
+        Command::RemoveKeyMapping { target, from, to } => {
+            let mapping = parse_key_mapping(target, &from, &to)?;
+            engine.update_config(|c| remove_key_mapping(c, mapping))?;
+        }
     }
     Ok(())
+}
+
+fn parse_key_mapping(target: Target, from: &str, to: &str) -> Result<KeyMapping> {
+    let from = keys::from_name(from).with_context(|| format!("unknown key `{from}`"))?;
+    let to = keys::from_name(to).with_context(|| format!("unknown key `{to}`"))?;
+    Ok(KeyMapping {
+        target,
+        from: Key(from),
+        to: Key(to),
+    })
+}
+
+fn add_key_mapping(config: &mut Config, mapping: KeyMapping) {
+    // A key maps to one key on each kind of machine: replace an older one.
+    config
+        .keys
+        .mappings
+        .retain(|m| (m.target, m.from) != (mapping.target, mapping.from));
+    config.keys.mappings.push(mapping);
+}
+
+fn remove_key_mapping(config: &mut Config, mapping: KeyMapping) {
+    config.keys.mappings.retain(|m| *m != mapping);
+}
+
+fn key_option(usage: u16, os: Os) -> Option<KeyOption> {
+    Some(KeyOption {
+        code: keys::name(usage)?,
+        label: keys::label(usage, os),
+    })
+}
+
+fn mac_key_option(keycode: u16) -> Option<KeyOption> {
+    let usage = keys::hid_from_mac_keycode(keycode)?;
+    key_option(usage, Os::MacOs)
+}
+
+fn key_targets() -> KeyTargets {
+    KeyTargets {
+        mac: keys::targets(Os::MacOs)
+            .into_iter()
+            .filter_map(|usage| key_option(usage, Os::MacOs))
+            .collect(),
+        windows: keys::targets(Os::Windows)
+            .into_iter()
+            .filter_map(|usage| key_option(usage, Os::Windows))
+            .collect(),
+    }
+}
+
+/// Converts a macOS virtual key code (`NSEvent.keyCode`) into its saved key name and
+/// Mac keyboard label, as JSON `{"code":"…","label":"…"}` or `null` if unsupported.
+/// Free the returned string with [`legato_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn legato_mac_key(keycode: u16) -> *mut c_char {
+    let result = catch_unwind(|| mac_key_option(keycode)).unwrap_or(None);
+    encoded(&result)
+}
+
+/// Returns the keys offered as key-mapping targets for Macs and Windows PCs, as JSON.
+/// Free the returned string with [`legato_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn legato_key_targets() -> *mut c_char {
+    let result = catch_unwind(key_targets).unwrap_or(KeyTargets {
+        mac: Vec::new(),
+        windows: Vec::new(),
+    });
+    encoded(&result)
 }
 
 #[derive(Serialize)]

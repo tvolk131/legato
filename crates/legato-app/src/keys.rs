@@ -2,12 +2,8 @@
 //! can act as, and how keys are named on each kind of keyboard.
 
 use iced::keyboard::key::{Code, Physical};
-use legato_core::keymap::{self, usage};
-use legato_proto::Os;
-
-pub const ESCAPE: u16 = 0x29;
-/// F13 to F20: keys most keyboards lack, free for apps to use as shortcuts.
-const F13_TO_F20: std::ops::RangeInclusive<u16> = 0x68..=0x6f;
+use legato_core::keymap;
+pub use legato_engine::keys::{ESCAPE, label, targets};
 
 /// The key a physical key press in this window is, if Legato can send it.
 pub fn from_physical(key: Physical) -> Option<u16> {
@@ -23,79 +19,11 @@ pub fn from_physical(key: Physical) -> Option<u16> {
     keymap::from_name(&name)
 }
 
-/// The keys offered as what a key acts as on `os`.
-pub fn targets(os: Os) -> Vec<u16> {
-    let mut keys = Vec::new();
-    if os == Os::MacOs {
-        keys.push(usage::FN);
-    }
-    keys.extend([
-        usage::LEFT_GUI,
-        usage::RIGHT_GUI,
-        usage::LEFT_ALT,
-        usage::RIGHT_ALT,
-        usage::LEFT_CTRL,
-        usage::RIGHT_CTRL,
-        usage::LEFT_SHIFT,
-        usage::RIGHT_SHIFT,
-        usage::CAPS_LOCK,
-        ESCAPE,
-    ]);
-    keys.extend(F13_TO_F20);
-    keys
-}
-
-/// A key's name as `os`'s keyboards print it: "Right Ctrl" on Windows is "Right Control"
-/// on a Mac.
-pub fn label(key: u16, os: Os) -> String {
-    let mac = os == Os::MacOs;
-    let modifier = match key {
-        usage::LEFT_CTRL | usage::RIGHT_CTRL if mac => Some("Control"),
-        usage::LEFT_CTRL | usage::RIGHT_CTRL => Some("Ctrl"),
-        usage::LEFT_SHIFT | usage::RIGHT_SHIFT => Some("Shift"),
-        usage::LEFT_ALT | usage::RIGHT_ALT if mac => Some("Option"),
-        usage::LEFT_ALT | usage::RIGHT_ALT => Some("Alt"),
-        usage::LEFT_GUI | usage::RIGHT_GUI if mac => Some("Command"),
-        usage::LEFT_GUI | usage::RIGHT_GUI => Some("Windows"),
-        _ => None,
-    };
-    if let Some(modifier) = modifier {
-        let side = if key < usage::RIGHT_CTRL {
-            "Left"
-        } else {
-            "Right"
-        };
-        return format!("{side} {modifier}");
-    }
-    if key == usage::FN {
-        return "fn (Globe)".into();
-    }
-    if key == ESCAPE {
-        return if mac { "Escape" } else { "Esc" }.into();
-    }
-    let Some(name) = keymap::name(key) else {
-        return format!("Key {key:#06x}");
-    };
-    let name = name
-        .strip_prefix("Key")
-        .or_else(|| name.strip_prefix("Digit"))
-        .unwrap_or(&name);
-    // "CapsLock" → "Caps Lock".
-    let mut spaced = String::new();
-    let mut previous = None;
-    for c in name.chars() {
-        if c.is_ascii_uppercase() && previous.is_some_and(|p: char| p.is_ascii_lowercase()) {
-            spaced.push(' ');
-        }
-        spaced.push(c);
-        previous = Some(c);
-    }
-    spaced
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use legato_core::keymap::usage;
+    use legato_proto::Os;
 
     #[test]
     fn key_presses_are_the_keys_legato_sends() {

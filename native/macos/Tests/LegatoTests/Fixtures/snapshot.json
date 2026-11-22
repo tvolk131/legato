@@ -11,7 +11,16 @@
     "remap": true,
     "invert_wheel": false,
     "push_distance": 30.0,
-    "controller": null
+    "controller": null,
+    "key_mappings": [
+      {
+        "target": "windows",
+        "from": "CapsLock",
+        "from_label": "Caps Lock",
+        "to": "ControlLeft",
+        "to_label": "Left Ctrl"
+      }
+    ]
   },
   "paired": [
     {

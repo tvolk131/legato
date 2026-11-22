@@ -55,9 +55,32 @@ import Testing
 
     @Test func testSettings() throws {
         let model = fixture()
+        model.state.settings.keyMappings = [
+            KeyMapping(target: .windows, from: "CapsLock", fromLabel: "Caps Lock", to: "ControlLeft", toLabel: "Left Ctrl"),
+            KeyMapping(target: .windows, from: "Fn", fromLabel: "fn (Globe)", to: "F13", toLabel: "F13")
+        ]
         // Fixture mode prevents any login-item changes. Permission rows show the
         // process's real read-only permission state and are excluded from comparison.
-        try assertSnapshot("settings-input", view: SettingsView(model: model), size: CGSize(width: 600, height: 660), crop: CGRect(x: 0, y: 0, width: 600, height: 410))
+        try assertSnapshot("settings-input", view: SettingsView(model: model), size: CGSize(width: 600, height: 660), crop: CGRect(x: 0, y: 0, width: 600, height: 590))
+    }
+
+    @Test func testAddKeyMapping() throws {
+        try assertSnapshot(
+            "key-mapping-listening",
+            view: AddKeyMappingView(target: .windows, from: nil, to: "", listening: true) { _, _, _ in },
+            size: CGSize(width: 420, height: 340)
+        )
+        try assertSnapshot(
+            "key-mapping-ready-dark",
+            view: AddKeyMappingView(
+                target: .mac,
+                from: KeyOption(code: "CapsLock", label: "Caps Lock"),
+                to: "Fn",
+                listening: false
+            ) { _, _, _ in },
+            size: CGSize(width: 420, height: 370),
+            dark: true
+        )
     }
 
     @Test func testDecodesTheBridgeContract() throws {
@@ -69,6 +92,9 @@ import Testing
         #expect(snapshot.stateDir == "/tmp/legato-fixture")
         #expect(snapshot.settings.pushDistance == 30)
         #expect(snapshot.settings.controller == nil)
+        #expect(snapshot.settings.keyMappings == [
+            KeyMapping(target: .windows, from: "CapsLock", fromLabel: "Caps Lock", to: "ControlLeft", toLabel: "Left Ctrl")
+        ])
         #expect(snapshot.paired.map(\.os) == ["Windows", "macOS"])
         #expect(snapshot.paired.first?.active == true)
         #expect(snapshot.pairing?.stage == .confirm)
