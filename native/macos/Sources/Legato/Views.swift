@@ -101,40 +101,52 @@ struct DevicesView: View {
     var model: AppModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+        if !model.state.ready || model.state.paired.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
                 if model.state.ready {
-                    Label("\(model.state.name) · macOS", systemImage: "laptopcomputer").foregroundStyle(.secondary)
+                    Label("\(model.state.name) · macOS", systemImage: "laptopcomputer")
+                        .foregroundStyle(.secondary)
+                        .padding([.horizontal, .top], 24)
                 }
-                if !model.state.ready {
-                    if let error = model.state.error, !model.starting {
-                        ContentUnavailableView {
-                            Label("Legato couldn’t start", systemImage: "exclamationmark.triangle")
-                        } description: {
-                            Text(error)
-                        } actions: {
-                            Button("Try Again") { Task { await model.start() } }
+                Group {
+                    if !model.state.ready {
+                        if let error = model.state.error, !model.starting {
+                            ContentUnavailableView {
+                                Label("Legato couldn’t start", systemImage: "exclamationmark.triangle")
+                            } description: {
+                                Text(error)
+                            } actions: {
+                                Button("Try Again") { Task { await model.start() } }
+                            }
+                        } else {
+                            ProgressView("Starting Legato…")
                         }
                     } else {
-                        ProgressView("Starting Legato…").frame(maxWidth: .infinity)
+                        ContentUnavailableView {
+                            Label("Connect your first device", systemImage: "desktopcomputer.and.macbook")
+                        } description: {
+                            Text("Open Legato on both devices on the same network, then choose Add a Device on both.")
+                        } actions: {
+                            Button("Add a Device…") { model.discovering = true }.buttonStyle(.borderedProminent)
+                        }
                     }
-                } else if model.state.paired.isEmpty {
-                    ContentUnavailableView {
-                        Label("Connect your first device", systemImage: "desktopcomputer.and.macbook")
-                    } description: {
-                        Text("Open Legato on both devices on the same network, then choose Add a Device on both.")
-                    } actions: {
-                        Button("Add a Device…") { model.discovering = true }.buttonStyle(.borderedProminent)
-                    }
-                } else {
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Label("\(model.state.name) · macOS", systemImage: "laptopcomputer").foregroundStyle(.secondary)
                     ForEach(model.state.paired) { device in
                         DeviceRow(model: model, device: device)
                     }
                     Text("Drop files or folders on this window to send them to the device you’re using.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
+                .padding(24).frame(maxWidth: 900, alignment: .leading).frame(maxWidth: .infinity)
             }
-            .padding(24).frame(maxWidth: 900, alignment: .leading).frame(maxWidth: .infinity)
         }
     }
 }
@@ -159,8 +171,12 @@ private struct DeviceRow: View {
                         Button("Unpair…", role: .destructive) { model.unpair = device }
                     } label: {
                         Image(systemName: "ellipsis")
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
                     }
-                    .menuStyle(.borderlessButton).fixedSize()
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
                     .accessibilityLabel("Actions for \(device.name)")
                 }
                 Button("Send Files…", systemImage: "paperplane") { model.send(to: device) }

@@ -73,11 +73,95 @@ fn notices_keep_the_latest_and_failures_are_not_repeated() {
     assert_eq!(s.failures.len(), 1);
 }
 
+#[test]
+fn key_mapping_helpers_add_replace_remove_and_validate() {
+    let mut c = Config::default();
+    let first = parse_key_mapping(Target::Windows, "CapsLock", "ControlLeft").unwrap();
+    add_key_mapping(&mut c, first);
+    assert_eq!(c.keys.mappings, [first]);
+
+    // Mapping the same key for the same target replaces the older mapping.
+    let replaced = parse_key_mapping(Target::Windows, "CapsLock", "Escape").unwrap();
+    add_key_mapping(&mut c, replaced);
+    assert_eq!(c.keys.mappings, [replaced]);
+
+    // Mapping the same key for a different target keeps both.
+    let on_mac = parse_key_mapping(Target::Mac, "CapsLock", "Fn").unwrap();
+    add_key_mapping(&mut c, on_mac);
+    assert_eq!(c.keys.mappings, [replaced, on_mac]);
+
+    // Snapshot formats labels for the Mac keyboard (from) and target OS (to).
+    let view = settings(&c).key_mappings;
+    assert_eq!(
+        view,
+        [
+            KeyMappingView {
+                target: Target::Windows,
+                from: "CapsLock".into(),
+                from_label: "Caps Lock".into(),
+                to: "Escape".into(),
+                to_label: "Esc".into(),
+            },
+            KeyMappingView {
+                target: Target::Mac,
+                from: "CapsLock".into(),
+                from_label: "Caps Lock".into(),
+                to: "Fn".into(),
+                to_label: "fn (Globe)".into(),
+            },
+        ]
+    );
+
+    remove_key_mapping(&mut c, replaced);
+    assert_eq!(c.keys.mappings, [on_mac]);
+
+    assert!(parse_key_mapping(Target::Windows, "NotAKey", "Escape").is_err());
+    assert!(parse_key_mapping(Target::Windows, "CapsLock", "NotAKey").is_err());
+}
+
+#[test]
+fn mac_key_and_targets_c_abi_return_valid_json() {
+    let read = |p: *mut c_char| -> Value {
+        // SAFETY: p is an owned C string returned by the bridge.
+        let value = serde_json::from_str(unsafe { CStr::from_ptr(p) }.to_str().unwrap()).unwrap();
+        // SAFETY: returns this allocation exactly once.
+        unsafe { legato_free(p) };
+        value
+    };
+
+    // macOS virtual key code 63 (0x3f) is fn (Globe); 57 (0x39) is Caps Lock.
+    assert_eq!(
+        read(legato_mac_key(63)),
+        json!({"code": "Fn", "label": "fn (Globe)"})
+    );
+    assert_eq!(
+        read(legato_mac_key(57)),
+        json!({"code": "CapsLock", "label": "Caps Lock"})
+    );
+    assert_eq!(read(legato_mac_key(0xffff)), Value::Null);
+
+    let targets = read(legato_key_targets());
+    let mac = targets["mac"].as_array().unwrap();
+    let windows = targets["windows"].as_array().unwrap();
+    assert_eq!(mac[0], json!({"code": "Fn", "label": "fn (Globe)"}));
+    assert!(!windows.iter().any(|k| k["code"] == "Fn"));
+    assert!(
+        windows
+            .iter()
+            .any(|k| k["code"] == "ControlLeft" && k["label"] == "Left Ctrl")
+    );
+}
+
 /// The JSON contract with Swift. `native/macos` decodes this exact file in its tests, so
 /// a change here that Swift can't read fails there. Regenerate it with
 /// `LEGATO_UPDATE_FIXTURES=1 cargo test -p legato-swift-bridge`.
 #[test]
 fn snapshot_fixture_matches_the_swift_contract() {
+    let mut config = Config::default();
+    config
+        .keys
+        .mappings
+        .push(parse_key_mapping(Target::Windows, "CapsLock", "ControlLeft").unwrap());
     let snapshot = Snapshot {
         ready: true,
         error: None,
@@ -86,7 +170,7 @@ fn snapshot_fixture_matches_the_swift_contract() {
         name: "MacBook Pro".into(),
         state_dir: "/tmp/legato-fixture".into(),
         sharing: true,
-        settings: settings(&Config::default()),
+        settings: settings(&config),
         paired: vec![
             Device {
                 id: "pc".into(),

@@ -21,6 +21,7 @@ mod clipboard;
 pub mod config;
 pub mod extend;
 pub mod files;
+pub mod keys;
 mod platform;
 mod run;
 mod screens;
