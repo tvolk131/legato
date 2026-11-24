@@ -29,9 +29,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const BLOB_TIMEOUT: Duration = Duration::from_secs(60);
 const MISMATCH_GRACE: Duration = Duration::from_secs(2);
-const MAX_CONCURRENT_BLOBS: usize = 4;
-const MIN_BACKOFF: Duration = Duration::from_secs(1);
-const MAX_BACKOFF: Duration = Duration::from_secs(10);
+pub(crate) const MAX_CONCURRENT_BLOBS: usize = 4;
+pub(crate) const MIN_BACKOFF: Duration = Duration::from_secs(1);
+pub(crate) const MAX_BACKOFF: Duration = Duration::from_secs(10);
+pub(crate) const ISSUE_BACKOFF: Duration = Duration::from_secs(60);
 /// Stream priorities: input (the control stream, 0) beats video, which beats bulk data.
 /// Adaptive quality's moving picture goes ahead of the sharp one, so a big sharpening
 /// frame never holds up the next moving one.
@@ -224,6 +225,13 @@ pub enum PathKind {
     Relay,
 }
 
+/// Latest-wins mailbox for outbound blobs of a single tag.
+#[derive(Debug, Default)]
+struct BlobSlot {
+    pending: std::sync::Mutex<Option<Vec<u8>>>,
+    notify: Notify,
+}
+
 /// A live session with one peer. Sending never blocks, so it's safe from input hooks.
 #[derive(Debug)]
 pub struct Session {
@@ -233,6 +241,7 @@ pub struct Session {
     pub(crate) conn: Connection,
     control: mpsc::UnboundedSender<Control>,
     datagram_failed: AtomicBool,
+    blobs: std::sync::Mutex<HashMap<u8, Arc<BlobSlot>>>,
 }
 
 impl Session {
@@ -272,24 +281,27 @@ impl Session {
     }
 
     /// Sends a blob on its own stream, below input in priority, without waiting.
+    ///
+    /// Outbound blobs for the same `tag` are latest-wins: if a previous blob of the
+    /// same tag is still in flight when a newer one is queued, the older stream is
+    /// reset and replaced so a slow transfer cannot overwrite a newer clipboard copy.
     pub fn send_blob(&self, tag: u8, data: Vec<u8>) {
-        let conn = self.conn.clone();
-        tokio::spawn(async move {
-            let result = async {
-                let mut send = conn.open_uni().await?;
-                send.set_priority(BULK_PRIORITY)?;
-                send.write_all(&[tag]).await?;
-                send.write_all(&(data.len() as u64).to_le_bytes()).await?;
-                send.write_all(&data).await?;
-                send.finish()?;
-                let _ = send.stopped().await;
-                Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            if let Err(e) = result {
-                tracing::debug!("sending blob failed: {e:#}");
-            }
-        });
+        if self.conn.close_reason().is_some() {
+            return;
+        }
+        let slot = {
+            let mut blobs = self.blobs.lock().unwrap();
+            blobs
+                .entry(tag)
+                .or_insert_with(|| {
+                    let slot = Arc::new(BlobSlot::default());
+                    tokio::spawn(blob_sender(self.conn.clone(), tag, slot.clone()));
+                    slot
+                })
+                .clone()
+        };
+        *slot.pending.lock().unwrap() = Some(data);
+        slot.notify.notify_one();
     }
 
     /// Streams a file below input in priority. Resolves only after the receiver saves it.
@@ -341,6 +353,96 @@ impl Session {
     }
 }
 
+enum BlobOutcome {
+    Closed,
+    Superseded,
+    Done(std::result::Result<Result<()>, tokio::time::error::Elapsed>),
+}
+
+async fn send_one_blob(
+    conn: &Connection,
+    tag: u8,
+    data: &[u8],
+    slot: &mut Option<SendStream>,
+) -> Result<()> {
+    let send = conn.open_uni().await?;
+    send.set_priority(BULK_PRIORITY)?;
+    let send = slot.insert(send);
+    send.write_all(&[tag]).await?;
+    send.write_all(&(data.len() as u64).to_le_bytes()).await?;
+    send.write_all(data).await?;
+    send.finish()?;
+    let _ = send.stopped().await;
+    *slot = None;
+    Ok(())
+}
+
+async fn blob_sender(conn: Connection, tag: u8, slot: Arc<BlobSlot>) {
+    let closed = conn.closed();
+    tokio::pin!(closed);
+    loop {
+        let data = loop {
+            let notified = slot.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(data) = slot.pending.lock().unwrap().take() {
+                break data;
+            }
+            tokio::select! {
+                _ = &mut closed => return,
+                _ = &mut notified => {}
+            }
+        };
+        let superseded = async {
+            loop {
+                let notified = slot.notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if slot.pending.lock().unwrap().is_some() {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        let mut stream: Option<SendStream> = None;
+        let outcome = {
+            let send = timeout(BLOB_TIMEOUT, send_one_blob(&conn, tag, &data, &mut stream));
+            tokio::select! {
+                _ = &mut closed => BlobOutcome::Closed,
+                _ = superseded => BlobOutcome::Superseded,
+                result = send => BlobOutcome::Done(result),
+            }
+        };
+        match outcome {
+            BlobOutcome::Closed => {
+                if let Some(mut send) = stream {
+                    let _ = send.reset(1u32.into());
+                }
+                return;
+            }
+            BlobOutcome::Superseded => {
+                if let Some(mut send) = stream {
+                    let _ = send.reset(1u32.into());
+                }
+                tracing::debug!("replaced in-flight blob (tag {tag}) with newer payload");
+            }
+            BlobOutcome::Done(Ok(Ok(()))) => {}
+            BlobOutcome::Done(Ok(Err(e))) => {
+                if let Some(mut send) = stream {
+                    let _ = send.reset(1u32.into());
+                }
+                tracing::debug!("sending blob failed: {e:#}");
+            }
+            BlobOutcome::Done(Err(_)) => {
+                if let Some(mut send) = stream {
+                    let _ = send.reset(1u32.into());
+                }
+                tracing::debug!("sending blob timed out");
+            }
+        }
+    }
+}
+
 fn selected_path(list: &PathList<'_>) -> Option<(PathKind, Duration)> {
     list.iter().find(|p| p.is_selected()).map(|p| {
         let kind = if p.is_relay() {
@@ -383,6 +485,26 @@ impl Hub {
             && let Some(dialer) = self.dialers.get(peer)
         {
             dialer.wake.notify_one();
+        }
+    }
+
+    /// Wakes a sleeping dialer when mDNS spots the peer, except when the peer explicitly
+    /// reported us unpaired (re-pairing clears the issue and calls [`Self::wake_peer`]).
+    pub(crate) fn wake_discovered(&self, peer: &EndpointId) {
+        if !self.active.contains_key(peer)
+            && !matches!(self.issues.get(peer), Some(PeerIssue::NotPaired))
+            && let Some(dialer) = self.dialers.get(peer)
+        {
+            dialer.wake.notify_one();
+        }
+    }
+
+    /// Wakes all disconnected dialers that do not have an active [`PeerIssue`].
+    pub(crate) fn wake_all(&self) {
+        for (peer, dialer) in &self.dialers {
+            if !self.active.contains_key(peer) && !self.issues.contains_key(peer) {
+                dialer.wake.notify_one();
+            }
         }
     }
 
@@ -473,6 +595,23 @@ fn should_dial(own: EndpointId, peer: EndpointId) -> bool {
     own.as_bytes() < peer.as_bytes()
 }
 
+/// Returns `(sleep_duration, next_backoff)` after a dial attempt or session ends.
+pub(crate) fn next_dial_wait(
+    backoff: Duration,
+    elapsed: Duration,
+    has_issue: bool,
+) -> (Duration, Duration) {
+    if has_issue {
+        return (ISSUE_BACKOFF, backoff);
+    }
+    let current = if elapsed > Duration::from_secs(30) {
+        MIN_BACKOFF
+    } else {
+        backoff
+    };
+    (current, (current * 2).min(MAX_BACKOFF))
+}
+
 async fn dial_loop(shared: Arc<Shared>, endpoint: Endpoint, peer: EndpointId, wake: Arc<Notify>) {
     let mut backoff = MIN_BACKOFF;
     loop {
@@ -486,12 +625,16 @@ async fn dial_loop(shared: Arc<Shared>, endpoint: Endpoint, peer: EndpointId, wa
         if !shared.allowed.read().unwrap().contains(&peer) {
             return;
         }
-        if started.elapsed() > Duration::from_secs(30) {
-            backoff = MIN_BACKOFF;
-        }
+        let has_issue = shared
+            .sessions
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|hub| hub.issues.contains_key(&peer));
+        let (wait, next_backoff) = next_dial_wait(backoff, started.elapsed(), has_issue);
         tokio::select! {
-            _ = tokio::time::sleep(backoff) => {
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+            _ = tokio::time::sleep(wait) => {
+                backoff = next_backoff;
             }
             _ = wake.notified() => {
                 backoff = MIN_BACKOFF;
@@ -657,6 +800,7 @@ async fn run(
         conn: conn.clone(),
         control,
         datagram_failed: AtomicBool::new(false),
+        blobs: std::sync::Mutex::new(HashMap::new()),
     });
     let events = {
         let mut hub = shared.sessions.lock().unwrap();
