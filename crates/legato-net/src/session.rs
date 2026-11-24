@@ -19,7 +19,8 @@ use legato_proto::{
     Control, Datagram, Hello, PROTOCOL_VERSION, SESSION_ALPN, Screens, VideoFrameHeader,
 };
 use n0_future::StreamExt;
-use tokio::sync::{Notify, Semaphore, mpsc};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::timeout;
 
 use crate::Shared;
@@ -28,8 +29,11 @@ use crate::framing::{expect_frame, read_frame, write_frame};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const BLOB_TIMEOUT: Duration = Duration::from_secs(60);
+const FILE_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const FILE_BUFFER_SIZE: usize = 256 * 1024;
 const MISMATCH_GRACE: Duration = Duration::from_secs(2);
 pub(crate) const MAX_CONCURRENT_BLOBS: usize = 4;
+pub(crate) const MAX_CONCURRENT_FILES: usize = 8;
 pub(crate) const MIN_BACKOFF: Duration = Duration::from_secs(1);
 pub(crate) const MAX_BACKOFF: Duration = Duration::from_secs(10);
 pub(crate) const ISSUE_BACKOFF: Duration = Duration::from_secs(60);
@@ -102,20 +106,51 @@ pub struct IncomingFile {
     pub header: legato_proto::FileHeader,
     recv: tokio::sync::Mutex<Option<RecvStream>>,
     reply: tokio::sync::Mutex<Option<SendStream>>,
+    permit: tokio::sync::Mutex<Option<OwnedSemaphorePermit>>,
 }
 
 impl IncomingFile {
     /// Streams the file's bytes into `out`. Can only be called once.
     pub async fn recv(&self, out: &mut (impl tokio::io::AsyncWrite + Unpin)) -> Result<u64> {
+        self.recv_with_timeout(out, FILE_STALL_TIMEOUT).await
+    }
+
+    pub(crate) async fn recv_with_timeout(
+        &self,
+        out: &mut (impl tokio::io::AsyncWrite + Unpin),
+        stall_timeout: Duration,
+    ) -> Result<u64> {
         let mut recv = self.recv.lock().await.take().context("already received")?;
         let size = self.header.size.unwrap_or(0);
-        let copied =
-            tokio::io::copy(&mut tokio::io::AsyncReadExt::take(&mut recv, size), out).await?;
-        if copied != size {
-            bail!("expected {size} bytes, got {copied}");
+        let mut copied = 0u64;
+        if size > 0 {
+            let mut buf = vec![0u8; FILE_BUFFER_SIZE.min(size as usize)];
+            while copied < size {
+                let want = ((size - copied) as usize).min(buf.len());
+                let read = match timeout(stall_timeout, recv.read(&mut buf[..want])).await {
+                    Ok(read) => read?,
+                    Err(_) => {
+                        let _ = recv.stop(1u32.into());
+                        bail!("timed out receiving file");
+                    }
+                };
+                let Some(n) = read else {
+                    bail!("expected {size} bytes, got {copied}");
+                };
+                out.write_all(&buf[..n]).await?;
+                copied += n as u64;
+            }
         }
-        let mut extra = [0];
-        if recv.read(&mut extra).await?.is_some() {
+        let mut extra = [0u8; 1];
+        let trailing = match timeout(stall_timeout, recv.read(&mut extra)).await {
+            Ok(read) => read?,
+            Err(_) => {
+                let _ = recv.stop(1u32.into());
+                bail!("timed out waiting for end of file");
+            }
+        };
+        if trailing.is_some() {
+            let _ = recv.stop(1u32.into());
             bail!("file exceeds its declared size");
         }
         Ok(copied)
@@ -129,19 +164,24 @@ impl IncomingFile {
         {
             let _ = recv.stop(1u32.into());
         }
-        let mut reply = self
-            .reply
-            .lock()
-            .await
-            .take()
-            .context("already acknowledged")?;
-        let result: std::result::Result<(), String> = result
-            .as_ref()
-            .map(|_| ())
-            .map_err(|e| format!("{e:#}").chars().take(1024).collect());
-        write_frame(&mut reply, &result).await?;
-        reply.finish()?;
-        Ok(())
+        let ack = async {
+            let mut reply = self
+                .reply
+                .lock()
+                .await
+                .take()
+                .context("already acknowledged")?;
+            let result: std::result::Result<(), String> = result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}").chars().take(1024).collect());
+            write_frame(&mut reply, &result).await?;
+            reply.finish()?;
+            Ok(())
+        }
+        .await;
+        self.permit.lock().await.take();
+        ack
     }
 }
 
@@ -315,10 +355,18 @@ impl Session {
         let size = header.size.unwrap_or(0);
         write_frame(&mut send, &header).await?;
         let sending = async {
-            let sent =
-                tokio::io::copy(&mut tokio::io::AsyncReadExt::take(data, size), &mut send).await?;
-            if sent != size {
-                bail!("file changed while sending ({sent} of {size} bytes)");
+            let mut sent = 0u64;
+            if size > 0 {
+                let mut buf = vec![0u8; FILE_BUFFER_SIZE.min(size as usize)];
+                while sent < size {
+                    let want = ((size - sent) as usize).min(buf.len());
+                    let n = data.read(&mut buf[..want]).await?;
+                    if n == 0 {
+                        bail!("file changed while sending ({sent} of {size} bytes)");
+                    }
+                    send.write_all(&buf[..n]).await?;
+                    sent += n as u64;
+                }
             }
             send.finish()?;
             Ok::<_, anyhow::Error>(())
@@ -888,8 +936,14 @@ async fn run(
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     };
+    let file_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FILES));
     let files = async {
         loop {
+            let permit = file_limit
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("file semaphore never closes");
             let (reply, mut recv) = conn.accept_bi().await?;
             let events = events.clone();
             tokio::spawn(async move {
@@ -899,10 +953,14 @@ async fn run(
                             header,
                             recv: tokio::sync::Mutex::new(Some(recv)),
                             reply: tokio::sync::Mutex::new(Some(reply)),
+                            permit: tokio::sync::Mutex::new(Some(permit)),
                         });
                         let _ = events.send(SessionEvent::File { peer, file });
                     }
-                    error => tracing::debug!(?error, "receiving file header failed"),
+                    error => {
+                        drop(permit);
+                        tracing::debug!(?error, "receiving file header failed");
+                    }
                 }
             });
         }

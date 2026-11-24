@@ -7,7 +7,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_foundation::{
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType,
+};
 use objc2_core_media::{
     CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
     kCMSampleAttachmentKey_NotSync, kCMTimeInvalid, kCMVideoCodecType_H264,
@@ -16,9 +18,10 @@ use objc2_core_video::CVPixelBuffer;
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
-    kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
-    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_ConstrainedHigh_AutoLevel,
+    kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_ExpectedFrameRate,
+    kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_ProfileLevel,
+    kVTCompressionPropertyKey_RealTime, kVTEncodeFrameOptionKey_ForceKeyFrame,
+    kVTProfileLevel_H264_ConstrainedHigh_AutoLevel,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
 };
 
@@ -76,6 +79,38 @@ fn set(session: &VTCompressionSession, key: &CFString, value: &CFType) -> Result
     check(status, &format!("setting {key}"))
 }
 
+/// Peak byte budget per second (1.5× average bitrate) for VideoToolbox's 1-second
+/// `DataRateLimits` cap.
+fn peak_bytes_per_second(bitrate: u32) -> i64 {
+    let clamped = u64::from(bitrate.clamp(1_000_000, 200_000_000));
+    ((clamped * 3) / 16).max(1) as i64
+}
+
+/// Applies the target average bitrate and a best-effort 1-second peak data-rate cap
+/// (1.5× average) so bursty scenes do not saturate the link.
+fn apply_bitrate(session: &VTCompressionSession, bitrate: u32) -> Result<()> {
+    let clamped = bitrate.clamp(1_000_000, 200_000_000);
+    // SAFETY: VideoToolbox compression property keys are valid static CFStrings.
+    unsafe {
+        set(
+            session,
+            kVTCompressionPropertyKey_AverageBitRate,
+            &CFNumber::new_i64(clamped.into()),
+        )?;
+        let bytes = CFNumber::new_i64(peak_bytes_per_second(clamped));
+        let seconds = CFNumber::new_f64(1.0);
+        let limits = CFArray::<CFNumber>::from_objects(&[&*bytes, &*seconds]);
+        if let Err(e) = set(
+            session,
+            kVTCompressionPropertyKey_DataRateLimits,
+            limits.as_opaque(),
+        ) {
+            tracing::debug!("peak data-rate limit isn't supported: {e:#}");
+        }
+    }
+    Ok(())
+}
+
 impl Encoder {
     /// Starts an encoder. `on_frame` is called on a VideoToolbox thread with each encoded
     /// frame, in order.
@@ -125,11 +160,7 @@ impl Encoder {
                 kVTCompressionPropertyKey_ProfileLevel,
                 kVTProfileLevel_H264_ConstrainedHigh_AutoLevel,
             )?;
-            set(
-                s,
-                kVTCompressionPropertyKey_AverageBitRate,
-                &CFNumber::new_i64(config.bitrate.into()),
-            )?;
+            apply_bitrate(s, config.bitrate)?;
             set(
                 s,
                 kVTCompressionPropertyKey_ExpectedFrameRate,
@@ -201,6 +232,11 @@ impl Encoder {
             };
         }
         Ok(())
+    }
+
+    /// Updates the target average bitrate (and peak cap) on the live session.
+    pub fn set_bitrate(&self, bitrate: u32) -> Result<()> {
+        apply_bitrate(&self.session, bitrate)
     }
 
     /// How many pictures the encoder has dropped so far.
@@ -340,5 +376,18 @@ unsafe fn not_sync(sample: &CMSampleBuffer) -> bool {
         let key: *const CFString = kCMSampleAttachmentKey_NotSync;
         let value = dict.value(key.cast()) as *const CFBoolean;
         value.as_ref().is_some_and(CFBoolean::as_bool)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::peak_bytes_per_second;
+
+    #[test]
+    fn peak_data_rate_limit_gives_headroom_and_clamps_bounds() {
+        assert_eq!(peak_bytes_per_second(40_000_000), 7_500_000);
+        assert_eq!(peak_bytes_per_second(12_000_000), 2_250_000);
+        assert_eq!(peak_bytes_per_second(0), 187_500);
+        assert_eq!(peak_bytes_per_second(u32::MAX), 37_500_000);
     }
 }

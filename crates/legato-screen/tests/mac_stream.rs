@@ -50,6 +50,7 @@ fn a_virtual_display_streams_as_h264_on_one_track_or_two() {
         fps: 60,
         sharp_fps: 30,
         bitrate: 20_000_000,
+        moving_bitrate: 10_000_000,
     };
     let (tx, rx) = mpsc::channel();
     let stream = DisplayStream::start("Legato test", adaptive, move |frame| {

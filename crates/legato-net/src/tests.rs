@@ -1180,3 +1180,117 @@ async fn wake_all_wakes_offline_dialer_and_skips_unpaired_issue() {
     let _ds = next_connected(&mut de).await;
     let _ls = next_connected(&mut le).await;
 }
+
+#[tokio::test]
+async fn incoming_files_enforce_stall_timeout_and_concurrency_limit() {
+    let (a, b) = (
+        node("file-limit-a", Os::MacOs).await,
+        node("file-limit-b", Os::Windows).await,
+    );
+    let [(_ae, a_session), (mut be, _b_session)] = connect(&a, &b).await;
+
+    // 1. A stalled sender mid-file trips IncomingFile::recv_with_timeout instead of hanging.
+    let (mut writer, mut reader) = tokio::io::duplex(64);
+    tokio::io::AsyncWriteExt::write_all(&mut writer, b"part")
+        .await
+        .unwrap();
+    let header = legato_proto::FileHeader {
+        batch: 99,
+        name: "stalled.bin".into(),
+        size: Some(1024),
+        count: 1,
+        index: 0,
+        purpose: legato_proto::FilePurpose::Send,
+    };
+    let sender = {
+        let a_session = a_session.clone();
+        tokio::spawn(async move { a_session.send_file(header, &mut reader).await })
+    };
+    let file = match timeout(Duration::from_secs(5), be.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        SessionEvent::File { file, .. } => file,
+        other => panic!("unexpected {other:?}"),
+    };
+    let mut out = Vec::new();
+    let err = file
+        .recv_with_timeout(&mut out, Duration::from_millis(150))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("timed out"),
+        "expected stall timeout error, got: {err:#}"
+    );
+    file.complete(&Err(err)).await.unwrap();
+    assert!(
+        timeout(Duration::from_secs(5), sender)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    drop(writer);
+
+    // 2. Incoming files are capped at MAX_CONCURRENT_FILES until earlier files complete.
+    let total = session::MAX_CONCURRENT_FILES + 2;
+    let mut send_tasks = Vec::new();
+    for i in 0..total {
+        let a_session = a_session.clone();
+        let h = legato_proto::FileHeader {
+            batch: 100,
+            name: format!("f{i}.bin"),
+            size: Some(300 * 1024),
+            count: total as u32,
+            index: i as u32,
+            purpose: legato_proto::FilePurpose::Send,
+        };
+        send_tasks.push(tokio::spawn(async move {
+            let data = vec![i as u8; 300 * 1024];
+            a_session.send_file(h, &mut data.as_slice()).await
+        }));
+    }
+
+    let mut held = Vec::new();
+    for _ in 0..session::MAX_CONCURRENT_FILES {
+        match timeout(Duration::from_secs(10), be.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            SessionEvent::File { file, .. } => held.push(file),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    // No more than MAX_CONCURRENT_FILES should be admitted until a slot is released.
+    assert_quiet(&mut be, Duration::from_millis(200)).await;
+
+    // Drain held files; releasing permits admits the remaining 2 files.
+    for file in held {
+        let expected = file.header.index as u8;
+        let mut buf = Vec::new();
+        assert_eq!(file.recv(&mut buf).await.unwrap(), 300 * 1024);
+        assert!(buf.iter().all(|&b| b == expected));
+        file.complete(&Ok(())).await.unwrap();
+    }
+    for _ in 0..2 {
+        match timeout(Duration::from_secs(10), be.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            SessionEvent::File { file, .. } => {
+                let expected = file.header.index as u8;
+                let mut buf = Vec::new();
+                assert_eq!(file.recv(&mut buf).await.unwrap(), 300 * 1024);
+                assert!(buf.iter().all(|&b| b == expected));
+                file.complete(&Ok(())).await.unwrap();
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    for task in send_tasks {
+        task.await.unwrap().unwrap();
+    }
+}

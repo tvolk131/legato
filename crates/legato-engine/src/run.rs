@@ -480,6 +480,11 @@ pub(crate) async fn run(
                     SessionEvent::PathChanged { peer, path } => {
                         if by_peer.read().unwrap().contains_key(&peer) {
                             ctx.status(Status::PeerPathChanged { id: peer, path });
+                            #[cfg(target_os = "macos")]
+                            if let Some(h) = host.as_mut().filter(|h| h.peer == peer) {
+                                h.set_relayed(matches!(path, Some((legato_net::PathKind::Relay, _))))
+                                    .await;
+                            }
                         }
                     }
                     SessionEvent::PeerIssue { peer, issue } => {
@@ -583,7 +588,7 @@ pub(crate) async fn run(
                             }
                             Control::ExtendResize(request) => {
                                 #[cfg(target_os = "macos")]
-                                if let Some(h) = host.as_ref().filter(|h| h.peer == peer) {
+                                if let Some(h) = host.as_mut().filter(|h| h.peer == peer) {
                                     h.reconfigure(request).await;
                                 }
                                 #[cfg(not(target_os = "macos"))]

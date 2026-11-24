@@ -144,9 +144,27 @@ fn pictures_scale_down_for_the_moving_track() {
     encoder
         .encode_now(&again, Duration::from_millis(16), false)
         .unwrap();
+    {
+        let frames = frames.lock().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert!(frames[0].keyframe && !frames[1].keyframe);
+    }
+
+    // Live bitrate adjustment (e.g., when switching between Direct and Relay paths)
+    // updates the active VideoToolbox session cleanly and keeps encoding frames.
+    encoder.set_bitrate(2_000_000).unwrap();
+    let third = scaler.scale(&big).unwrap();
+    encoder
+        .encode_now(&third, Duration::from_millis(32), false)
+        .unwrap();
+    encoder.set_bitrate(12_000_000).unwrap();
+    let fourth = scaler.scale(&big).unwrap();
+    encoder
+        .encode_now(&fourth, Duration::from_millis(48), false)
+        .unwrap();
     let frames = frames.lock().unwrap();
-    assert_eq!(frames.len(), 2);
-    assert!(frames[0].keyframe && !frames[1].keyframe);
+    assert_eq!(frames.len(), 4);
+    assert!(!frames[2].keyframe && !frames[3].keyframe);
 }
 
 fn nv12_buffer(

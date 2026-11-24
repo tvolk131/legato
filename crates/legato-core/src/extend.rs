@@ -8,6 +8,47 @@ use crate::layout::{Layout, MachineId};
 /// Frame rates offered for the extra display.
 pub const FRAME_RATES: [u32; 5] = [30, 60, 90, 120, 144];
 
+/// Hard bounds on the configured video bitrate (bits per second).
+pub const MIN_BITRATE: u32 = 1_000_000;
+pub const MAX_BITRATE: u32 = 200_000_000;
+/// Maximum target bitrate while streaming through a relay server, so video
+/// leaves headroom for input on relayed links.
+pub const RELAY_MAX_BITRATE: u32 = 12_000_000;
+/// Floor for the scaled moving track (unless the base bitrate is already lower).
+const MIN_MOVING_BITRATE: u32 = 2_000_000;
+
+/// Target bitrates (bits per second) for the sharp track and, when adaptive
+/// quality is on, the moving track.
+///
+/// Over a relay, the base bitrate is capped to [`RELAY_MAX_BITRATE`]. The moving
+/// track scales proportionally to its pixel throughput (`width * height * fps`)
+/// relative to the sharp track so a smaller moving picture does not spend a full
+/// 4K bitrate budget.
+pub fn track_bitrates(
+    configured_bitrate: u32,
+    sharp_size: (u32, u32),
+    sharp_fps: u32,
+    moving: Option<((u32, u32), u32)>,
+    relayed: bool,
+) -> (u32, Option<u32>) {
+    let mut sharp = configured_bitrate.clamp(MIN_BITRATE, MAX_BITRATE);
+    if relayed {
+        sharp = sharp.min(RELAY_MAX_BITRATE);
+    }
+    let moving = moving.map(|((mw, mh), moving_fps)| {
+        let sharp_rate = f64::from(sharp_size.0.max(1))
+            * f64::from(sharp_size.1.max(1))
+            * f64::from(sharp_fps.max(1));
+        let moving_rate =
+            f64::from(mw.max(1)) * f64::from(mh.max(1)) * f64::from(moving_fps.max(1));
+        let ratio = (moving_rate / sharp_rate).clamp(0.25, 1.0);
+        let scaled = (f64::from(sharp) * ratio).round() as u32;
+        let floor = MIN_MOVING_BITRATE.min(sharp);
+        scaled.clamp(floor, sharp)
+    });
+    (sharp, moving)
+}
+
 /// The Mac's hardware encoder needs about this long per million pixels when each frame
 /// is sent as soon as it's encoded (measured on Apple silicon: 16.2 ms at 3840×2160,
 /// 7.7 ms at 2560×1440).
@@ -200,5 +241,50 @@ mod tests {
         let window = Rect::new(origin_native.x, origin_native.y, 1600.0, 900.0);
         let origin = place_extra_display(&layout, MAC, window, (1600.0, 900.0)).unwrap();
         assert_eq!(origin.x, main.right());
+    }
+
+    #[test]
+    fn track_bitrates_scale_moving_by_throughput_and_cap_on_relay() {
+        // 4K@60 sharp + 1080p@60 moving: quarter the pixel rate -> quarter the bitrate.
+        assert_eq!(
+            track_bitrates(
+                40_000_000,
+                (3840, 2160),
+                60,
+                Some(((1920, 1080), 60)),
+                false
+            ),
+            (40_000_000, Some(10_000_000))
+        );
+        // 4K@60 sharp + 1080p@120 moving: half the pixel rate -> half the bitrate.
+        assert_eq!(
+            track_bitrates(
+                40_000_000,
+                (3840, 2160),
+                60,
+                Some(((1920, 1080), 120)),
+                false
+            ),
+            (40_000_000, Some(20_000_000))
+        );
+        // Relayed caps sharp to RELAY_MAX_BITRATE and scales moving from that cap.
+        assert_eq!(
+            track_bitrates(40_000_000, (3840, 2160), 60, Some(((1920, 1080), 60)), true),
+            (RELAY_MAX_BITRATE, Some(3_000_000))
+        );
+        // A user-configured bitrate below the relay cap is preserved as-is.
+        assert_eq!(
+            track_bitrates(8_000_000, (3840, 2160), 60, Some(((1920, 1080), 60)), true),
+            (8_000_000, Some(2_000_000))
+        );
+        // Moving track never exceeds sharp and respects floor / base lower bound.
+        assert_eq!(
+            track_bitrates(1_500_000, (3840, 2160), 60, Some(((1920, 1080), 60)), true),
+            (1_500_000, Some(1_500_000))
+        );
+        assert_eq!(
+            track_bitrates(40_000_000, (3840, 2160), 60, None, true),
+            (RELAY_MAX_BITRATE, None)
+        );
     }
 }

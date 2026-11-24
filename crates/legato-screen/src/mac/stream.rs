@@ -36,7 +36,10 @@ pub struct StreamConfig {
     /// With `moving`: the most frames a second at the stream size (it's slower to
     /// encode than the display runs).
     pub sharp_fps: u32,
+    /// Target bitrate (bps) for the sharp track.
     pub bitrate: u32,
+    /// Target bitrate (bps) for the moving track when `moving` is set.
+    pub moving_bitrate: u32,
 }
 
 impl StreamConfig {
@@ -223,6 +226,10 @@ impl Encoding {
         self.dropped_seen = dropped;
         new
     }
+
+    fn set_bitrate(&self, bitrate: u32) -> Result<()> {
+        self.encoder.set_bitrate(bitrate)
+    }
 }
 
 /// The smaller track while moving: its encoder, and the scaler feeding it.
@@ -272,7 +279,7 @@ impl Pipeline {
                         MOVING,
                         size,
                         config.fps,
-                        config.bitrate,
+                        config.moving_bitrate,
                         false,
                         SCALE_COST,
                         outlet,
@@ -649,6 +656,23 @@ impl DisplayStream {
         Ok(())
     }
 
+    /// Updates the sharp and moving encoders' bitrates live without recreating the
+    /// display or capture stream.
+    pub fn set_bitrates(&self, bitrate: u32, moving_bitrate: u32) -> Result<()> {
+        let mut current = self.config.lock().unwrap();
+        if current.bitrate == bitrate && current.moving_bitrate == moving_bitrate {
+            return Ok(());
+        }
+        let p = self.shared.pipeline.lock().unwrap();
+        p.sharp.set_bitrate(bitrate)?;
+        if let Some(m) = &p.moving {
+            m.encoding.set_bitrate(moving_bitrate)?;
+        }
+        current.bitrate = bitrate;
+        current.moving_bitrate = moving_bitrate;
+        Ok(())
+    }
+
     /// Sends a keyframe on `track` as soon as possible (a viewer joined or lost frames).
     pub fn request_keyframe(&self, track: u8) {
         let mut p = self.shared.pipeline.lock().unwrap();
@@ -747,6 +771,7 @@ mod tests {
             fps: 60,
             sharp_fps: 60,
             bitrate: 20_000_000,
+            moving_bitrate: 20_000_000,
         };
         // How long each frame took from appearing to coming out of the encoder.
         let delays: Arc<Mutex<Vec<Duration>>> = Arc::default();
