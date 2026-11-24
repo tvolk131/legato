@@ -938,3 +938,245 @@ async fn truncated_blob_is_rejected_without_dropping_the_session() {
             if tag == legato_proto::blob::CLIPBOARD && data == b"complete"
     );
 }
+
+#[tokio::test]
+async fn superseded_clipboard_blob_is_replaced_by_newest() {
+    let (a, b) = (
+        node("blob-latest-a", Os::Windows).await,
+        node("blob-latest-b", Os::MacOs).await,
+    );
+    let [(_ae, a_session), (mut be, _b_session)] = connect(&a, &b).await;
+
+    // Occupy all receiver blob slots so the next blob stays in flight long enough to be
+    // superseded deterministically.
+    let mut blockers = Vec::new();
+    for _ in 0..session::MAX_CONCURRENT_BLOBS {
+        let mut send = a_session.conn.open_uni().await.unwrap();
+        send.write_all(&[legato_proto::blob::CLIPBOARD])
+            .await
+            .unwrap();
+        send.write_all(&100u64.to_le_bytes()).await.unwrap();
+        blockers.push(send);
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Queue a large stale payload (exceeding the initial QUIC stream window so it remains
+    // in flight), then supersede it twice before unblocking the receiver.
+    a_session.send_blob(legato_proto::blob::CLIPBOARD, vec![0xAA; 4 * 1024 * 1024]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    a_session.send_blob(legato_proto::blob::CLIPBOARD, b"middle".to_vec());
+    a_session.send_blob(legato_proto::blob::CLIPBOARD, b"newest".to_vec());
+
+    for mut send in blockers {
+        let _ = send.reset(1u32.into());
+    }
+
+    let event = timeout(Duration::from_secs(10), be.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_matches!(
+        event,
+        SessionEvent::Blob { tag, ref data, .. }
+            if tag == legato_proto::blob::CLIPBOARD && data == b"newest"
+    );
+    assert_quiet(&mut be, Duration::from_millis(400)).await;
+}
+
+#[tokio::test]
+async fn pairing_protocol_mismatch_reports_version_and_recovers() {
+    // Part 1: acceptor sends its own Hello before closing on mismatch, and resets busy
+    // state so a later valid pairing still succeeds.
+    let (a, b) = (
+        node("pair-mismatch-a", Os::Windows).await,
+        node("pair-mismatch-b", Os::MacOs).await,
+    );
+    let mut incoming = b.listen_for_pairing();
+    let conn = a.endpoint().connect(b.addr(), PAIR_ALPN).await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    crate::framing::write_frame(
+        &mut send,
+        &legato_proto::Pair::Hello {
+            protocol: legato_proto::PROTOCOL_VERSION + 1,
+            app_version: "0.9.0".into(),
+            name: "future".into(),
+            os: Os::Windows,
+        },
+    )
+    .await
+    .unwrap();
+    let reply: legato_proto::Pair = timeout(
+        Duration::from_secs(5),
+        crate::framing::expect_frame(&mut recv),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_matches!(
+        reply,
+        legato_proto::Pair::Hello { protocol, ref name, .. }
+            if protocol == legato_proto::PROTOCOL_VERSION && name == "pair-mismatch-b"
+    );
+    conn.close(0u32.into(), b"protocol mismatch");
+    assert!(
+        timeout(Duration::from_millis(200), incoming.recv())
+            .await
+            .is_err(),
+        "mismatched pairing must not prompt the user"
+    );
+    drop(incoming);
+
+    // Wait briefly for the acceptor handler to finish and clear `pairing_busy`, then pair normally.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (oa, ob) = pair(&a, &b, true, true).await;
+    assert!(matches!(oa, PairOutcome::Paired(_)));
+    assert!(matches!(ob, PairOutcome::Paired(_)));
+
+    // Part 2: initiator preserves the friendly version-mismatch error even if the remote
+    // peer closes the connection immediately after sending its mismatched Hello.
+    let mismatch_peer = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .alpns(vec![PAIR_ALPN.to_vec()])
+        .bind()
+        .await
+        .unwrap();
+    let peer_addr = mismatch_peer.addr();
+    let server = tokio::spawn(async move {
+        let incoming = mismatch_peer.accept().await.unwrap();
+        let conn = incoming.await.unwrap();
+        let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+        let _theirs: legato_proto::Pair = crate::framing::expect_frame(&mut recv).await.unwrap();
+        crate::framing::write_frame(
+            &mut send,
+            &legato_proto::Pair::Hello {
+                protocol: legato_proto::PROTOCOL_VERSION + 2,
+                app_version: "0.9.0".into(),
+                name: "future".into(),
+                os: Os::MacOs,
+            },
+        )
+        .await
+        .unwrap();
+        send.finish().unwrap();
+        let _ = timeout(Duration::from_secs(2), conn.closed()).await;
+        mismatch_peer.close().await;
+    });
+
+    let err = a.pair(peer_addr).await.unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("Legato 0.9.0") && msg.contains("Update both to the same version"),
+        "expected version mismatch error, got: {msg}"
+    );
+    server.await.unwrap();
+}
+
+#[test]
+fn next_dial_wait_uses_long_backoff_for_persistent_issues() {
+    let mut backoff = session::MIN_BACKOFF;
+    let mut waits = Vec::new();
+    for _ in 0..6 {
+        let (wait, next) = session::next_dial_wait(backoff, Duration::from_secs(1), false);
+        waits.push(wait);
+        backoff = next;
+    }
+    assert_eq!(
+        waits,
+        vec![
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            Duration::from_secs(8),
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        ]
+    );
+    // Long-lived sessions reset backoff back to MIN_BACKOFF.
+    let (wait, next) = session::next_dial_wait(backoff, Duration::from_secs(31), false);
+    assert_eq!(wait, session::MIN_BACKOFF);
+    assert_eq!(next, Duration::from_secs(2));
+
+    // Active peer issues wait ISSUE_BACKOFF (60 s).
+    let (wait, _) = session::next_dial_wait(session::MIN_BACKOFF, Duration::from_secs(1), true);
+    assert_eq!(wait, session::ISSUE_BACKOFF);
+}
+
+#[tokio::test]
+async fn wake_all_wakes_offline_dialer_and_skips_unpaired_issue() {
+    let (a, b) = (
+        node("relay-wake-a", Os::Windows).await,
+        node("relay-wake-b", Os::MacOs).await,
+    );
+    let (dialer, listener) = if a.id().as_bytes() < b.id().as_bytes() {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    pair(dialer, listener, true, true).await;
+
+    // Start without listener's address so dialer enters backoff sleep (1 s -> 2 s -> 4 s).
+    let mut le = listener.start_sessions(hello(listener));
+    let mut de = dialer.start_sessions(hello(dialer));
+    tokio::time::sleep(Duration::from_millis(3300)).await;
+
+    // Add listener's address directly to MemoryLookup without calling `remember()` so we
+    // specifically test `hub.wake_all()` (the relay-reconnect wakeup path).
+    dialer.memory.add_endpoint_info(listener.addr());
+    let started = std::time::Instant::now();
+    dialer
+        .shared
+        .sessions
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .wake_all();
+    let _s = next_connected(&mut de).await;
+    let _ls = next_connected(&mut le).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "expected wake_all to wake sleeping dialer immediately, took {:?}",
+        started.elapsed()
+    );
+
+    // Part 2: when a peer has a NotPaired issue, wake_all / wake_discovered do not wake
+    // its dialer while it is in ISSUE_BACKOFF.
+    let (c, d) = (
+        node("relay-skip-c", Os::Windows).await,
+        node("relay-skip-d", Os::MacOs).await,
+    );
+    let (dialer, listener) = if c.id().as_bytes() < d.id().as_bytes() {
+        (&c, &d)
+    } else {
+        (&d, &c)
+    };
+    pair(dialer, listener, true, true).await;
+    dialer.remember(listener.addr());
+    assert!(listener.unpair(&dialer.id()).unwrap());
+
+    let mut le = listener.start_sessions(hello(listener));
+    let mut de = dialer.start_sessions(hello(dialer));
+    assert_matches!(
+        timeout(Duration::from_secs(10), de.recv()).await.unwrap(),
+        Some(SessionEvent::PeerIssue {
+            peer,
+            issue: PeerIssue::NotPaired,
+        }) if peer == listener.id()
+    );
+
+    // Re-add dialer on listener's allow-list without re-pairing on dialer so a dial
+    // attempt would succeed immediately if wake_all/wake_discovered woke it.
+    listener.shared.allowed.write().unwrap().insert(dialer.id());
+    {
+        let hub = dialer.shared.sessions.lock().unwrap();
+        let hub = hub.as_ref().unwrap();
+        hub.wake_all();
+        hub.wake_discovered(&listener.id());
+    }
+    assert_quiet(&mut de, Duration::from_millis(500)).await;
+    assert_quiet(&mut le, Duration::from_millis(100)).await;
+
+    // Explicit `add_peer` (as happens on re-pair) clears the issue and wakes immediately.
+    session::add_peer(&dialer.shared, dialer.endpoint(), listener.id());
+    let _ds = next_connected(&mut de).await;
+    let _ls = next_connected(&mut le).await;
+}

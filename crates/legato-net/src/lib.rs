@@ -206,7 +206,7 @@ impl Net {
         let endpoint = builder.bind().await.context("binding network endpoint")?;
         let _ = shared.endpoint.set(endpoint.clone());
         if config.relays {
-            tokio::spawn(log_relay_status(endpoint.clone()));
+            tokio::spawn(log_relay_status(endpoint.clone(), shared.clone()));
         }
         if let Some(mdns) = &mdns {
             tokio::spawn(wake_dialers_on_mdns(
@@ -386,8 +386,9 @@ fn parse_advert(advert: &str) -> Option<(Option<Os>, String)> {
 mod tests;
 
 /// Logs when this machine gains or loses its relay: without one, paired peers on other
-/// networks can't reach it.
-async fn log_relay_status(endpoint: Endpoint) {
+/// networks can't reach it. Wakes sleeping dialers when the relay comes back so off-LAN
+/// peers reconnect without waiting out backoff.
+async fn log_relay_status(endpoint: Endpoint, shared: Arc<Shared>) {
     use iroh::Watcher;
     let mut relays = endpoint.home_relay_status();
     let closed = endpoint.closed();
@@ -402,7 +403,12 @@ async fn log_relay_status(endpoint: Endpoint) {
             .map(|r| r.url().to_string());
         if up != current {
             match &up {
-                Some(url) => tracing::info!("reachable from other networks via relay {url}"),
+                Some(url) => {
+                    tracing::info!("reachable from other networks via relay {url}");
+                    if let Some(hub) = shared.sessions.lock().unwrap().as_ref() {
+                        hub.wake_all();
+                    }
+                }
                 // Not at startup, before the first relay connects: only when one is lost.
                 None => tracing::warn!(
                     "lost the relay connection: paired devices on other networks can't reach \
@@ -442,7 +448,7 @@ async fn wake_dialers_on_mdns(mdns: MdnsAddressLookup, shared: Arc<Shared>, endp
                         && shared.allowed.read().unwrap().contains(&id)
                         && let Some(hub) = shared.sessions.lock().unwrap().as_ref()
                     {
-                        hub.wake_peer(&id);
+                        hub.wake_discovered(&id);
                     }
                 }
             }

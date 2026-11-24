@@ -18,6 +18,18 @@ use crate::{PairedPeer, Shared};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait for the other person to confirm the code.
 const DECISION_TIMEOUT: Duration = Duration::from_secs(120);
+const MISMATCH_GRACE: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+struct ProtocolMismatch(String);
+
+impl std::fmt::Display for ProtocolMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProtocolMismatch {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerInfo {
@@ -111,10 +123,11 @@ fn peer_info(id: EndpointId, hello: Pair) -> Result<PeerInfo> {
             os,
         } => {
             if protocol != PROTOCOL_VERSION {
-                bail!(
+                return Err(ProtocolMismatch(format!(
                     "the other device runs Legato {app_version} (protocol {protocol}); this one \
                      speaks protocol {PROTOCOL_VERSION}. Update both to the same version."
-                );
+                ))
+                .into());
             }
             Ok(PeerInfo {
                 id,
@@ -156,6 +169,10 @@ pub(crate) async fn initiate(
     let (peer, send, recv) = match result {
         Ok(ok) => ok,
         Err(e) => {
+            if e.downcast_ref::<ProtocolMismatch>().is_some() {
+                conn.close(0u32.into(), b"protocol mismatch");
+                return Err(e);
+            }
             return Err(match conn.close_reason() {
                 Some(ConnectionError::ApplicationClosed(close))
                     if close.error_code == NOT_LISTENING.into() =>
@@ -166,7 +183,10 @@ pub(crate) async fn initiate(
                     )
                 }
                 Some(reason) => anyhow::anyhow!("the other device refused: {reason}"),
-                None => e,
+                None => {
+                    conn.close(0u32.into(), b"pairing handshake failed");
+                    e
+                }
             });
         }
     };
@@ -206,10 +226,20 @@ impl ProtocolHandler for Handler {
 
         let result = async {
             let (mut send, mut recv) = timeout(HANDSHAKE_TIMEOUT, conn.accept_bi()).await??;
-            let theirs = timeout(HANDSHAKE_TIMEOUT, expect_frame::<Pair>(&mut recv)).await??;
-            let peer = peer_info(conn.remote_id(), theirs)?;
+            // Send our Hello before checking the peer's so the initiator sees the
+            // version-mismatch message instead of a generic close code.
             write_frame(&mut send, &our_hello(shared)).await?;
-            Ok::<_, anyhow::Error>((peer, send, recv))
+            let theirs = timeout(HANDSHAKE_TIMEOUT, expect_frame::<Pair>(&mut recv)).await??;
+            match peer_info(conn.remote_id(), theirs) {
+                Ok(peer) => Ok((peer, send, recv)),
+                Err(e) => {
+                    if e.downcast_ref::<ProtocolMismatch>().is_some() {
+                        let _ = send.finish();
+                        let _ = timeout(MISMATCH_GRACE, conn.closed()).await;
+                    }
+                    Err(e)
+                }
+            }
         }
         .await;
         let (peer, send, recv) = match result {
