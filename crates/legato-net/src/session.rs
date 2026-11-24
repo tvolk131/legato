@@ -5,17 +5,21 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{
+    ConnectError, ConnectingError, Connection, ConnectionError, PathList, RecvStream, SendStream,
+};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointId};
 use legato_proto::{
     Control, Datagram, Hello, PROTOCOL_VERSION, SESSION_ALPN, Screens, VideoFrameHeader,
 };
-use tokio::sync::mpsc;
+use n0_future::StreamExt;
+use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::time::timeout;
 
 use crate::Shared;
@@ -23,6 +27,9 @@ use crate::framing::{expect_frame, read_frame, write_frame};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+const BLOB_TIMEOUT: Duration = Duration::from_secs(60);
+const MISMATCH_GRACE: Duration = Duration::from_secs(2);
+const MAX_CONCURRENT_BLOBS: usize = 4;
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
 /// Stream priorities: input (the control stream, 0) beats video, which beats bulk data.
@@ -32,9 +39,32 @@ const MOVING_VIDEO_PRIORITY: i32 = -1;
 const VIDEO_PRIORITY: i32 = -2;
 const BULK_PRIORITY: i32 = -3;
 
+/// Actionable reason a paired peer cannot connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerIssue {
+    /// The peer speaks a different wire protocol version.
+    ProtocolMismatch {
+        peer_protocol: u16,
+        peer_version: String,
+        our_protocol: u16,
+    },
+    /// The peer no longer has this machine paired.
+    NotPaired,
+}
+
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
     Connected(Arc<Session>),
+    /// The peer's selected transport path changed (for example from relay to direct).
+    PathChanged {
+        peer: EndpointId,
+        path: Option<(PathKind, Duration)>,
+    },
+    /// A connection attempt failed for a reason the user can act on.
+    PeerIssue {
+        peer: EndpointId,
+        issue: PeerIssue,
+    },
     Control {
         peer: EndpointId,
         msg: Control,
@@ -200,8 +230,9 @@ pub struct Session {
     pub peer: EndpointId,
     /// The peer's `Hello`.
     pub remote: Hello,
-    conn: Connection,
+    pub(crate) conn: Connection,
     control: mpsc::UnboundedSender<Control>,
+    datagram_failed: AtomicBool,
 }
 
 impl Session {
@@ -213,23 +244,31 @@ impl Session {
     /// Sends an unreliable datagram. Returns false if it couldn't be sent.
     pub fn send_datagram(&self, msg: &Datagram) -> bool {
         let bytes = Bytes::from(legato_proto::encode_datagram(msg));
-        self.conn.send_datagram(bytes).is_ok()
+        match self.conn.send_datagram(bytes) {
+            Ok(()) => {
+                self.datagram_failed.store(false, Ordering::Relaxed);
+                true
+            }
+            Err(e) => {
+                if !self.datagram_failed.swap(true, Ordering::Relaxed) {
+                    tracing::debug!(peer = %self.peer.fmt_short(), "dropping datagram: {e}");
+                }
+                false
+            }
+        }
     }
 
     /// How the connection currently travels, and its round-trip time.
     pub fn path(&self) -> Option<(PathKind, Duration)> {
-        self.conn.paths().iter().find(|p| p.is_selected()).map(|p| {
-            let kind = if p.is_relay() {
-                PathKind::Relay
-            } else {
-                PathKind::Direct
-            };
-            (kind, p.rtt())
-        })
+        selected_path(&self.conn.paths())
     }
 
     pub fn close(&self) {
-        self.conn.close(0u32.into(), b"closed");
+        self.close_with(0, b"closed");
+    }
+
+    pub(crate) fn close_with(&self, code: u32, reason: &[u8]) {
+        self.conn.close(code.into(), reason);
     }
 
     /// Sends a blob on its own stream, below input in priority, without waiting.
@@ -302,6 +341,23 @@ impl Session {
     }
 }
 
+fn selected_path(list: &PathList<'_>) -> Option<(PathKind, Duration)> {
+    list.iter().find(|p| p.is_selected()).map(|p| {
+        let kind = if p.is_relay() {
+            PathKind::Relay
+        } else {
+            PathKind::Direct
+        };
+        (kind, p.rtt())
+    })
+}
+
+#[derive(Debug)]
+pub(crate) struct Dialer {
+    task: tokio::task::JoinHandle<()>,
+    wake: Arc<Notify>,
+}
+
 /// Session state while sessions are running.
 #[derive(Debug)]
 pub(crate) struct Hub {
@@ -309,7 +365,9 @@ pub(crate) struct Hub {
     events: mpsc::UnboundedSender<SessionEvent>,
     active: HashMap<EndpointId, Arc<Session>>,
     /// One dial loop per peer: a second would keep replacing the first's connection.
-    dialers: HashMap<EndpointId, tokio::task::JoinHandle<()>>,
+    pub(crate) dialers: HashMap<EndpointId, Dialer>,
+    /// Last actionable connection issue reported per peer, to avoid spamming on retries.
+    issues: HashMap<EndpointId, PeerIssue>,
 }
 
 impl Hub {
@@ -320,9 +378,27 @@ impl Hub {
         }
     }
 
-    pub(crate) fn close(&self, peer: &EndpointId) {
-        if let Some(session) = self.active.get(peer) {
-            session.close();
+    pub(crate) fn wake_peer(&self, peer: &EndpointId) {
+        if !self.active.contains_key(peer)
+            && let Some(dialer) = self.dialers.get(peer)
+        {
+            dialer.wake.notify_one();
+        }
+    }
+
+    pub(crate) fn unpair(&mut self, peer: &EndpointId) {
+        self.issues.remove(peer);
+        if let Some(session) = self.active.remove(peer) {
+            session.close_with(crate::NOT_PAIRED_CODE, b"unpaired");
+            // Report the disconnect here before aborting any dialer task (which runs
+            // `run()` for outbound sessions) so the engine always releases held input.
+            let _ = self.events.send(SessionEvent::Disconnected {
+                peer: *peer,
+                reason: "unpaired".into(),
+            });
+        }
+        if let Some(dialer) = self.dialers.remove(peer) {
+            dialer.task.abort();
         }
     }
 
@@ -336,9 +412,15 @@ impl Hub {
 impl Drop for Hub {
     fn drop(&mut self) {
         for dialer in self.dialers.values() {
-            dialer.abort();
+            dialer.task.abort();
         }
     }
+}
+
+fn spawn_dialer(shared: Arc<Shared>, endpoint: Endpoint, peer: EndpointId) -> Dialer {
+    let wake = Arc::new(Notify::new());
+    let task = tokio::spawn(dial_loop(shared, endpoint, peer, wake.clone()));
+    Dialer { task, wake }
 }
 
 pub(crate) fn start(
@@ -353,16 +435,14 @@ pub(crate) fn start(
         .peer_ids()
         .into_iter()
         .filter(|peer| should_dial(own, *peer))
-        .map(|peer| {
-            let dialer = tokio::spawn(dial_loop(shared.clone(), endpoint.clone(), peer));
-            (peer, dialer)
-        })
+        .map(|peer| (peer, spawn_dialer(shared.clone(), endpoint.clone(), peer)))
         .collect();
     let old = shared.sessions.lock().unwrap().replace(Hub {
         hello,
         events,
         active: HashMap::new(),
         dialers,
+        issues: HashMap::new(),
     });
     if let Some(old) = old {
         old.close_all();
@@ -371,15 +451,20 @@ pub(crate) fn start(
 }
 
 /// Starts dialing a newly paired peer if sessions are running and it's our turn to dial.
-/// Pairing again with a peer that is still paired keeps its running dial loop.
+/// Pairing again with a peer that is still paired keeps its running dial loop, waking it
+/// immediately if it isn't connected yet.
 pub(crate) fn add_peer(shared: &Arc<Shared>, endpoint: &Endpoint, peer: EndpointId) {
     let mut hub = shared.sessions.lock().unwrap();
-    if let Some(hub) = hub.as_mut()
-        && should_dial(endpoint.id(), peer)
-        && hub.dialers.get(&peer).is_none_or(|d| d.is_finished())
-    {
-        let dialer = tokio::spawn(dial_loop(shared.clone(), endpoint.clone(), peer));
-        hub.dialers.insert(peer, dialer);
+    if let Some(hub) = hub.as_mut() {
+        hub.issues.remove(&peer);
+        if should_dial(endpoint.id(), peer) {
+            if hub.dialers.get(&peer).is_none_or(|d| d.task.is_finished()) {
+                hub.dialers
+                    .insert(peer, spawn_dialer(shared.clone(), endpoint.clone(), peer));
+            } else {
+                hub.wake_peer(&peer);
+            }
+        }
     }
 }
 
@@ -388,7 +473,7 @@ fn should_dial(own: EndpointId, peer: EndpointId) -> bool {
     own.as_bytes() < peer.as_bytes()
 }
 
-async fn dial_loop(shared: Arc<Shared>, endpoint: Endpoint, peer: EndpointId) {
+async fn dial_loop(shared: Arc<Shared>, endpoint: Endpoint, peer: EndpointId, wake: Arc<Notify>) {
     let mut backoff = MIN_BACKOFF;
     loop {
         if !shared.allowed.read().unwrap().contains(&peer) {
@@ -398,27 +483,133 @@ async fn dial_loop(shared: Arc<Shared>, endpoint: Endpoint, peer: EndpointId) {
         if let Err(e) = dial(&shared, &endpoint, peer).await {
             tracing::debug!(peer = %peer.fmt_short(), "session attempt failed: {e:#}");
         }
+        if !shared.allowed.read().unwrap().contains(&peer) {
+            return;
+        }
         if started.elapsed() > Duration::from_secs(30) {
             backoff = MIN_BACKOFF;
         }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+            _ = wake.notified() => {
+                backoff = MIN_BACKOFF;
+            }
+        }
     }
 }
+
+fn is_not_paired_close(err: &ConnectionError) -> bool {
+    matches!(
+        err,
+        ConnectionError::ApplicationClosed(close)
+            if close.error_code == crate::NOT_PAIRED_CODE.into()
+    )
+}
+
+fn is_not_paired_connect_err(err: &ConnectError) -> bool {
+    match err {
+        ConnectError::Connection { source, .. } => is_not_paired_close(source),
+        ConnectError::Connecting {
+            source: ConnectingError::ConnectionError { source, .. },
+            ..
+        } => is_not_paired_close(source),
+        _ => false,
+    }
+}
+
+fn report_issue(shared: &Shared, peer: EndpointId, issue: PeerIssue) {
+    if !shared.allowed.read().unwrap().contains(&peer) {
+        return;
+    }
+    let events = {
+        let mut hub = shared.sessions.lock().unwrap();
+        let Some(hub) = hub.as_mut() else { return };
+        if hub.issues.get(&peer) == Some(&issue) {
+            return;
+        }
+        hub.issues.insert(peer, issue.clone());
+        hub.events.clone()
+    };
+    match &issue {
+        PeerIssue::ProtocolMismatch {
+            peer_protocol,
+            peer_version,
+            our_protocol,
+        } => tracing::warn!(
+            peer = %peer.fmt_short(),
+            "peer speaks protocol {peer_protocol} (Legato {peer_version}), we speak {our_protocol}"
+        ),
+        PeerIssue::NotPaired => tracing::warn!(
+            peer = %peer.fmt_short(),
+            "peer refused session: this device is not paired there"
+        ),
+    }
+    let _ = events.send(SessionEvent::PeerIssue { peer, issue });
+}
+
+#[derive(Debug)]
+struct ProtocolMismatchError(PeerIssue);
+
+impl std::fmt::Display for ProtocolMismatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            PeerIssue::ProtocolMismatch {
+                peer_protocol,
+                peer_version,
+                our_protocol,
+            } => write!(
+                f,
+                "peer speaks protocol {peer_protocol} (Legato {peer_version}), we speak {our_protocol}"
+            ),
+            PeerIssue::NotPaired => write!(f, "not paired"),
+        }
+    }
+}
+
+impl std::error::Error for ProtocolMismatchError {}
 
 pub(crate) async fn dial(
     shared: &Arc<Shared>,
     endpoint: &Endpoint,
     peer: EndpointId,
 ) -> Result<()> {
-    let conn = timeout(CONNECT_TIMEOUT, endpoint.connect(peer, SESSION_ALPN))
-        .await
-        .context("timed out connecting")??;
-    let (mut send, mut recv) = conn.open_bi().await?;
-    let hello = our_hello(shared)?;
-    write_frame(&mut send, &Control::Hello(hello.clone())).await?;
-    let remote = read_hello(&mut recv).await?;
-    run(shared, conn, send, recv, remote, hello.screens).await
+    let conn = match timeout(CONNECT_TIMEOUT, endpoint.connect(peer, SESSION_ALPN)).await {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(e)) => {
+            if is_not_paired_connect_err(&e) {
+                report_issue(shared, peer, PeerIssue::NotPaired);
+            }
+            return Err(e.into());
+        }
+        Err(_) => bail!("timed out connecting"),
+    };
+    let handshake = async {
+        let (mut send, mut recv) = conn.open_bi().await?;
+        let hello = our_hello(shared)?;
+        write_frame(&mut send, &Control::Hello(hello.clone())).await?;
+        let remote = read_hello(&mut recv).await?;
+        Ok::<_, anyhow::Error>((send, recv, remote, hello.screens))
+    }
+    .await;
+    let (send, recv, remote, screens) = match handshake {
+        Ok(ok) => ok,
+        Err(e) => {
+            if let Some(mismatch) = e.downcast_ref::<ProtocolMismatchError>() {
+                report_issue(shared, peer, mismatch.0.clone());
+            } else if conn
+                .close_reason()
+                .as_ref()
+                .is_some_and(is_not_paired_close)
+            {
+                report_issue(shared, peer, PeerIssue::NotPaired);
+            }
+            conn.close(0u32.into(), b"handshake failed");
+            return Err(e);
+        }
+    };
+    run(shared, conn, send, recv, remote, screens).await
 }
 
 fn our_hello(shared: &Shared) -> Result<Hello> {
@@ -439,11 +630,12 @@ async fn read_hello(recv: &mut RecvStream) -> Result<Hello> {
         bail!("expected hello, got {msg:?}");
     };
     if hello.protocol != PROTOCOL_VERSION {
-        bail!(
-            "peer speaks protocol {} (Legato {}), we speak {PROTOCOL_VERSION}",
-            hello.protocol,
-            hello.app_version
-        );
+        return Err(ProtocolMismatchError(PeerIssue::ProtocolMismatch {
+            peer_protocol: hello.protocol,
+            peer_version: hello.app_version,
+            our_protocol: PROTOCOL_VERSION,
+        })
+        .into());
     }
     Ok(hello)
 }
@@ -464,6 +656,7 @@ async fn run(
         remote,
         conn: conn.clone(),
         control,
+        datagram_failed: AtomicBool::new(false),
     });
     let events = {
         let mut hub = shared.sessions.lock().unwrap();
@@ -471,9 +664,10 @@ async fn run(
         // Unpairing during the handshake found no session to close: check again here,
         // under the lock `Net::unpair` takes after removing the peer from `allowed`.
         if !shared.allowed.read().unwrap().contains(&peer) {
-            conn.close(0u32.into(), b"unpaired");
+            conn.close(crate::NOT_PAIRED_CODE.into(), b"unpaired");
             bail!("{} was unpaired during the handshake", peer.fmt_short());
         }
+        hub.issues.remove(&peer);
         if let Some(old) = hub.active.insert(peer, session.clone()) {
             old.close();
             // The old session's `run` sees it is no longer active and stays silent, so
@@ -490,8 +684,26 @@ async fn run(
         }
         hub.events.clone()
     };
+    let initial_path = session.path();
     let _ = events.send(SessionEvent::Connected(session.clone()));
 
+    let paths = async {
+        let mut stream = conn.paths_stream();
+        let mut last_kind = initial_path.map(|(k, _)| k);
+        while let Some(list) = stream.next().await {
+            let current = selected_path(&list);
+            let kind = current.map(|(k, _)| k);
+            if kind != last_kind {
+                last_kind = kind;
+                let _ = events.send(SessionEvent::PathChanged {
+                    peer,
+                    path: current,
+                });
+            }
+        }
+        // Let the real stream/datagram branches observe and report connection closure.
+        std::future::pending::<Result<()>>().await
+    };
     let reader = async {
         while let Some(msg) = read_frame::<Control>(&mut recv).await? {
             let _ = events.send(SessionEvent::Control { peer, msg });
@@ -517,12 +729,14 @@ async fn run(
         }
         Ok::<_, anyhow::Error>(())
     };
+    let blob_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_BLOBS));
     let blobs = async {
         loop {
             let recv = conn.accept_uni().await?;
             let events = events.clone();
+            let limit = blob_limit.clone();
             tokio::spawn(async move {
-                if let Err(e) = receive_blob(peer, recv, &events).await {
+                if let Err(e) = receive_blob(peer, recv, &events, limit).await {
                     tracing::debug!("receiving blob failed: {e:#}");
                 }
             });
@@ -552,12 +766,17 @@ async fn run(
         Ok::<_, anyhow::Error>(())
     };
     let result = tokio::select! {
+        r = paths => r,
         r = files => r,
         r = reader => r,
         r = datagrams => r,
         r = writer => r,
         r = blobs => r,
     };
+    let peer_unpaired = conn
+        .close_reason()
+        .as_ref()
+        .is_some_and(is_not_paired_close);
     conn.close(0u32.into(), b"bye");
 
     let still_active = {
@@ -576,11 +795,18 @@ async fn run(
         }
     };
     if still_active {
-        let reason = match &result {
-            Ok(()) => "peer ended the session".to_string(),
-            Err(e) => format!("{e:#}"),
+        let reason = if peer_unpaired {
+            "the other device unpaired this one".to_string()
+        } else {
+            match &result {
+                Ok(()) => "peer ended the session".to_string(),
+                Err(e) => format!("{e:#}"),
+            }
         };
         let _ = events.send(SessionEvent::Disconnected { peer, reason });
+        if peer_unpaired {
+            report_issue(shared, peer, PeerIssue::NotPaired);
+        }
     }
     result
 }
@@ -589,12 +815,17 @@ async fn receive_blob(
     peer: EndpointId,
     mut recv: RecvStream,
     events: &mpsc::UnboundedSender<SessionEvent>,
+    limit: Arc<Semaphore>,
 ) -> Result<()> {
     let mut tag = [0u8; 1];
-    recv.read_exact(&mut tag).await?;
+    timeout(HELLO_TIMEOUT, recv.read_exact(&mut tag))
+        .await
+        .context("timed out reading blob tag")??;
     if tag[0] == legato_proto::blob::VIDEO {
         let mut track = [0u8; 1];
-        recv.read_exact(&mut track).await?;
+        timeout(HELLO_TIMEOUT, recv.read_exact(&mut track))
+            .await
+            .context("timed out reading video track")??;
         let video = Arc::new(IncomingVideo {
             track: track[0],
             recv: tokio::sync::Mutex::new(recv),
@@ -602,14 +833,24 @@ async fn receive_blob(
         let _ = events.send(SessionEvent::Video { peer, video });
         return Ok(());
     }
+    let _permit = timeout(BLOB_TIMEOUT, limit.acquire_owned())
+        .await
+        .context("timed out waiting for blob slot")??;
     let mut len = [0u8; 8];
-    recv.read_exact(&mut len).await?;
+    timeout(HELLO_TIMEOUT, recv.read_exact(&mut len))
+        .await
+        .context("timed out reading blob length")??;
     let len = u64::from_le_bytes(len);
     if len > legato_proto::MAX_BLOB_LEN {
-        recv.stop(1u32.into())?;
+        let _ = recv.stop(1u32.into());
         bail!("blob of {len} bytes is too large");
     }
-    let data = recv.read_to_end(len as usize).await?;
+    let data = timeout(BLOB_TIMEOUT, recv.read_to_end(len as usize))
+        .await
+        .context("timed out reading blob")??;
+    if data.len() as u64 != len {
+        bail!("blob ended early: expected {len} bytes, got {}", data.len());
+    }
     let _ = events.send(SessionEvent::Blob {
         peer,
         tag: tag[0],
@@ -625,6 +866,7 @@ pub(crate) struct Handler(pub(crate) Arc<Shared>);
 impl ProtocolHandler for Handler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let shared = &self.0;
+        let peer = conn.remote_id();
         let hello = match our_hello(shared) {
             Ok(hello) => hello,
             Err(_) => {
@@ -632,15 +874,32 @@ impl ProtocolHandler for Handler {
                 return Ok(());
             }
         };
-        let result = async {
+        let handshake = async {
             let (mut send, mut recv) = timeout(HELLO_TIMEOUT, conn.accept_bi()).await??;
-            let remote = read_hello(&mut recv).await?;
+            // Send our Hello before checking the peer's so both sides can report a
+            // protocol mismatch with the other's app version.
             write_frame(&mut send, &Control::Hello(hello.clone())).await?;
-            run(shared, conn.clone(), send, recv, remote, hello.screens).await
+            match read_hello(&mut recv).await {
+                Ok(remote) => Ok((send, recv, remote)),
+                Err(e) => {
+                    if let Some(mismatch) = e.downcast_ref::<ProtocolMismatchError>() {
+                        report_issue(shared, peer, mismatch.0.clone());
+                        let _ = send.finish();
+                        let _ = timeout(MISMATCH_GRACE, conn.closed()).await;
+                    }
+                    Err(e)
+                }
+            }
         }
         .await;
+        let result = match handshake {
+            Ok((send, recv, remote)) => {
+                run(shared, conn.clone(), send, recv, remote, hello.screens).await
+            }
+            Err(e) => Err(e),
+        };
         if let Err(e) = result {
-            tracing::debug!(peer = %conn.remote_id().fmt_short(), "session ended: {e:#}");
+            tracing::debug!(peer = %peer.fmt_short(), "session ended: {e:#}");
         }
         Ok(())
     }

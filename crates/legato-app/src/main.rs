@@ -268,6 +268,12 @@ impl App {
             .iter()
             .filter_map(|p| p.connection.map(|c| (p.device.id, c)))
             .collect();
+        let issues: HashMap<_, _> = self
+            .model
+            .paired
+            .iter()
+            .filter_map(|p| p.issue.as_ref().map(|i| (p.device.id, i.clone())))
+            .collect();
         self.model.paired = self
             .engine
             .net()
@@ -275,6 +281,7 @@ impl App {
             .into_iter()
             .map(|p| Paired {
                 connection: connections.get(&p.id).copied(),
+                issue: issues.get(&p.id).cloned(),
                 device: Device {
                     id: p.id,
                     name: p.name,
@@ -473,6 +480,14 @@ impl App {
                 match result {
                     Ok(PairOutcome::Paired(peer)) => {
                         self.refresh_paired();
+                        if let Some(p) = self
+                            .model
+                            .paired
+                            .iter_mut()
+                            .find(|p| p.device.id == peer.id)
+                        {
+                            p.issue = None;
+                        }
                         self.notify(format!(
                             "Paired with \"{}\". Arrange it on the Arrangement page.",
                             peer.name
@@ -900,6 +915,7 @@ impl App {
                 if !on {
                     for p in &mut self.model.paired {
                         p.connection = None;
+                        p.issue = None;
                     }
                     self.model.active = None;
                 }
@@ -910,8 +926,21 @@ impl App {
             Status::PeerConnected { id, path, .. } => {
                 if let Some(p) = self.model.paired.iter_mut().find(|p| p.device.id == id) {
                     p.connection = Some(path);
+                    p.issue = None;
                 } else {
                     self.refresh_paired();
+                }
+            }
+            Status::PeerPathChanged { id, path } => {
+                if let Some(p) = self.model.paired.iter_mut().find(|p| p.device.id == id)
+                    && p.connection.is_some()
+                {
+                    p.connection = Some(path);
+                }
+            }
+            Status::PeerIssue { id, issue } => {
+                if let Some(p) = self.model.paired.iter_mut().find(|p| p.device.id == id) {
+                    p.issue = Some(legato_engine::describe_peer_issue(&issue));
                 }
             }
             Status::PeerDisconnected { id, .. } => {

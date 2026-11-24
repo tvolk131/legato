@@ -193,6 +193,9 @@ private struct DeviceRow: View {
             return "\(os) · Connected" + (device.path.map { " · \($0)" } ?? "")
         }
         if model.state.sharing {
+            if let issue = device.issue {
+                return "\(os) · \(issue)"
+            }
             return "\(os) · Not connected. Open Legato there and check that both devices are online."
         }
         return "\(os) · Sharing is off. Turn on Sharing to reconnect."

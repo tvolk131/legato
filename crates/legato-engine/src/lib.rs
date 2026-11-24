@@ -43,6 +43,16 @@ pub enum Status {
         os: Os,
         path: Option<(PathKind, Duration)>,
     },
+    /// A connected peer's selected transport path changed (e.g. relay to direct).
+    PeerPathChanged {
+        id: EndpointId,
+        path: Option<(PathKind, Duration)>,
+    },
+    /// A paired peer couldn't connect for a reason the user can act on.
+    PeerIssue {
+        id: EndpointId,
+        issue: legato_net::PeerIssue,
+    },
     PeerDisconnected {
         id: EndpointId,
         name: String,
@@ -457,6 +467,18 @@ pub fn human_bytes(bytes: u64) -> String {
     unreachable!()
 }
 
+/// Short, actionable text for a paired peer's connection issue, for device rows in the UI.
+pub fn describe_peer_issue(issue: &legato_net::PeerIssue) -> String {
+    match issue {
+        legato_net::PeerIssue::ProtocolMismatch { peer_version, .. } => format!(
+            "Can't connect · Running Legato {peer_version}. Update both devices to the same version."
+        ),
+        legato_net::PeerIssue::NotPaired => {
+            "Unpaired on the other device · Unpair here and pair both devices again.".into()
+        }
+    }
+}
+
 /// Human-readable text for a status event, for logs and the CLI.
 pub fn describe(status: &Status, name_of: impl Fn(&EndpointId) -> String) -> Option<String> {
     Some(match status {
@@ -465,6 +487,29 @@ pub fn describe(status: &Status, name_of: impl Fn(&EndpointId) -> String) -> Opt
         Status::PeerConnected { name, path, .. } => {
             format!("Connected to \"{name}\"{}.", describe_path(*path))
         }
+        Status::PeerPathChanged { id, path } => {
+            let detail = describe_path(*path);
+            if detail.is_empty() {
+                return None;
+            }
+            format!("Connection to \"{}\" is now{detail}.", name_of(id))
+        }
+        Status::PeerIssue { id, issue } => match issue {
+            legato_net::PeerIssue::ProtocolMismatch {
+                peer_protocol,
+                peer_version,
+                our_protocol,
+            } => format!(
+                "\"{}\" is running Legato {peer_version} (protocol {peer_protocol}), while this \
+                 device uses protocol {our_protocol}. Update both to the same version.",
+                name_of(id)
+            ),
+            legato_net::PeerIssue::NotPaired => format!(
+                "\"{}\" no longer recognizes this device. Unpair it here and pair both devices \
+                 again.",
+                name_of(id)
+            ),
+        },
         Status::PeerDisconnected { name, reason, .. } => {
             format!("Disconnected from \"{name}\": {reason}")
         }

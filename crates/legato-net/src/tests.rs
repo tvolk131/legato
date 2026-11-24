@@ -738,3 +738,203 @@ async fn a_replaced_session_is_reported_disconnected_before_the_new_one() {
     assert_quiet(&mut ae, Duration::from_millis(500)).await;
     assert_quiet(&mut be, Duration::from_millis(100)).await;
 }
+
+#[tokio::test]
+async fn protocol_mismatch_is_reported_once_on_both_sides() {
+    let (a, b) = (
+        node("mismatch-a", Os::Windows).await,
+        node("mismatch-b", Os::MacOs).await,
+    );
+    pair(&a, &b, true, true).await;
+    a.remember(b.addr());
+    b.remember(a.addr());
+
+    let mut hello_a = hello(&a);
+    hello_a.protocol = legato_proto::PROTOCOL_VERSION - 1;
+    hello_a.app_version = "0.2.0".into();
+    let mut hello_b = hello(&b);
+    hello_b.protocol = legato_proto::PROTOCOL_VERSION + 1;
+    hello_b.app_version = "0.4.0".into();
+
+    let mut ae = a.start_sessions(hello_a);
+    let mut be = b.start_sessions(hello_b);
+
+    let a_event = timeout(Duration::from_secs(10), ae.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_matches!(
+        a_event,
+        SessionEvent::PeerIssue {
+            peer,
+            issue: PeerIssue::ProtocolMismatch {
+                peer_protocol,
+                ref peer_version,
+                our_protocol,
+            },
+        } if peer == b.id()
+            && peer_protocol == legato_proto::PROTOCOL_VERSION + 1
+            && peer_version == "0.4.0"
+            && our_protocol == legato_proto::PROTOCOL_VERSION
+    );
+
+    let b_event = timeout(Duration::from_secs(10), be.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_matches!(
+        b_event,
+        SessionEvent::PeerIssue {
+            peer,
+            issue: PeerIssue::ProtocolMismatch {
+                peer_protocol,
+                ref peer_version,
+                our_protocol,
+            },
+        } if peer == a.id()
+            && peer_protocol == legato_proto::PROTOCOL_VERSION - 1
+            && peer_version == "0.2.0"
+            && our_protocol == legato_proto::PROTOCOL_VERSION
+    );
+
+    // Subsequent backoff retries do not spam duplicate issues.
+    assert_quiet(&mut ae, Duration::from_millis(2500)).await;
+    assert_quiet(&mut be, Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn one_sided_unpair_reports_not_paired_while_connected_and_when_dialing() {
+    // Part 1: unpairing an active session notifies the remaining peer, regardless of
+    // whether the dialer or the listener unpairs.
+    for dialer_unpairs in [true, false] {
+        let (a, b) = (
+            node("unpair-live-a", Os::Windows).await,
+            node("unpair-live-b", Os::MacOs).await,
+        );
+        let [(mut ae, _), (mut be, _)] = connect(&a, &b).await;
+        let a_is_dialer = a.id().as_bytes() < b.id().as_bytes();
+        let (unpairing, remaining, unpairing_events, remaining_events) =
+            if a_is_dialer == dialer_unpairs {
+                (&a, &b, &mut ae, &mut be)
+            } else {
+                (&b, &a, &mut be, &mut ae)
+            };
+        assert!(unpairing.unpair(&remaining.id()).unwrap());
+
+        assert_matches!(
+            timeout(Duration::from_secs(10), unpairing_events.recv())
+                .await
+                .unwrap(),
+            Some(SessionEvent::Disconnected { peer, .. }) if peer == remaining.id()
+        );
+        assert_quiet(unpairing_events, Duration::from_millis(300)).await;
+
+        assert_matches!(
+            timeout(Duration::from_secs(10), remaining_events.recv())
+                .await
+                .unwrap(),
+            Some(SessionEvent::Disconnected { peer, ref reason })
+                if peer == unpairing.id() && reason.contains("unpaired")
+        );
+        assert_matches!(
+            timeout(Duration::from_secs(5), remaining_events.recv())
+                .await
+                .unwrap(),
+            Some(SessionEvent::PeerIssue {
+                peer,
+                issue: PeerIssue::NotPaired,
+            }) if peer == unpairing.id()
+        );
+    }
+
+    // Part 2: dialing a peer that already unpaired us reports NotPaired once.
+    let (c, d) = (
+        node("unpair-dial-c", Os::Windows).await,
+        node("unpair-dial-d", Os::MacOs).await,
+    );
+    let (dialer, listener) = if c.id().as_bytes() < d.id().as_bytes() {
+        (&c, &d)
+    } else {
+        (&d, &c)
+    };
+    pair(dialer, listener, true, true).await;
+    dialer.remember(listener.addr());
+    assert!(listener.unpair(&dialer.id()).unwrap());
+
+    let _le = listener.start_sessions(hello(listener));
+    let mut de = dialer.start_sessions(hello(dialer));
+    assert_matches!(
+        timeout(Duration::from_secs(10), de.recv()).await.unwrap(),
+        Some(SessionEvent::PeerIssue {
+            peer,
+            issue: PeerIssue::NotPaired,
+        }) if peer == listener.id()
+    );
+    assert_quiet(&mut de, Duration::from_millis(2500)).await;
+}
+
+#[tokio::test]
+async fn remember_wakes_sleeping_dialer_and_unpair_aborts_it() {
+    let (a, b) = (
+        node("wake-a", Os::Windows).await,
+        node("wake-b", Os::MacOs).await,
+    );
+    let (dialer, listener) = if a.id().as_bytes() < b.id().as_bytes() {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    pair(dialer, listener, true, true).await;
+    // Start sessions without knowing listener's address so the dialer fails and enters
+    // backoff sleep (1 s -> 2 s -> 4 s).
+    let mut le = listener.start_sessions(hello(listener));
+    let mut de = dialer.start_sessions(hello(dialer));
+    tokio::time::sleep(Duration::from_millis(3300)).await;
+    // Now the dialer is in its 4-second backoff sleep; learning the address wakes it at once.
+    let started = std::time::Instant::now();
+    dialer.remember(listener.addr());
+    let _s = next_connected(&mut de).await;
+    let _ls = next_connected(&mut le).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "expected instant wake, took {:?}",
+        started.elapsed()
+    );
+
+    // Unpairing aborts and removes the dialer immediately rather than leaving it sleeping.
+    assert!(dialer.unpair(&listener.id()).unwrap());
+    {
+        let hub = dialer.shared.sessions.lock().unwrap();
+        assert!(hub.as_ref().unwrap().dialers.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn truncated_blob_is_rejected_without_dropping_the_session() {
+    let (a, b) = (
+        node("blob-a", Os::Windows).await,
+        node("blob-b", Os::MacOs).await,
+    );
+    let [(_ae, a_session), (mut be, _b_session)] = connect(&a, &b).await;
+
+    // Send a clipboard blob claiming 100 bytes, but finish after only 5 bytes.
+    let mut send = a_session.conn.open_uni().await.unwrap();
+    send.write_all(&[legato_proto::blob::CLIPBOARD])
+        .await
+        .unwrap();
+    send.write_all(&100u64.to_le_bytes()).await.unwrap();
+    send.write_all(b"short").await.unwrap();
+    send.finish().unwrap();
+
+    // The truncated blob must not be delivered, and subsequent valid blobs still arrive.
+    a_session.send_blob(legato_proto::blob::CLIPBOARD, b"complete".to_vec());
+    let event = timeout(Duration::from_secs(5), be.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_matches!(
+        event,
+        SessionEvent::Blob { tag, ref data, .. }
+            if tag == legato_proto::blob::CLIPBOARD && data == b"complete"
+    );
+}

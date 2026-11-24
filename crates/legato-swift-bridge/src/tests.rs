@@ -178,6 +178,7 @@ fn snapshot_fixture_matches_the_swift_contract() {
                 os: Some(os_name(Os::Windows)),
                 connected: true,
                 path: Some("direct · 2 ms".into()),
+                issue: None,
                 active: true,
             },
             Device {
@@ -186,6 +187,7 @@ fn snapshot_fixture_matches_the_swift_contract() {
                 os: Some(os_name(Os::MacOs)),
                 connected: false,
                 path: None,
+                issue: None,
                 active: false,
             },
         ],
@@ -195,6 +197,7 @@ fn snapshot_fixture_matches_the_swift_contract() {
             os: None,
             connected: false,
             path: None,
+            issue: None,
             active: false,
         }],
         pairing: Some(Pairing {
@@ -297,4 +300,91 @@ async fn pairing_requests_are_accepted_only_while_adding_a_device() {
     drop(lock(&state).cancel_pairing());
     drop(theirs);
     refused().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_updates_live_path_and_clears_peer_issues() {
+    use legato_net::{PathKind, PeerIssue};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::start(Some(dir.path().to_path_buf()), "test")
+        .await
+        .unwrap();
+    let state = Shared::default();
+    let peer = legato_net::Store::open(dir.path().join("peer"))
+        .unwrap()
+        .identity()
+        .unwrap()
+        .public();
+
+    // Actionable connection issue is stored on the peer.
+    on_status(
+        &engine,
+        &state,
+        Status::PeerIssue {
+            id: peer,
+            issue: PeerIssue::ProtocolMismatch {
+                peer_protocol: 12,
+                peer_version: "0.3.0-alpha.30".into(),
+                our_protocol: 13,
+            },
+        },
+    );
+    assert!(
+        lock(&state)
+            .peer_issues
+            .get(&peer)
+            .is_some_and(|text| text.contains("0.3.0-alpha.30"))
+    );
+
+    // Connecting clears the issue and records the initial path (e.g. relay).
+    on_status(
+        &engine,
+        &state,
+        Status::PeerConnected {
+            id: peer,
+            name: "PC".into(),
+            os: Os::Windows,
+            path: Some((PathKind::Relay, Duration::from_millis(45))),
+        },
+    );
+    assert!(!lock(&state).peer_issues.contains_key(&peer));
+    assert!(
+        lock(&state)
+            .connections
+            .get(&peer)
+            .and_then(|p| p.as_deref())
+            .is_some_and(|text| text.contains("relay"))
+    );
+
+    // Path upgrade updates the stored path in place.
+    on_status(
+        &engine,
+        &state,
+        Status::PeerPathChanged {
+            id: peer,
+            path: Some((PathKind::Direct, Duration::from_millis(2))),
+        },
+    );
+    assert!(
+        lock(&state)
+            .connections
+            .get(&peer)
+            .and_then(|p| p.as_deref())
+            .is_some_and(|text| text.contains("direct"))
+    );
+
+    // Stopping sharing clears both connections and peer issues.
+    on_status(
+        &engine,
+        &state,
+        Status::PeerIssue {
+            id: peer,
+            issue: PeerIssue::NotPaired,
+        },
+    );
+    on_status(&engine, &state, Status::Sharing(false));
+    assert!(lock(&state).connections.is_empty());
+    assert!(lock(&state).peer_issues.is_empty());
 }

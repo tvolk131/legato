@@ -28,6 +28,8 @@ pub struct Paired {
     pub device: Device,
     /// Connection path while connected.
     pub connection: Option<Option<(PathKind, Duration)>>,
+    /// Actionable reason this peer couldn't connect (cleared on connect or stop).
+    pub issue: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
