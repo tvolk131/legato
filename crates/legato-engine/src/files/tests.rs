@@ -481,26 +481,46 @@ async fn a_source_error_after_one_saved_file_cancels_the_unfinished_batch() {
     let (nodes, sender, mut events) = connected(root.path()).await;
     let source = root.path().join("source");
     fs::create_dir(&source).unwrap();
-    let first = source.join("a.txt");
-    let second = source.join("b.txt");
-    fs::write(&first, "keep me").unwrap();
-    fs::write(&second, "will disappear").unwrap();
+    // Put MAX_CONCURRENT_SENDS + 1 files in the batch so the final file cannot be
+    // opened before at least one in-flight file is saved and acknowledged.
+    let mut paths = Vec::new();
+    for i in 0..=MAX_CONCURRENT_SENDS {
+        let p = source.join(format!("f{i}.txt"));
+        fs::write(&p, format!("keep {i}")).unwrap();
+        paths.push(p);
+    }
+    let doomed = paths.last().unwrap().clone();
     let session = sender.clone();
-    let paths = vec![first, second.clone()];
     let sending = tokio::spawn(async move { send(&session, &paths, FilePurpose::Clipboard).await });
-    let file = match next(&mut events).await {
-        SessionEvent::File { file, .. } => file,
-        e => panic!("{e:?}"),
-    };
-    fs::remove_file(second).unwrap(); // Manifest already made; sender is waiting for this save.
+    // Receive the first pipelined files without acknowledging them yet, then remove the
+    // queued last file before releasing the first slot.
+    let mut initial = Vec::new();
+    for _ in 0..MAX_CONCURRENT_SENDS {
+        let file = match next(&mut events).await {
+            SessionEvent::File { file, .. } => file,
+            e => panic!("{e:?}"),
+        };
+        initial.push(file);
+    }
+    fs::remove_file(&doomed).unwrap();
     let (mut inbox, mut done) = inbox(root.path());
-    inbox.receive(nodes[0].id(), file);
-    let (info, result) = timeout(Duration::from_secs(5), done.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let saved = result.unwrap();
-    assert!(inbox.finished(&info).is_none());
+    let mut saved_paths = Vec::new();
+    for file in initial {
+        inbox.receive(nodes[0].id(), file);
+    }
+    for _ in 0..MAX_CONCURRENT_SENDS {
+        let (info, result) = timeout(Duration::from_secs(5), done.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let Ok(path) = result {
+            saved_paths.push((info, path));
+        }
+    }
+    assert!(!saved_paths.is_empty());
+    for (info, _) in &saved_paths {
+        assert!(inbox.finished(info).is_none());
+    }
     assert!(
         timeout(Duration::from_secs(5), sending)
             .await
@@ -516,11 +536,72 @@ async fn a_source_error_after_one_saved_file_cancels_the_unfinished_batch() {
         e => panic!("{e:?}"),
     }
     assert!(inbox.batches.is_empty());
-    assert_eq!(fs::read_to_string(saved).unwrap(), "keep me");
     assert!(
-        inbox.finished(&info).is_none(),
+        fs::read_to_string(&saved_paths[0].1)
+            .unwrap()
+            .starts_with("keep ")
+    );
+    assert!(
+        inbox.finished(&saved_paths[0].0).is_none(),
         "late completion must not publish a failed clipboard batch"
     );
+    drop(sender);
+    for node in nodes {
+        node.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn folder_sends_pipeline_concurrent_streams_up_to_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let count = MAX_CONCURRENT_SENDS + 3;
+    let mut paths = Vec::new();
+    for i in 0..count {
+        let p = source.join(format!("item-{i:02}.bin"));
+        fs::write(&p, vec![i as u8; 4096]).unwrap();
+        paths.push(p);
+    }
+    let (nodes, sender, mut events) = connected(root.path()).await;
+    let (mut inbox, mut done) = inbox(root.path());
+    let session = sender.clone();
+    let sending = tokio::spawn(async move { send(&session, &paths, FilePurpose::Send).await });
+
+    // All MAX_CONCURRENT_SENDS files must arrive before any of them are acknowledged.
+    let mut wave = Vec::new();
+    for _ in 0..MAX_CONCURRENT_SENDS {
+        match next(&mut events).await {
+            SessionEvent::File { file, .. } => wave.push(file),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(
+        timeout(Duration::from_millis(150), events.recv())
+            .await
+            .is_err(),
+        "sender must cap concurrent streams to MAX_CONCURRENT_SENDS"
+    );
+
+    for file in wave {
+        inbox.receive(nodes[0].id(), file);
+    }
+    let mut received = None;
+    let mut remaining_events = count - MAX_CONCURRENT_SENDS;
+    while received.is_none() {
+        tokio::select! {
+            Some(SessionEvent::File { file, .. }) = events.recv(), if remaining_events > 0 => {
+                remaining_events -= 1;
+                inbox.receive(nodes[0].id(), file);
+            }
+            Some((info, saved)) = done.recv() => {
+                saved.unwrap();
+                received = inbox.finished(&info);
+            }
+        }
+    }
+    assert_eq!(sending.await.unwrap().unwrap(), (count * 4096) as u64);
+    assert_eq!(received.unwrap().paths.len(), count);
     drop(sender);
     for node in nodes {
         node.shutdown().await;

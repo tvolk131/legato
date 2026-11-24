@@ -328,22 +328,36 @@ fn the_mac_streams_what_was_asked_within_what_it_can_encode() {
         fps: 144,
         bitrate: 40_000_000,
     };
-    let c = super::host::stream_config(request);
+    let c = super::host::stream_config(request, false);
     assert_eq!((c.stream_width, c.stream_height), (3840, 2160));
     assert_eq!(c.moving, Some((1920, 1080)));
     assert_eq!((c.refresh, c.fps, c.sharp_fps), (144, 144, 60));
+    assert_eq!(c.bitrate, 40_000_000);
+    // 1080p @ 144 fps is 60% of 4K @ 60 fps pixel throughput -> 24 Mbps.
+    assert_eq!(c.moving_bitrate, 24_000_000);
+    // Over a relay, sharp caps at RELAY_MAX_BITRATE and moving scales from it.
+    let relayed = super::host::stream_config(request, true);
+    assert_eq!(relayed.bitrate, legato_core::extend::RELAY_MAX_BITRATE);
+    assert_eq!(relayed.moving_bitrate, 7_200_000);
     // A moving size no smaller than the stream is no moving track at all.
-    let c = super::host::stream_config(legato_proto::ExtendRequest {
-        stream_width: 1920,
-        stream_height: 1080,
-        ..request
-    });
+    let c = super::host::stream_config(
+        legato_proto::ExtendRequest {
+            stream_width: 1920,
+            stream_height: 1080,
+            ..request
+        },
+        false,
+    );
     assert_eq!((c.moving, c.fps), (None, 144));
-    let c = super::host::stream_config(legato_proto::ExtendRequest {
-        moving_width: 0,
-        moving_height: 0,
-        ..request
-    });
+    assert_eq!(c.bitrate, 40_000_000);
+    let c = super::host::stream_config(
+        legato_proto::ExtendRequest {
+            moving_width: 0,
+            moving_height: 0,
+            ..request
+        },
+        false,
+    );
     assert_eq!((c.moving, c.refresh, c.fps), (None, 144, 60));
 }
 

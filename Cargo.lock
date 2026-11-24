@@ -3175,6 +3175,7 @@ dependencies = [
  "legato-proto",
  "legato-screen",
  "legato-windows",
+ "n0-future",
  "objc2-core-foundation",
  "png 0.18.1",
  "postcard",

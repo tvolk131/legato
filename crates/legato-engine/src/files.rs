@@ -12,11 +12,18 @@ use std::{fs, io};
 use anyhow::{Context, Result, bail};
 use legato_net::{EndpointId, IncomingFile, Session};
 use legato_proto::{FileHeader, FilePurpose};
-use tokio::io::AsyncWriteExt;
+use n0_future::BufferedStreamExt;
+use n0_future::stream::{self, StreamExt};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::{mpsc, watch};
 
 /// The most sent in one go through the clipboard (explicit sends have no limit).
 pub const MAX_CLIPBOARD_BATCH: u64 = 512 * 1024 * 1024;
+/// Buffer size for coalescing async filesystem writes on received files.
+const FILE_BUFFER_SIZE: usize = 256 * 1024;
+/// How many file streams a batch pipelines concurrently so small-file folders are
+/// not stalled on one save-ACK round trip per file.
+pub(crate) const MAX_CONCURRENT_SENDS: usize = 4;
 
 /// A finished batch of received files.
 #[derive(Debug, Clone, PartialEq)]
@@ -356,7 +363,10 @@ async fn save(
 ) -> Result<()> {
     if let Some(handle) = destination.file {
         // Use the exclusively reserved handle; never reopen/truncate a shared path.
-        let mut out = tokio::fs::File::from_std(handle);
+        let cap = file.header.size.map_or(FILE_BUFFER_SIZE, |s| {
+            FILE_BUFFER_SIZE.min(s.max(1) as usize)
+        });
+        let mut out = BufWriter::with_capacity(cap, tokio::fs::File::from_std(handle));
         let result = receive_into(file, &mut out, cancel).await;
         drop(out);
         if result.is_err() {
@@ -480,24 +490,32 @@ pub async fn send(session: &Session, paths: &[PathBuf], purpose: FilePurpose) ->
         complete: false,
     };
     let mut total = 0;
-    for (index, (path, name, size)) in files.into_iter().enumerate() {
-        let header = FileHeader {
-            batch,
-            name,
-            size,
-            count,
-            index: index as u32,
-            purpose,
-        };
-        if let Some(size) = size {
-            let mut file = tokio::fs::File::open(&path)
-                .await
-                .with_context(|| format!("opening {}", path.display()))?;
-            session.send_file(header, &mut file).await?;
-            total += size;
-        } else {
-            session.send_file(header, &mut tokio::io::empty()).await?;
-        }
+    let mut sends = std::pin::pin!(
+        stream::iter(files.into_iter().enumerate())
+            .map(|(index, (path, name, size))| async move {
+                let header = FileHeader {
+                    batch,
+                    name,
+                    size,
+                    count,
+                    index: index as u32,
+                    purpose,
+                };
+                if let Some(size) = size {
+                    let mut file = tokio::fs::File::open(&path)
+                        .await
+                        .with_context(|| format!("opening {}", path.display()))?;
+                    session.send_file(header, &mut file).await?;
+                    Ok::<u64, anyhow::Error>(size)
+                } else {
+                    session.send_file(header, &mut tokio::io::empty()).await?;
+                    Ok(0)
+                }
+            })
+            .buffered_unordered(MAX_CONCURRENT_SENDS)
+    );
+    while let Some(bytes) = sends.next().await {
+        total += bytes?;
     }
     pending.complete = true;
     Ok(total)

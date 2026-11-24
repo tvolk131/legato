@@ -326,7 +326,7 @@ mod host {
     use std::time::Duration;
 
     use anyhow::Result;
-    use legato_net::{EndpointId, Session, VideoFrame, VideoSender};
+    use legato_net::{EndpointId, PathKind, Session, VideoFrame, VideoSender};
     use legato_proto::{Control, ExtendRequest, Rect, video_track};
     use legato_screen::mac::{DisplayStream, StreamConfig};
 
@@ -336,20 +336,23 @@ mod host {
         Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height)
     }
 
-    fn log_config(what: &str, c: StreamConfig) {
+    fn log_config(what: &str, c: StreamConfig, relayed: bool) {
         let moving = c.moving.map_or(String::new(), |(w, h)| {
             format!(
-                ", {w}x{h} while moving (sharp at up to {} fps)",
+                ", {w}x{h} while moving ({:.1} Mbps, sharp at up to {} fps)",
+                f64::from(c.moving_bitrate) / 1e6,
                 c.sharp_fps
             )
         });
+        let path = if relayed { " [relayed]" } else { "" };
         tracing::info!(
-            "{what}: {}x{}, sent at {}x{} and {} fps{moving}",
+            "{what}: {}x{}, sent at {}x{} and {} fps ({:.1} Mbps{path}){moving}",
             c.width,
             c.height,
             c.stream_width,
             c.stream_height,
-            c.fps
+            c.fps,
+            f64::from(c.bitrate) / 1e6
         );
     }
 
@@ -357,14 +360,17 @@ mod host {
     pub(crate) struct Host {
         pub(crate) peer: EndpointId,
         generation: u64,
+        request: ExtendRequest,
+        relayed: bool,
         session: Arc<Session>,
         stream: Arc<DisplayStream>,
         tasks: Vec<tokio::task::JoinHandle<()>>,
     }
 
-    /// What the stream should be for `request`, within what the Mac can encode.
-    pub(super) fn stream_config(request: ExtendRequest) -> StreamConfig {
-        use legato_core::extend::{fit_within, max_fps, usable_size};
+    /// What the stream should be for `request`, within what the Mac can encode and
+    /// adapted to whether the session currently travels via a relay.
+    pub(super) fn stream_config(request: ExtendRequest, relayed: bool) -> StreamConfig {
+        use legato_core::extend::{fit_within, max_fps, track_bitrates, usable_size};
         let (width, height) = usable_size(request.width, request.height);
         let stream = if request.stream_width == 0 {
             (width, height)
@@ -384,6 +390,19 @@ mod host {
             .filter(|&moving| moving != stream);
         // Encoding sets the pace, at the size sent while things move.
         let pace = moving.unwrap_or(stream);
+        let fps = request.fps.clamp(1, max_fps(pace.0, pace.1));
+        let sharp_fps = max_fps(stream.0, stream.1);
+        let (bitrate, moving_bitrate) = track_bitrates(
+            request.bitrate,
+            stream,
+            if moving.is_some() {
+                sharp_fps.clamp(1, fps.max(1))
+            } else {
+                fps
+            },
+            moving.map(|size| (size, fps)),
+            relayed,
+        );
         StreamConfig {
             width,
             height,
@@ -394,9 +413,10 @@ mod host {
             refresh: request
                 .fps
                 .clamp(1, *legato_core::extend::FRAME_RATES.last().unwrap_or(&60)),
-            fps: request.fps.clamp(1, max_fps(pace.0, pace.1)),
-            sharp_fps: max_fps(stream.0, stream.1),
-            bitrate: request.bitrate.clamp(1_000_000, 200_000_000),
+            fps,
+            sharp_fps,
+            bitrate,
+            moving_bitrate: moving_bitrate.unwrap_or(bitrate),
         }
     }
 
@@ -456,7 +476,8 @@ mod host {
         ) -> Result<Self> {
             let (sharp_tx, sharp_rx) = queue::channel();
             let (moving_tx, moving_rx) = queue::channel();
-            let config = stream_config(request);
+            let relayed = matches!(session.path(), Some((PathKind::Relay, _)));
+            let config = stream_config(request, relayed);
             let stream = tokio::task::spawn_blocking(move || {
                 DisplayStream::start(&name, config, move |frame| {
                     if frame.track == video_track::MOVING {
@@ -470,7 +491,7 @@ mod host {
             let stream = Arc::new(stream);
             let mut bounds = to_rect(stream.display().bounds());
             session.send(Control::Extended { generation, bounds });
-            log_config("showing an extra display", config);
+            log_config("showing an extra display", config, relayed);
             let mut tasks = vec![
                 tokio::spawn({
                     let session = session.clone();
@@ -518,10 +539,32 @@ mod host {
             Ok(Self {
                 peer: session.peer,
                 generation,
+                request,
+                relayed,
                 session,
                 stream,
                 tasks,
             })
+        }
+
+        /// Adjusts encoder bitrates live when the transport switches between direct and
+        /// relayed paths.
+        pub(crate) async fn set_relayed(&mut self, relayed: bool) {
+            if self.relayed == relayed {
+                return;
+            }
+            self.relayed = relayed;
+            let config = stream_config(self.request, relayed);
+            let stream = self.stream.clone();
+            match tokio::task::spawn_blocking(move || {
+                stream.set_bitrates(config.bitrate, config.moving_bitrate)
+            })
+            .await
+            {
+                Ok(Ok(())) => log_config("extra display bitrate updated", config, relayed),
+                Ok(Err(e)) => tracing::warn!("couldn't update extra display bitrate: {e:#}"),
+                Err(e) => tracing::warn!("couldn't update extra display bitrate: {e}"),
+            }
         }
 
         pub(crate) fn request_keyframe(&self, track: u8) {
@@ -549,12 +592,13 @@ mod host {
         }
 
         /// Changes the display's size or frame rate, as the viewer asked.
-        pub(crate) async fn reconfigure(&self, request: ExtendRequest) {
-            let config = stream_config(request);
+        pub(crate) async fn reconfigure(&mut self, request: ExtendRequest) {
+            self.request = request;
+            let config = stream_config(request, self.relayed);
             let stream = self.stream.clone();
             match tokio::task::spawn_blocking(move || stream.reconfigure(config)).await {
                 Ok(Ok(())) => {
-                    log_config("extra display changed", config);
+                    log_config("extra display changed", config, self.relayed);
                     self.report_bounds();
                 }
                 Ok(Err(e)) => tracing::warn!("couldn't resize the extra display: {e:#}"),
