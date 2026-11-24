@@ -36,9 +36,13 @@ pub mod store;
 pub use iroh::EndpointId;
 pub use pairing::{PairAttempt, PairOutcome, PeerInfo};
 pub use session::{
-    IncomingFile, IncomingVideo, PathKind, Session, SessionEvent, VideoFrame, VideoSender,
+    IncomingFile, IncomingVideo, PathKind, PeerIssue, Session, SessionEvent, VideoFrame,
+    VideoSender,
 };
 pub use store::{PairedPeer, Store};
+
+/// QUIC application error code used when rejecting or closing a session for an unpaired peer.
+pub(crate) const NOT_PAIRED_CODE: u32 = 403;
 
 /// mDNS service name; only Legato instances see each other.
 const MDNS_SERVICE: &str = "legato";
@@ -130,7 +134,7 @@ impl EndpointHooks for PairedOnly {
             AfterHandshakeOutcome::Accept
         } else {
             AfterHandshakeOutcome::Reject {
-                error_code: 403u32.into(),
+                error_code: NOT_PAIRED_CODE.into(),
                 reason: b"not paired".to_vec(),
             }
         }
@@ -204,6 +208,13 @@ impl Net {
         if config.relays {
             tokio::spawn(log_relay_status(endpoint.clone()));
         }
+        if let Some(mdns) = &mdns {
+            tokio::spawn(wake_dialers_on_mdns(
+                mdns.clone(),
+                shared.clone(),
+                endpoint.clone(),
+            ));
+        }
         endpoint.set_user_data_for_address_lookup(advert(&config).parse().ok());
 
         let router = Router::builder(endpoint.clone())
@@ -222,7 +233,11 @@ impl Net {
 
     /// Remembers where a peer can be reached, for when discovery can't find it.
     pub fn remember(&self, addr: EndpointAddr) {
+        let id = addr.id;
         self.memory.add_endpoint_info(addr);
+        if let Some(hub) = self.shared.sessions.lock().unwrap().as_ref() {
+            hub.wake_peer(&id);
+        }
     }
 
     pub fn id(&self) -> EndpointId {
@@ -254,8 +269,8 @@ impl Net {
     pub fn unpair(&self, id: &EndpointId) -> Result<bool> {
         let removed = self.shared.store.remove_peer(id)?;
         self.shared.allowed.write().unwrap().remove(id);
-        if let Some(hub) = self.shared.sessions.lock().unwrap().as_ref() {
-            hub.close(id);
+        if let Some(hub) = self.shared.sessions.lock().unwrap().as_mut() {
+            hub.unpair(id);
         }
         Ok(removed)
     }
@@ -401,6 +416,34 @@ async fn log_relay_status(endpoint: Endpoint) {
             updated = relays.updated() => {
                 if updated.is_err() {
                     return;
+                }
+            }
+        }
+    }
+}
+
+/// Wakes a sleeping dial loop as soon as a paired peer appears on the local network.
+async fn wake_dialers_on_mdns(mdns: MdnsAddressLookup, shared: Arc<Shared>, endpoint: Endpoint) {
+    let own = endpoint.id();
+    let mut events = mdns.subscribe().await;
+    let closed = endpoint.closed();
+    tokio::pin!(closed);
+    loop {
+        tokio::select! {
+            _ = &mut closed => return,
+            event = events.next() => {
+                let Some(event) = event else { return };
+                if let DiscoveryEvent::Discovered { endpoint_info, .. } = event {
+                    let id = endpoint_info.endpoint_id;
+                    if id != own
+                        && endpoint_info
+                            .user_data()
+                            .is_some_and(|u| parse_advert(u.as_ref()).is_some())
+                        && shared.allowed.read().unwrap().contains(&id)
+                        && let Some(hub) = shared.sessions.lock().unwrap().as_ref()
+                    {
+                        hub.wake_peer(&id);
+                    }
                 }
             }
         }

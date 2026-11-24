@@ -19,6 +19,8 @@ struct Device: Decodable, Identifiable, Equatable {
     var connected = false
     /// How it's connected, e.g. "direct · 2 ms".
     var path: String?
+    /// Actionable reason this device couldn't connect, when disconnected.
+    var issue: String?
     /// Input is flowing between this Mac and the device.
     var active = false
 }

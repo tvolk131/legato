@@ -477,6 +477,14 @@ pub(crate) async fn run(
                         layout_now = relayout(&local, &peers, &config, &ctx);
                         arrange(&mut viewing, viewer_window, &layout_now, &ids);
                     }
+                    SessionEvent::PathChanged { peer, path } => {
+                        if by_peer.read().unwrap().contains_key(&peer) {
+                            ctx.status(Status::PeerPathChanged { id: peer, path });
+                        }
+                    }
+                    SessionEvent::PeerIssue { peer, issue } => {
+                        ctx.status(Status::PeerIssue { id: peer, issue });
+                    }
                     SessionEvent::Control { peer, msg } => {
                         let Some(&machine) = ids.get(&peer) else { continue };
                         match msg {
@@ -642,9 +650,11 @@ pub(crate) async fn run(
                     SessionEvent::Blob { tag, data, .. } => {
                         if tag == blob::CLIPBOARD
                             && let Some(clipboard) = &clipboard
-                            && let Ok(content) = postcard::from_bytes::<ClipboardContent>(&data)
                         {
-                            clipboard.set(content);
+                            match postcard::from_bytes::<ClipboardContent>(&data) {
+                                Ok(content) => clipboard.set(content),
+                                Err(e) => tracing::debug!("ignoring malformed clipboard blob: {e}"),
+                            }
                         }
                     }
                     SessionEvent::File { peer, file } => {

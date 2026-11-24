@@ -93,6 +93,9 @@ pub struct Device {
     pub connected: bool,
     /// How it's connected, e.g. "direct · 2 ms".
     pub path: Option<String>,
+    /// Actionable reason this device couldn't connect, when disconnected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
     /// This device's input is driving it, or its input is driving this device.
     pub active: bool,
 }
@@ -215,7 +218,8 @@ enum Command {
 
 #[derive(Default)]
 struct State {
-    connections: HashMap<EndpointId, String>,
+    connections: HashMap<EndpointId, Option<String>>,
+    peer_issues: HashMap<EndpointId, String>,
     nearby: HashMap<EndpointId, Nearby>,
     placed_us: HashMap<EndpointId, Point>,
     active: Option<EndpointId>,
@@ -349,6 +353,12 @@ fn init_logging() {
 
 // ---- Engine events ----
 
+fn format_path(path: Option<(legato_net::PathKind, std::time::Duration)>) -> Option<String> {
+    let text = legato_engine::describe_path(path);
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn on_status(engine: &Engine, state: &Shared, status: Status) {
     if let Some(text) = legato_engine::describe(&status, |id| name_of(engine, id)) {
         tracing::info!("{text}");
@@ -358,12 +368,22 @@ fn on_status(engine: &Engine, state: &Shared, status: Status) {
         Status::Sharing(on) => {
             if !on {
                 s.connections.clear();
+                s.peer_issues.clear();
                 s.active = None;
             }
         }
         Status::PeerConnected { id, path, .. } => {
-            s.connections
-                .insert(id, legato_engine::describe_path(path).trim().to_string());
+            s.connections.insert(id, format_path(path));
+            s.peer_issues.remove(&id);
+        }
+        Status::PeerPathChanged { id, path } => {
+            if let Some(entry) = s.connections.get_mut(&id) {
+                *entry = format_path(path);
+            }
+        }
+        Status::PeerIssue { id, issue } => {
+            s.peer_issues
+                .insert(id, legato_engine::describe_peer_issue(&issue));
         }
         Status::PeerDisconnected { id, .. } => {
             s.connections.remove(&id);
@@ -653,6 +673,7 @@ fn snapshot(engine: &Engine, state: &State) -> Snapshot {
             os: n.os.map(os_name),
             connected: false,
             path: None,
+            issue: None,
             active: false,
         })
         .collect();
@@ -673,7 +694,8 @@ fn snapshot(engine: &Engine, state: &State) -> Snapshot {
                 name: p.name.clone(),
                 os: Some(os_name(p.os)),
                 connected: state.connections.contains_key(&p.id),
-                path: state.connections.get(&p.id).cloned(),
+                path: state.connections.get(&p.id).cloned().flatten(),
+                issue: state.peer_issues.get(&p.id).cloned(),
                 active: state.active == Some(p.id),
             })
             .collect(),
@@ -829,6 +851,7 @@ fn command(command: Command, engine: Arc<Engine>, state: Shared) -> Result<()> {
                 state.pairing_task = None;
                 match result {
                     Ok(PairOutcome::Paired(p)) => {
+                        state.peer_issues.remove(&p.id);
                         state.notify(format!(
                             "Paired with \"{}\". Arrange its displays to start sharing.",
                             p.name
@@ -857,6 +880,7 @@ fn command(command: Command, engine: Arc<Engine>, state: Shared) -> Result<()> {
             {
                 let mut s = lock(&state);
                 s.connections.remove(&id);
+                s.peer_issues.remove(&id);
                 if s.active == Some(id) {
                     s.active = None;
                 }

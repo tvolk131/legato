@@ -269,10 +269,10 @@ fn devices(m: &Model, width: f32) -> Element<'_, Message> {
                     format!("Connected via relay · {:.0} ms", rtt.as_secs_f64() * 1000.0)
                 }
                 (Some(None), false) => "Connected".to_string(),
-                (None, _) if m.sharing => {
+                (None, _) if m.sharing => p.issue.clone().unwrap_or_else(|| {
                     "Not connected · Open Legato there and check that both devices are online."
                         .to_string()
-                }
+                }),
                 (None, _) => "Sharing is off · Turn on Sharing to reconnect.".to_string(),
             };
             let send = button("Send files…").variant(ButtonVariant::Tonal);

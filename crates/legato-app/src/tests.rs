@@ -80,6 +80,7 @@ fn model(page: Page) -> Model {
         paired: vec![Paired {
             device: mac,
             connection: Some(Some((PathKind::Direct, Duration::from_millis(2)))),
+            issue: None,
         }],
         nearby: vec![Device {
             id: id(4),
@@ -687,6 +688,7 @@ fn controller_picker_scales_and_preserves_saved_prefixes() {
             os: Some(Os::Windows),
         },
         connection: None,
+        issue: None,
     }));
     m.config.control.controller = Some(m.paired[0].device.id.to_string()[..12].into());
     let mut ui = sized_simulator((640.0, 480.0), crate::view::root(&m));
@@ -1307,4 +1309,36 @@ async fn cursor_watch_wakes_a_stationary_viewer_and_notifications_carry_no_stale
         Some(Message::ViewerCursorChanged)
     ));
     assert_eq!(*rx.borrow(), Arrow);
+}
+
+#[test]
+fn devices_page_shows_peer_issue_and_live_path_status() {
+    let mut m = model(Page::Devices);
+    m.paired[0].connection = None;
+    m.paired[0].issue = Some(legato_engine::describe_peer_issue(
+        &legato_net::PeerIssue::NotPaired,
+    ));
+    {
+        let mut ui = simulator(crate::view::root(&m));
+        assert!(
+            ui.find(
+                "macOS · Unpaired on the other device · Unpair here and pair both devices again."
+            )
+            .is_ok(),
+            "expected peer issue on Devices page"
+        );
+    }
+
+    m.paired[0].issue = None;
+    m.paired[0].connection = Some(Some((PathKind::Relay, Duration::from_millis(42))));
+    {
+        let mut ui = simulator(crate::view::root(&m));
+        assert!(ui.find("macOS · Connected via relay · 42 ms").is_ok());
+    }
+
+    m.paired[0].connection = Some(Some((PathKind::Direct, Duration::from_millis(2))));
+    {
+        let mut ui = simulator(crate::view::root(&m));
+        assert!(ui.find("macOS · Connected · 2 ms").is_ok());
+    }
 }
