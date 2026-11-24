@@ -387,12 +387,18 @@ impl Hub {
     }
 
     pub(crate) fn unpair(&mut self, peer: &EndpointId) {
+        self.issues.remove(peer);
+        if let Some(session) = self.active.remove(peer) {
+            session.close_with(crate::NOT_PAIRED_CODE, b"unpaired");
+            // Report the disconnect here before aborting any dialer task (which runs
+            // `run()` for outbound sessions) so the engine always releases held input.
+            let _ = self.events.send(SessionEvent::Disconnected {
+                peer: *peer,
+                reason: "unpaired".into(),
+            });
+        }
         if let Some(dialer) = self.dialers.remove(peer) {
             dialer.task.abort();
-        }
-        self.issues.remove(peer);
-        if let Some(session) = self.active.get(peer) {
-            session.close_with(crate::NOT_PAIRED_CODE, b"unpaired");
         }
     }
 

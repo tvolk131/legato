@@ -804,32 +804,48 @@ async fn protocol_mismatch_is_reported_once_on_both_sides() {
 
 #[tokio::test]
 async fn one_sided_unpair_reports_not_paired_while_connected_and_when_dialing() {
-    // Part 1: unpairing an active session notifies the remaining peer.
-    let (a, b) = (
-        node("unpair-live-a", Os::Windows).await,
-        node("unpair-live-b", Os::MacOs).await,
-    );
-    let [(mut ae, _), (mut be, _)] = connect(&a, &b).await;
-    assert!(a.unpair(&b.id()).unwrap());
+    // Part 1: unpairing an active session notifies the remaining peer, regardless of
+    // whether the dialer or the listener unpairs.
+    for dialer_unpairs in [true, false] {
+        let (a, b) = (
+            node("unpair-live-a", Os::Windows).await,
+            node("unpair-live-b", Os::MacOs).await,
+        );
+        let [(mut ae, _), (mut be, _)] = connect(&a, &b).await;
+        let a_is_dialer = a.id().as_bytes() < b.id().as_bytes();
+        let (unpairing, remaining, unpairing_events, remaining_events) =
+            if a_is_dialer == dialer_unpairs {
+                (&a, &b, &mut ae, &mut be)
+            } else {
+                (&b, &a, &mut be, &mut ae)
+            };
+        assert!(unpairing.unpair(&remaining.id()).unwrap());
 
-    assert_matches!(
-        timeout(Duration::from_secs(10), ae.recv()).await.unwrap(),
-        Some(SessionEvent::Disconnected { peer, .. }) if peer == b.id()
-    );
-    assert_quiet(&mut ae, Duration::from_millis(300)).await;
+        assert_matches!(
+            timeout(Duration::from_secs(10), unpairing_events.recv())
+                .await
+                .unwrap(),
+            Some(SessionEvent::Disconnected { peer, .. }) if peer == remaining.id()
+        );
+        assert_quiet(unpairing_events, Duration::from_millis(300)).await;
 
-    assert_matches!(
-        timeout(Duration::from_secs(10), be.recv()).await.unwrap(),
-        Some(SessionEvent::Disconnected { peer, ref reason })
-            if peer == a.id() && reason.contains("unpaired")
-    );
-    assert_matches!(
-        timeout(Duration::from_secs(5), be.recv()).await.unwrap(),
-        Some(SessionEvent::PeerIssue {
-            peer,
-            issue: PeerIssue::NotPaired,
-        }) if peer == a.id()
-    );
+        assert_matches!(
+            timeout(Duration::from_secs(10), remaining_events.recv())
+                .await
+                .unwrap(),
+            Some(SessionEvent::Disconnected { peer, ref reason })
+                if peer == unpairing.id() && reason.contains("unpaired")
+        );
+        assert_matches!(
+            timeout(Duration::from_secs(5), remaining_events.recv())
+                .await
+                .unwrap(),
+            Some(SessionEvent::PeerIssue {
+                peer,
+                issue: PeerIssue::NotPaired,
+            }) if peer == unpairing.id()
+        );
+    }
 
     // Part 2: dialing a peer that already unpaired us reports NotPaired once.
     let (c, d) = (
